@@ -1,0 +1,39 @@
+{
+  "name": "brain",
+  "version": "0.1.0",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "brain": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run test/unit",
+    "test:int": "vitest run test/integration",
+    "db:start": "supabase start",
+    "db:reset": "supabase db reset"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "type": "module",
+  "private": "true",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "commander": "^14.0.3",
+    "dotenv": "^18.0.4",
+    "html-to-text": "^10.0.1",
+    "postgres": "^3.4.9",
+    "unpdf": "^1.7.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
