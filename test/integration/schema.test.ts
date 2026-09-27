@@ -25,4 +25,30 @@ describe("core schema", () => {
       insert into brain.chunks (document_id, level, ordinal, content, token_count, char_start, char_end)
       values (gen_random_uuid(), 2, 0, 'x', 1, 0, 1)`).rejects.toThrow();
   });
+
+  it("seeds the node and edge type registries", async () => {
+    const [{ n: nodeTypes }] = await sql<{ n: string }[]>`select count(*)::text as n from brain.node_types`;
+    const [{ n: edgeTypes }] = await sql<{ n: string }[]>`select count(*)::text as n from brain.edge_types`;
+    expect(Number(nodeTypes)).toBe(7);
+    expect(Number(edgeTypes)).toBe(11);
+  });
+
+  it("has exactly one self node and refuses a second", async () => {
+    const selves = await sql`select id from brain.nodes where is_self`;
+    expect(selves.length).toBe(1);
+    await expect(sql`
+      insert into brain.nodes (type, name, canonical_name, is_self)
+      values ('person', 'Impostor', 'impostor', true)`).rejects.toThrow();
+  });
+
+  it("does not duplicate an edge re-extracted from the same evidence", async () => {
+    const [a] = await sql<{ id: string }[]>`
+      insert into brain.nodes (type, name, canonical_name) values ('organization', 'Acme', 'acme') returning id`;
+    const [b] = await sql<{ id: string }[]>`
+      insert into brain.nodes (type, name, canonical_name) values ('place', 'Austin', 'austin') returning id`;
+    await sql`insert into brain.edges (from_node, to_node, type) values (${a.id}, ${b.id}, 'located_in')`;
+    await expect(sql`
+      insert into brain.edges (from_node, to_node, type) values (${a.id}, ${b.id}, 'located_in')`).rejects.toThrow();
+    await sql`delete from brain.nodes where id in (${a.id}, ${b.id})`;
+  });
 });
