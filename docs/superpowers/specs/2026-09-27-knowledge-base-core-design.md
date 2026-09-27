@@ -26,7 +26,7 @@ The design goal is stated as two guarantees, and every decision below serves one
 | Node modeling | One `nodes` table typed by a registry, JSONB properties | New types are registry rows, not migrations; one ID space for edges and mentions |
 | Embeddings | Voyage AI `voyage-4-large`, 1024 dimensions, `input_type` query/document | Anthropic's recommended embedding partner; 32k context |
 | Reranker | Voyage `rerank-2.5` (config-switchable to `rerank-3`) | GA model; preview model left as an option |
-| Extraction and summaries | Claude `claude-opus-5` via `@anthropic-ai/sdk`, structured outputs; Message Batches for backfill | Default model per current guidance; batches halve backfill cost |
+| Extraction, summaries, answers | Claude Code headless (`claude -p --json-schema`) on Frank's Max subscription by default; `@anthropic-ai/sdk` with `claude-opus-5` as an optional backend (`BRAIN_LLM=api`); Message Batches backfill is API-only | No per-token bill for normal use; the API path stays for bulk backfill or CI |
 | Local dev | `supabase start` (Docker) for a real Postgres with pgvector; migrations in `supabase/migrations` | Tests run against the real engine; `supabase db push` promotes to cloud |
 | Document kind vs node type | Document kind is metadata on the document; never a node type | A job description is a document; the company it names is an organization node |
 
@@ -240,3 +240,5 @@ Listed so they are not forgotten, each gets its own spec:
 - Rerank threshold for the fallback: start at 0.3 on Voyage's relevance score, tune on the golden set.
 - PDF extraction library: `pdf-parse` or `unpdf`; pick whichever handles the fixture PDFs correctly.
 - Repo remote: `gh` is not installed on this machine; Frank creates the GitHub remote and the plan includes the `git remote add` step.
+- Claude Code backend limits: the Max plan has rolling usage windows. Ingesting a few hundred documents fits; thousands at once will hit the window, and `brain retry` resumes when it opens. For a large one-time import, set `BRAIN_LLM=api` and use `brain backfill`.
+- The Claude Code backend calls the official `claude` binary only. The subscription token is never extracted for use with the SDK.

@@ -6,7 +6,7 @@
 
 **Architecture:** Supabase Postgres (pgvector + full-text search) holds four layers: documents and chunks (recall), nodes/edges/mentions (graph), facts (always-loaded), and operations tables. A resumable six-stage ingestion pipeline (store, chunk, summarize, embed, extract, resolve) fills them. One `search()` entry point fuses vector and keyword hits, reranks, expands through the graph, and falls back to a raw substring scan. External services (Claude for summaries and extraction, Voyage for embeddings and reranking) sit behind small interfaces so every stage is testable with fakes.
 
-**Tech Stack:** TypeScript (Node 20, ESM), postgres.js, Supabase CLI with local Docker Postgres, `@anthropic-ai/sdk` with Zod structured outputs, Voyage AI REST API via fetch, commander, vitest, tsx.
+**Tech Stack:** TypeScript (Node 20, ESM), postgres.js, Supabase CLI with local Docker Postgres, Claude Code headless (`claude -p`) as the default model backend with `@anthropic-ai/sdk` as an alternative, Zod, Voyage AI REST API via fetch, commander, vitest, tsx.
 
 **Spec:** `docs/superpowers/specs/2026-09-27-knowledge-base-core-design.md`
 
@@ -34,6 +34,7 @@ brain/
       normalize.ts                               canonicalName, estimateTokens, squashWhitespace
     llm/
       llm.ts                                     Llm interface, AnthropicLlm, FakeLlm
+      claude-code.ts                             ClaudeCodeLlm: runs the claude binary headless on the Max plan
       voyage.ts                                  Embedder + Reranker interfaces, VoyageClient, FakeEmbedder, FakeReranker
     ingest/
       chunk.ts                                   pure chunker: text -> ChunkDraft[]
@@ -150,7 +151,10 @@ supabase/.branches/
 ```
 # Local Supabase (from `supabase status`). Cloud: the project's direct connection string.
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
-# Anthropic: leave unset if `ant auth login` has been run; otherwise set a key.
+# Model backend. claude-code (default) runs the local `claude` binary on your Claude subscription; api uses @anthropic-ai/sdk.
+BRAIN_LLM=claude-code
+BRAIN_CLAUDE_CODE_MODEL=opus
+# Only for BRAIN_LLM=api or `brain backfill`.
 ANTHROPIC_API_KEY=
 BRAIN_MODEL=claude-opus-5
 VOYAGE_API_KEY=
@@ -189,6 +193,9 @@ export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
     "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+  llmBackend: (process.env.BRAIN_LLM ?? "claude-code") as "claude-code" | "api",
+  claudeCodeBin: process.env.BRAIN_CLAUDE_CODE_BIN ?? "claude",
+  claudeCodeModel: process.env.BRAIN_CLAUDE_CODE_MODEL ?? "opus",
   anthropicModel: process.env.BRAIN_MODEL ?? "claude-opus-5",
   voyageApiKey: process.env.VOYAGE_API_KEY ?? "",
   voyageEmbedModel: process.env.VOYAGE_EMBED_MODEL ?? "voyage-4-large",
@@ -1592,11 +1599,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 10: Service clients behind interfaces (Claude, Voyage) with fakes
+### Task 10: Service clients behind interfaces (Claude Code, Claude API, Voyage) with fakes
 
 **Files:**
-- Create: `src/llm/llm.ts`, `src/llm/voyage.ts`
-- Create: `test/unit/voyage.test.ts`, `test/unit/llm.test.ts`
+- Create: `src/llm/llm.ts`, `src/llm/claude-code.ts`, `src/llm/voyage.ts`
+- Create: `test/unit/voyage.test.ts`, `test/unit/llm.test.ts`, `test/unit/claude-code.test.ts`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1685,6 +1692,55 @@ describe("FakeLlm", () => {
     expect(await llm.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).toEqual({ n: 1 });
     await expect(llm.structured({ schema: z.object({ n: z.string() }), system: "s", user: "u" })).rejects.toThrow();
     expect(llm.calls.length).toBe(2);
+  });
+});
+```
+
+`test/unit/claude-code.test.ts`:
+```ts
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+import { ClaudeCodeLlm, type Exec } from "../../src/llm/claude-code.js";
+
+function fakeExec(envelope: unknown) {
+  const calls: { bin: string; args: string[]; input: string }[] = [];
+  const exec: Exec = async (bin, args, input) => {
+    calls.push({ bin, args, input });
+    return { stdout: JSON.stringify(envelope) };
+  };
+  return { exec, calls };
+}
+
+describe("ClaudeCodeLlm", () => {
+  it("runs the claude binary headless with a schema, no tools, and a custom system prompt", async () => {
+    const { exec, calls } = fakeExec({ type: "result", is_error: false, result: '{"n":1}', structured_output: { n: 1 } });
+    const llm = new ClaudeCodeLlm({ exec, bin: "claude", model: "opus" });
+    const out = await llm.structured({ schema: z.object({ n: z.number() }), system: "SYS", user: "USER TEXT" });
+    expect(out).toEqual({ n: 1 });
+    const { bin, args, input } = calls[0];
+    expect(bin).toBe("claude");
+    expect(input).toBe("USER TEXT");
+    expect(args).toEqual(expect.arrayContaining(["-p", "--output-format", "json", "--tools", "", "--no-session-persistence", "--system-prompt", "SYS", "--model", "opus", "--json-schema"]));
+    const schemaArg = args[args.indexOf("--json-schema") + 1];
+    expect(JSON.parse(schemaArg).properties.n.type).toBe("number");
+  });
+
+  it("falls back to parsing the result text when structured_output is absent, and validates it", async () => {
+    const good = new ClaudeCodeLlm({ exec: fakeExec({ is_error: false, result: '{"n": 2}' }).exec });
+    expect(await good.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).toEqual({ n: 2 });
+    const bad = new ClaudeCodeLlm({ exec: fakeExec({ is_error: false, result: '{"n": "x"}' }).exec });
+    await expect(bad.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).rejects.toThrow();
+  });
+
+  it("surfaces CLI errors such as an expired login", async () => {
+    const llm = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, result: "Failed to authenticate. OAuth access token has expired." }).exec });
+    await expect(llm.text({ system: "s", user: "u" })).rejects.toThrow(/expired/);
+  });
+
+  it("returns plain text for text calls without a schema flag", async () => {
+    const { exec, calls } = fakeExec({ is_error: false, result: "hello" });
+    expect(await new ClaudeCodeLlm({ exec }).text({ system: "s", user: "u" })).toBe("hello");
+    expect(calls[0].args).not.toContain("--json-schema");
   });
 });
 ```
@@ -1779,7 +1835,99 @@ export class FakeLlm implements Llm {
 }
 ```
 
-- [ ] **Step 4: Implement the Voyage module**
+- [ ] **Step 4: Implement the Claude Code backend**
+
+`src/llm/claude-code.ts`:
+```ts
+import { spawn } from "node:child_process";
+import { z } from "zod";
+import { config } from "../config.js";
+import type { Llm, StructuredArgs, TextArgs } from "./llm.js";
+
+export type Exec = (bin: string, args: string[], input: string) => Promise<{ stdout: string }>;
+
+/** Runs a binary, feeds `input` on stdin, resolves with stdout on exit 0. */
+export const spawnExec: Exec = (bin, args, input) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve({ stdout });
+      else reject(new Error(`${bin} exited with ${code}: ${(stderr || stdout).slice(0, 500)}`));
+    });
+    child.stdin.end(input);
+  });
+
+interface Envelope {
+  is_error?: boolean;
+  subtype?: string;
+  result?: string;
+  structured_output?: unknown;
+}
+
+const PROMPT = "Apply your instructions to the user message provided with this request. Reply with the answer only.";
+
+/**
+ * Model backend that shells out to the official Claude Code CLI in print mode, so calls are covered by
+ * the user's Claude subscription instead of per-token API billing. Tools are disabled and the default
+ * coding-agent system prompt is replaced, so this is a plain model call.
+ */
+export class ClaudeCodeLlm implements Llm {
+  readonly model: string;
+  private readonly bin: string;
+  private readonly exec: Exec;
+
+  constructor(opts: { bin?: string; model?: string; exec?: Exec } = {}) {
+    this.bin = opts.bin ?? config.claudeCodeBin;
+    this.model = opts.model ?? config.claudeCodeModel;
+    this.exec = opts.exec ?? spawnExec;
+  }
+
+  private args(system: string, schema?: z.ZodType<unknown>): string[] {
+    const args = ["-p", PROMPT, "--output-format", "json", "--tools", "", "--no-session-persistence", "--system-prompt", system, "--model", this.model];
+    if (schema) args.push("--json-schema", JSON.stringify(z.toJSONSchema(schema)));
+    return args;
+  }
+
+  private async run(system: string, user: string, schema?: z.ZodType<unknown>): Promise<Envelope> {
+    const { stdout } = await this.exec(this.bin, this.args(system, schema), user);
+    let envelope: Envelope;
+    try {
+      envelope = JSON.parse(stdout) as Envelope;
+    } catch {
+      throw new Error(`Claude Code returned non-JSON output: ${stdout.slice(0, 300)}`);
+    }
+    if (envelope.is_error) throw new Error(`Claude Code error: ${envelope.result ?? envelope.subtype ?? "unknown"}`);
+    return envelope;
+  }
+
+  async structured<T>({ schema, system, user }: StructuredArgs<T>): Promise<T> {
+    const envelope = await this.run(system, user, schema as z.ZodType<unknown>);
+    let raw: unknown = envelope.structured_output;
+    if (raw === undefined) {
+      try {
+        raw = JSON.parse(envelope.result ?? "");
+      } catch {
+        throw new Error("Model output did not match the schema: not JSON");
+      }
+    }
+    return schema.parse(raw);
+  }
+
+  async text({ system, user }: TextArgs): Promise<string> {
+    const envelope = await this.run(system, user);
+    return envelope.result ?? "";
+  }
+}
+```
+
+Notes for the implementer: `z.toJSONSchema` needs Zod 4 (`npm ls zod` shows `4.x`). The CLI flag `--tools ""` must be passed as two separate argv entries, which the array above does. `maxTokens` is ignored by this backend.
+
+- [ ] **Step 5: Implement the Voyage module**
 
 `src/llm/voyage.ts`:
 ```ts
@@ -1911,16 +2059,16 @@ export class FakeReranker implements Reranker {
 }
 ```
 
-- [ ] **Step 5: Run tests and typecheck**
+- [ ] **Step 6: Run tests and typecheck**
 
 Run: `npm run test:unit && npm run typecheck`
 Expected: PASS. If `client.messages.parse` or `zodOutputFormat` fails to typecheck, check the installed SDK version supports them (`npm ls @anthropic-ai/sdk`) and upgrade with `npm install @anthropic-ai/sdk@latest`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add -A
-git commit -m "Claude and Voyage clients behind Llm, Embedder and Reranker interfaces, with test fakes
+git commit -m "Claude Code, Claude API and Voyage clients behind Llm, Embedder and Reranker interfaces, with test fakes
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -1941,6 +2089,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 import { config } from "./config.js";
 import { connect, type Db } from "./db.js";
 import { AnthropicLlm, type Llm } from "./llm/llm.js";
+import { ClaudeCodeLlm } from "./llm/claude-code.js";
 import { VoyageClient, type Embedder, type Reranker } from "./llm/voyage.js";
 
 export interface Ctx {
@@ -1950,9 +2099,13 @@ export interface Ctx {
   reranker: Reranker;
 }
 
+export function makeLlm(): Llm {
+  return config.llmBackend === "api" ? new AnthropicLlm() : new ClaudeCodeLlm();
+}
+
 export function makeCtx(): Ctx {
   const voyage = new VoyageClient();
-  return { sql: connect(config.databaseUrl), llm: new AnthropicLlm(), embedder: voyage, reranker: voyage };
+  return { sql: connect(config.databaseUrl), llm: makeLlm(), embedder: voyage, reranker: voyage };
 }
 ```
 
@@ -3843,7 +3996,7 @@ npm run brain -- status
 
 Expected: help lists ingest, status, retry, search, ask, node, facts. The ingest line prints `new <uuid> chunked .../sample.md`. Status shows one document at `chunked`.
 
-- [ ] **Step 3: Live smoke test (needs `VOYAGE_API_KEY` in `.env` and Anthropic credentials)**
+- [ ] **Step 3: Live smoke test (needs `VOYAGE_API_KEY` in `.env` and a signed-in Claude Code: run `claude` once and log in if `claude -p hi` reports an expired token)**
 
 ```bash
 npm run brain -- retry
@@ -4138,7 +4291,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 21: Batch backfill for summaries and extraction
+### Task 21: Batch backfill for summaries and extraction (API backend only)
+
+This path uses the Message Batches API and therefore an `ANTHROPIC_API_KEY`; it is for large one-time imports where the subscription's usage window would be the bottleneck. Day-to-day ingestion uses the Claude Code backend and never touches this.
 
 **Files:**
 - Create: `src/ingest/backfill.ts`
@@ -4342,10 +4497,11 @@ Add to `src/cli.ts` before `program.parseAsync`:
 ```ts
 program
   .command("backfill")
-  .description("Run summarize and extract for every unfinished document through the Batches API (half price, slower)")
+  .description("Run summarize and extract for every unfinished document through the Batches API (needs ANTHROPIC_API_KEY; half price, slower)")
   .option("--limit <n>", "max documents per stage", "500")
   .option("--poll <seconds>", "poll interval", "30")
   .action(async (opts) => {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("backfill uses the Batches API and needs ANTHROPIC_API_KEY; normal ingestion does not");
     const { backfill } = await import("./ingest/backfill.js");
     await withCtx((ctx) => backfill(ctx, { limit: Number(opts.limit), pollMs: Number(opts.poll) * 1000 }));
   });
@@ -4396,7 +4552,7 @@ Design: `docs/superpowers/specs/2026-09-27-knowledge-base-core-design.md`.
 ## Setup
 
 1. `npm install`
-2. `cp .env.example .env` and fill in `VOYAGE_API_KEY`. For Anthropic either run `ant auth login` or set `ANTHROPIC_API_KEY`.
+2. `cp .env.example .env` and fill in `VOYAGE_API_KEY`. Model calls go through your local Claude Code (`claude`) on your Claude subscription by default; make sure `claude -p hi` works. Set `BRAIN_LLM=api` and `ANTHROPIC_API_KEY` only if you want per-token API billing or the `backfill` command.
 3. `npm run db:start` (Docker) then `npm run db:reset` to apply migrations locally.
 
 To use a hosted Supabase project instead: create the project, run `supabase link --project-ref <ref>` and `supabase db push`, then set `DATABASE_URL` in `.env` to the project's direct connection string.
@@ -4468,4 +4624,5 @@ Expected: `main` is on GitHub.
 
 - Spec sections 4.1 to 4.6 map to Tasks 2, 3 and 4. Section 5 (pipeline) maps to Tasks 9 and 11 to 16 plus 21 for backfill. Section 6 (retrieval) maps to Tasks 17 and 18. Section 7 (CLI) maps to Tasks 19 to 21. Section 8 (error handling) is exercised by Tasks 14 and 16. Section 9 (testing) is spread across every task and Task 20.
 - Deviation from the spec: `ingest_jobs.stage` has no `failed` value; failure is `error is not null` at the last completed stage, so retry knows where to resume. Task 22 updates the spec.
+- Model backend: `ClaudeCodeLlm` (Task 10) is the default so normal use is covered by the Claude subscription; `AnthropicLlm` remains for `BRAIN_LLM=api` and for `brain backfill`.
 - Addition to the spec: a `brain.extractions` table stores raw extractor output so resolve can re-run without another model call, and `documents.summary_line` holds the one-line summary used in chunk context prefixes.
