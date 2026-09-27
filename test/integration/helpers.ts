@@ -3,7 +3,7 @@ import { connect, type Db } from "../../src/db.js";
 export function testDb(): Db {
   return connect(
     process.env.DATABASE_URL ??
-      "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      "postgresql://postgres:postgres@127.0.0.1:55322/postgres",
   );
 }
 

@@ -150,7 +150,7 @@ supabase/.branches/
 `.env.example`:
 ```
 # Local Supabase (from `supabase status`). Cloud: the project's direct connection string.
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55322/postgres
 # Model backend. claude-code (default) runs the local `claude` binary on your Claude subscription; api uses @anthropic-ai/sdk.
 BRAIN_LLM=claude-code
 BRAIN_CLAUDE_CODE_MODEL=opus
@@ -192,7 +192,7 @@ import "dotenv/config";
 export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
-    "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+    "postgresql://postgres:postgres@127.0.0.1:55322/postgres",
   llmBackend: (process.env.BRAIN_LLM ?? "claude-code") as "claude-code" | "api",
   claudeCodeBin: process.env.BRAIN_CLAUDE_CODE_BIN ?? "claude",
   claudeCodeModel: process.env.BRAIN_CLAUDE_CODE_MODEL ?? "opus",
@@ -240,7 +240,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - [ ] **Step 1: Start local Supabase**
 
 Run: `npm run db:start`
-Expected: Docker containers start; output includes `DB URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres`. Takes a minute the first time.
+Expected: Docker containers start; output includes `DB URL: postgresql://postgres:postgres@127.0.0.1:55322/postgres`. Takes a minute the first time.
 
 - [ ] **Step 2: Write the integration helper**
 
@@ -251,7 +251,7 @@ import { connect, type Db } from "../../src/db.js";
 export function testDb(): Db {
   return connect(
     process.env.DATABASE_URL ??
-      "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      "postgresql://postgres:postgres@127.0.0.1:55322/postgres",
   );
 }
 

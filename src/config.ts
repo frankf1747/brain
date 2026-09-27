@@ -3,7 +3,7 @@ import "dotenv/config";
 export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
-    "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+    "postgresql://postgres:postgres@127.0.0.1:55322/postgres",
   llmBackend: (process.env.BRAIN_LLM ?? "claude-code") as "claude-code" | "api",
   claudeCodeBin: process.env.BRAIN_CLAUDE_CODE_BIN ?? "claude",
   claudeCodeModel: process.env.BRAIN_CLAUDE_CODE_MODEL ?? "opus",
