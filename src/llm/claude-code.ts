@@ -48,7 +48,11 @@ export class ClaudeCodeLlm implements Llm {
 
   private args(system: string, schema?: z.ZodType<unknown>): string[] {
     const args = ["-p", PROMPT, "--output-format", "json", "--tools", "", "--no-session-persistence", "--system-prompt", system, "--model", this.model];
-    if (schema) args.push("--json-schema", JSON.stringify(z.toJSONSchema(schema)));
+    if (schema) {
+      // The CLI silently ignores a schema that carries a "$schema" key (verified on 2.1.145), so drop it.
+      const { $schema: _, ...json } = z.toJSONSchema(schema) as Record<string, unknown>;
+      args.push("--json-schema", JSON.stringify(json));
+    }
     return args;
   }
 

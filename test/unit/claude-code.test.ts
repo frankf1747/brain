@@ -23,6 +23,7 @@ describe("ClaudeCodeLlm", () => {
     expect(args).toEqual(expect.arrayContaining(["-p", "--output-format", "json", "--tools", "", "--no-session-persistence", "--system-prompt", "SYS", "--model", "opus", "--json-schema"]));
     const schemaArg = args[args.indexOf("--json-schema") + 1];
     expect(JSON.parse(schemaArg).properties.n.type).toBe("number");
+    expect(JSON.parse(schemaArg)).not.toHaveProperty("$schema");
   });
 
   it("falls back to parsing the result text when structured_output is absent, and validates it", async () => {
