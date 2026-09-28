@@ -162,3 +162,77 @@ describe("runResolve vector merges of people and organizations", () => {
     expect(people.length).toBe(1);
   });
 });
+
+function entity(key: string, type: string, name: string) {
+  return { key, type, name, aliases: [], untyped_hint: null, quote: name };
+}
+function relation(from_key: string, to_key: string, type: string, quote: string) {
+  return { from_key, to_key, type, confidence: 0.9, valid_from: null, valid_to: null, quote };
+}
+async function edgeEndpoints() {
+  return sql<{ type: string; from_name: string; to_name: string; properties: Record<string, unknown> }[]>`
+    select e.type, f.name as from_name, t.name as to_name, e.properties
+    from brain.edges e join brain.nodes f on f.id = e.from_node join brain.nodes t on t.id = e.to_node`;
+}
+
+describe("runResolve edge direction", () => {
+  it("swaps a created edge extracted as artifact -> organization", async () => {
+    const body = "Acme Corp built the ZX-9000 printer.";
+    await ingestWith(
+      {
+        entities: [entity("a", "artifact", "ZX-9000"), entity("o", "organization", "Acme Corp")],
+        relations: [relation("a", "o", "created", body)],
+        facts_about_self: [],
+      },
+      body,
+    );
+    const edges = await edgeEndpoints();
+    expect(edges.length).toBe(1);
+    expect(edges[0]).toMatchObject({ type: "created", from_name: "Acme Corp", to_name: "ZX-9000" });
+    expect(edges[0].properties.direction_unverified).toBeUndefined();
+  });
+
+  it("swaps a located_in edge extracted as place -> organization", async () => {
+    const body = "Acme Corp is based in Boston.";
+    await ingestWith(
+      {
+        entities: [entity("p", "place", "Boston"), entity("o", "organization", "Acme Corp")],
+        relations: [relation("p", "o", "located_in", body)],
+        facts_about_self: [],
+      },
+      body,
+    );
+    const edges = await edgeEndpoints();
+    expect(edges[0]).toMatchObject({ type: "located_in", from_name: "Acme Corp", to_name: "Boston" });
+  });
+
+  it("keeps a person -> person works_at edge as extracted and flags it", async () => {
+    const body = "Jane Smith works at Robert Chen.";
+    await ingestWith(
+      {
+        entities: [entity("j", "person", "Jane Smith"), entity("r", "person", "Robert Chen")],
+        relations: [relation("j", "r", "works_at", body)],
+        facts_about_self: [],
+      },
+      body,
+    );
+    const edges = await edgeEndpoints();
+    expect(edges[0]).toMatchObject({ type: "works_at", from_name: "Jane Smith", to_name: "Robert Chen" });
+    expect(edges[0].properties.direction_unverified).toBe(true);
+  });
+
+  it("leaves edge types outside the table untouched", async () => {
+    const body = "Boston is part of Acme Corp somehow.";
+    await ingestWith(
+      {
+        entities: [entity("p", "place", "Boston"), entity("o", "organization", "Acme Corp")],
+        relations: [relation("p", "o", "part_of", body)],
+        facts_about_self: [],
+      },
+      body,
+    );
+    const edges = await edgeEndpoints();
+    expect(edges[0]).toMatchObject({ type: "part_of", from_name: "Boston", to_name: "Acme Corp" });
+    expect(edges[0].properties).toEqual({});
+  });
+});

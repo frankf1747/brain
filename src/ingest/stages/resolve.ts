@@ -100,6 +100,31 @@ async function canonicalId(sql: Db, id: string): Promise<string> {
   return row.id;
 }
 
+const ALL_BUT_PLACE = ["person", "organization", "project", "concept", "event", "artifact"];
+
+/**
+ * Directed edge types whose endpoint node types are unambiguous. runResolve keeps an edge that fits,
+ * swaps one whose reversed endpoints fit, and flags the rest with properties.direction_unverified.
+ */
+export const EDGE_DIRECTIONS: Record<string, { from: readonly string[]; to: readonly string[] }> = {
+  created: { from: ["person", "organization"], to: ["artifact", "project"] },
+  works_at: { from: ["person"], to: ["organization"] },
+  studied_at: { from: ["person"], to: ["organization"] },
+  applied_to: { from: ["person"], to: ["organization", "artifact", "project"] },
+  located_in: { from: ALL_BUT_PLACE, to: ["place"] },
+};
+
+export type DirectionCheck = "ok" | "swap" | "unverified";
+
+export function checkDirection(edgeType: string, fromType: string, toType: string): DirectionCheck {
+  const rule = EDGE_DIRECTIONS[edgeType];
+  if (!rule) return "ok";
+  const fits = (a: string, b: string) => rule.from.includes(a) && rule.to.includes(b);
+  if (fits(fromType, toType)) return "ok";
+  if (fits(toType, fromType)) return "swap";
+  return "unverified";
+}
+
 const LEXICALLY_CHECKED_TYPES = new Set(["person", "organization"]);
 
 async function resolveEntity(
@@ -203,12 +228,23 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
         on conflict do nothing`;
     }
 
+    const nodeIds = [...new Set(keyToNode.values())];
+    const nodeType = new Map(
+      (nodeIds.length
+        ? await sql<{ id: string; type: string }[]>`select id, type from brain.nodes where id = any(${nodeIds}::uuid[])`
+        : []
+      ).map((n) => [n.id, n.type]),
+    );
+
     for (const r of payload.relations) {
-      const from = keyToNode.get(r.from_key);
-      const to = keyToNode.get(r.to_key);
+      let from = keyToNode.get(r.from_key);
+      let to = keyToNode.get(r.to_key);
       if (!from || !to || from === to) continue;
       const type = knownEdges.has(r.type) ? r.type : "related_to";
-      const props = knownEdges.has(r.type) ? {} : { original_type: r.type };
+      const props: Record<string, unknown> = knownEdges.has(r.type) ? {} : { original_type: r.type };
+      const direction = checkDirection(type, nodeType.get(from)!, nodeType.get(to)!);
+      if (direction === "swap") [from, to] = [to, from];
+      else if (direction === "unverified") props.direction_unverified = true;
       const loc = evidenceFor(r.quote);
       await sql`
         insert into brain.edges (from_node, to_node, type, confidence, properties, evidence_chunk_id, valid_from, valid_to)
