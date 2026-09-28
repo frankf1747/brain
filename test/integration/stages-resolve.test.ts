@@ -5,6 +5,8 @@ import { runChunk } from "../../src/ingest/stages/chunk.js";
 import { runExtract } from "../../src/ingest/stages/extract.js";
 import { runResolve } from "../../src/ingest/stages/resolve.js";
 import { fakeExtraction } from "./fixtures.js";
+import { fakeVector } from "./helpers.js";
+import type { Embedder } from "../../src/llm/voyage.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -92,5 +94,71 @@ describe("runResolve", () => {
     expect(Number(n)).toBe(1);
     const [{ f }] = await sql<{ f: string }[]>`select count(*)::text as f from brain.facts`;
     expect(Number(f)).toBe(1);
+  });
+});
+
+function person(name: string, aliases: string[] = []) {
+  return { key: "p", type: "person", name, aliases, untyped_hint: null, quote: name };
+}
+function org(name: string, aliases: string[] = []) {
+  return { key: "o", type: "organization", name, aliases, untyped_hint: null, quote: name };
+}
+function only(entity: ReturnType<typeof person>) {
+  return { entities: [entity], relations: [], facts_about_self: [] };
+}
+
+/** Every name gets the same vector, so vector similarity alone always says "match". */
+const sameVectorEmbedder: Embedder = { embed: async (texts) => texts.map(() => fakeVector(7)) };
+
+async function ingestSameVector(payload: unknown, body: string) {
+  const ctx = { ...fakeCtx(sql, () => payload), embedder: sameVectorEmbedder };
+  const { id } = await storeDocument(sql, { text: body });
+  await runChunk(ctx, id);
+  await runExtract(ctx, id);
+  await runResolve(ctx, id);
+}
+
+describe("runResolve alias safety", () => {
+  it("does not merge two people who share only a first-name alias", async () => {
+    await ingestWith(only(person("Priya Natarajan", ["Priya"])), "Priya Natarajan runs the data team.");
+    await ingestWith(only(person("Priya Raman", ["Priya"])), "Priya Raman is a recruiter.");
+    const names = await sql<{ name: string }[]>`select name from brain.nodes where type = 'person' and not is_self order by name`;
+    expect(names.map((n) => n.name)).toEqual(["Priya Natarajan", "Priya Raman"]);
+  });
+
+  it("does not merge two organizations that share an alias", async () => {
+    await ingestWith(only(org("Acme Corp", ["Acme"])), "Acme Corp builds rockets.");
+    await ingestWith(only(org("Acme Capital", ["Acme"])), "Acme Capital invests in rockets.");
+    const orgs = await sql`select id from brain.nodes where type = 'organization'`;
+    expect(orgs.length).toBe(2);
+  });
+
+  it("creates a flagged node when a name matches aliases of several distinct nodes", async () => {
+    await ingestWith(only(person("Priya Natarajan", ["Priya"])), "Priya Natarajan runs the data team.");
+    await ingestWith(only(person("Priya Raman", ["Priya"])), "Priya Raman is a recruiter.");
+    await ingestWith(only(person("Priya")), "Priya called me.");
+    const [oldest] = await sql<{ id: string }[]>`select id from brain.nodes where canonical_name = 'priya natarajan'`;
+    const [p] = await sql<{ properties: { possible_duplicate_of?: string } }[]>`
+      select properties from brain.nodes where type = 'person' and canonical_name = 'priya'`;
+    expect(p.properties.possible_duplicate_of).toBe(oldest.id);
+  });
+});
+
+describe("runResolve vector merges of people and organizations", () => {
+  it("does not merge people on vector similarity alone", async () => {
+    await ingestSameVector(only(person("Jane Smith")), "Jane Smith is an engineer.");
+    await ingestSameVector(only(person("Robert Chen")), "Robert Chen is a designer.");
+    const [jane] = await sql<{ id: string }[]>`select id from brain.nodes where canonical_name = 'jane smith'`;
+    const [robert] = await sql<{ properties: { possible_duplicate_of?: string } }[]>`
+      select properties from brain.nodes where canonical_name = 'robert chen'`;
+    expect(robert).toBeDefined();
+    expect(robert.properties.possible_duplicate_of).toBe(jane.id);
+  });
+
+  it("merges people when the vector match has lexical support", async () => {
+    await ingestSameVector(only(person("Priya Natarajan")), "Priya Natarajan runs the data team.");
+    await ingestSameVector(only(person("Priya Natarajan Rao")), "Priya Natarajan Rao said hi.");
+    const people = await sql`select id from brain.nodes where type = 'person' and not is_self`;
+    expect(people.length).toBe(1);
   });
 });

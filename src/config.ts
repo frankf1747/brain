@@ -13,6 +13,6 @@ export const config = {
   voyageRerankModel: process.env.VOYAGE_RERANK_MODEL ?? "rerank-2.5",
   embeddingDimensions: 1024,
   chunking: { sectionTokens: 1500, passageTokens: 400, overlapRatio: 0.15 },
-  resolution: { matchThreshold: 0.92, flagThreshold: 0.85 },
+  resolution: { matchThreshold: 0.92, flagThreshold: 0.85, lexicalThreshold: 0.6 },
   retrieval: { candidateK: 40, defaultK: 10, fallbackThreshold: 0.3 },
 } as const;

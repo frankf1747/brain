@@ -39,3 +39,27 @@ describe("normalizePredicate", () => {
     expect(normalizePredicate("graduated-from!")).toBe("graduated_from");
   });
 });
+
+describe("locateQuote prefix fallback", () => {
+  it("does not accept a short generic prefix that lands in the wrong passage", () => {
+    const chunks = [
+      { id: "p1", content: "The company said hello." },
+      { id: "p2", content: "They told me the company said nothing about sponsorship." },
+    ];
+    expect(locateQuote(chunks, "the company said they would sponsor")).toBeNull();
+  });
+  it("accepts a full-quote match in the passage that contains it", () => {
+    const chunks = [
+      { id: "p1", content: "The company said hello." },
+      { id: "p2", content: "Later the company said they would sponsor me." },
+    ];
+    expect(locateQuote(chunks, "the company said they would sponsor")!.chunkId).toBe("p2");
+  });
+  it("rejects a prefix that more than one passage contains", () => {
+    const chunks = [
+      { id: "p1", content: "At first the company said they were hiring." },
+      { id: "p2", content: "Later the company said they might reconsider." },
+    ];
+    expect(locateQuote(chunks, "the company said they would sponsor")).toBeNull();
+  });
+});

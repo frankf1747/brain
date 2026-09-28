@@ -49,25 +49,38 @@ export interface QuoteLocation {
 
 const MIN_PREFIX = 12;
 
+/**
+ * Finds where a model-supplied quote sits in the passages. A full-quote match is accepted in the
+ * first passage that has it. Failing that, word-boundary prefixes of the quote's first 40 characters
+ * are tried, longest first, down to max(12, half of those 40 characters); a prefix only counts when
+ * exactly one passage contains it, so a generic opening cannot pin the evidence to the wrong passage.
+ */
 export function locateQuote(chunks: { id: string; content: string }[], quote: string): QuoteLocation | null {
   const full = squashWithMap(quote).text;
   if (!full) return null;
-  // Full quote, then its first 40 characters, then ever shorter word-boundary prefixes
-  // (never under MIN_PREFIX characters), since models often paraphrase the tail of a quote.
-  const needles = [full];
-  let prefix = full.slice(0, 40).trimEnd();
-  while (prefix.length >= MIN_PREFIX) {
-    if (!needles.includes(prefix)) needles.push(prefix);
+  const squashed = chunks.map((c) => ({ id: c.id, ...squashWithMap(c.content) }));
+  const at = (c: (typeof squashed)[number], idx: number, len: number): QuoteLocation => ({
+    chunkId: c.id,
+    start: c.map[idx],
+    end: c.map[idx + len - 1] + 1,
+  });
+
+  for (const c of squashed) {
+    const idx = c.text.indexOf(full);
+    if (idx >= 0) return at(c, idx, full.length);
+  }
+
+  const head = full.slice(0, 40).trimEnd();
+  const minLength = Math.max(MIN_PREFIX, Math.ceil(0.5 * head.length));
+  let prefix = head;
+  while (prefix.length >= minLength) {
+    if (prefix !== full) {
+      const hits = squashed.filter((c) => c.text.includes(prefix));
+      if (hits.length === 1) return at(hits[0], hits[0].text.indexOf(prefix), prefix.length);
+    }
     const cut = prefix.lastIndexOf(" ");
     if (cut < 0) break;
     prefix = prefix.slice(0, cut);
-  }
-  for (const needle of needles) {
-    for (const c of chunks) {
-      const { text, map } = squashWithMap(c.content);
-      const idx = text.indexOf(needle);
-      if (idx >= 0) return { chunkId: c.id, start: map[idx], end: map[idx + needle.length - 1] + 1 };
-    }
   }
   return null;
 }
@@ -87,6 +100,8 @@ async function canonicalId(sql: Db, id: string): Promise<string> {
   return row.id;
 }
 
+const LEXICALLY_CHECKED_TYPES = new Set(["person", "organization"]);
+
 async function resolveEntity(
   sql: Db,
   entity: Extraction["entities"][number],
@@ -97,22 +112,50 @@ async function resolveEntity(
   const type = knownTypes.has(entity.type) ? entity.type : "concept";
   const baseProps: Record<string, unknown> = knownTypes.has(entity.type) ? {} : { untyped_hint: entity.untyped_hint ?? entity.type };
   const canonical = canonicalName(entity.name);
-  const aliasKeys = [entity.name, ...entity.aliases].map(canonicalName).filter(Boolean);
+  // New aliases may match an existing canonical name only when the new name is a single token
+  // ("Acme" with alias "Acme Corp"); a multi-token name's aliases are too ambiguous ("Priya").
+  const aliasCanonicals =
+    canonical.split(" ").length === 1 ? entity.aliases.map(canonicalName).filter((a) => a && a !== canonical) : [];
 
   const [exact] = await sql<{ id: string }[]>`select id from brain.nodes where type = ${type} and canonical_name = ${canonical}`;
   if (exact) return canonicalId(sql, exact.id);
 
-  const [byAlias] = await sql<{ id: string }[]>`
-    select id from brain.nodes where type = ${type} and (aliases && ${aliasKeys}::text[] or canonical_name = any(${aliasKeys}::text[])) limit 1`;
-  if (byAlias) return canonicalId(sql, byAlias.id);
+  // Alias path: match on the new entity's own canonical name only. Never on alias-to-alias overlap.
+  const aliasRows = await sql<{ id: string }[]>`
+    select id from brain.nodes
+    where type = ${type}
+      and (${canonical} = any(aliases) or canonical_name = any(${aliasCanonicals}::text[]))
+    order by created_at, id`;
+  const aliasMatches: string[] = [];
+  for (const row of aliasRows) {
+    const id = await canonicalId(sql, row.id);
+    if (!aliasMatches.includes(id)) aliasMatches.push(id);
+  }
+  if (aliasMatches.length === 1) return aliasMatches[0];
 
   const vec = toVector(vector);
-  const candidates = await sql<{ id: string; similarity: number }[]>`
-    select id, 1 - (name_embedding <=> ${vec}::vector) as similarity
-    from brain.nodes where type = ${type} and name_embedding is not null
-    order by name_embedding <=> ${vec}::vector limit 3`;
-  const decision = decide(candidates.map((c) => ({ id: c.id, similarity: Number(c.similarity) })));
-  if (decision.action === "match") return canonicalId(sql, decision.nodeId);
+  let decision: Decision;
+  if (aliasMatches.length > 1) {
+    // Ambiguous: several distinct nodes answer to this name. Create and flag against the oldest.
+    decision = { action: "create", possibleDuplicateOf: aliasMatches[0] };
+  } else {
+    const candidates = await sql<{ id: string; similarity: number; lexical: number }[]>`
+      select id, 1 - (name_embedding <=> ${vec}::vector) as similarity,
+             extensions.similarity(canonical_name, ${canonical}) as lexical
+      from brain.nodes where type = ${type} and name_embedding is not null
+      order by name_embedding <=> ${vec}::vector limit 3`;
+    const vectorDecision = decide(candidates.map((c) => ({ id: c.id, similarity: Number(c.similarity) })));
+    decision = vectorDecision;
+    if (vectorDecision.action === "match" && LEXICALLY_CHECKED_TYPES.has(type)) {
+      const matched = candidates.find((c) => c.id === vectorDecision.nodeId)!;
+      // People and organizations with close embeddings but different names are often different
+      // entities; merge only with lexical support, otherwise create and flag.
+      if (Number(matched.lexical) < config.resolution.lexicalThreshold) {
+        decision = { action: "create", possibleDuplicateOf: matched.id };
+      }
+    }
+    if (decision.action === "match") return canonicalId(sql, decision.nodeId);
+  }
 
   const props = decision.possibleDuplicateOf ? { ...baseProps, possible_duplicate_of: decision.possibleDuplicateOf } : baseProps;
   const storedAliases = entity.aliases.map(canonicalName).filter((a) => a && a !== canonical);
@@ -144,6 +187,9 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
 
     const names = payload.entities.map((e) => `${knownTypes.has(e.type) ? e.type : "concept"}: ${e.name}`);
     const vectors = names.length ? await embedder.embed(names, "document") : [];
+    if (vectors.length !== names.length) {
+      throw new Error(`Embedder returned ${vectors.length} vectors for ${names.length} entity names`);
+    }
 
     const keyToNode = new Map<string, string>();
     for (let i = 0; i < payload.entities.length; i++) {
