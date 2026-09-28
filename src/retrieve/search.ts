@@ -1,0 +1,232 @@
+import type postgres from "postgres";
+import { config } from "../config.js";
+import type { Ctx } from "../ctx.js";
+import { toVector, type Db } from "../db.js";
+import { reciprocalRankFusion } from "./fuse.js";
+import { detectEntities, type EntityRef } from "./entities.js";
+
+export interface SearchOptions {
+  k?: number;
+  sourceKinds?: string[];
+  since?: Date;
+  until?: Date;
+  verifiedOnly?: boolean;
+  includeFacts?: boolean;
+  client?: string;
+}
+
+export type PassageGroup = "hybrid" | "graph" | "fallback";
+
+export interface Passage {
+  chunkId: string | null;
+  documentId: string;
+  documentTitle: string | null;
+  sourceKind: string;
+  content: string;
+  parentContent: string | null;
+  headingPath: string[];
+  charStart: number;
+  charEnd: number;
+  score: number;
+  group: PassageGroup;
+}
+
+export interface DocHit {
+  documentId: string;
+  title: string | null;
+  sourceKind: string;
+  summary: string | null;
+  score: number;
+}
+
+export interface Neighbor {
+  id: string;
+  type: string;
+  name: string;
+  depth: number;
+}
+
+export interface EntityHit extends EntityRef {
+  neighbors: Neighbor[];
+}
+
+export interface FactRow {
+  id: string;
+  predicate: string;
+  objectText: string;
+  confidence: number | null;
+  verified: boolean;
+  sourceChunkId: string | null;
+}
+
+export interface SearchResult {
+  query: string;
+  passages: Passage[];
+  documents: DocHit[];
+  entities: EntityHit[];
+  facts: FactRow[];
+  usedFallback: boolean;
+  topScore: number | null;
+}
+
+interface ChunkRow {
+  id: string;
+  document_id: string;
+  content: string;
+  heading_path: string[];
+  char_start: number;
+  char_end: number;
+  parent_content: string | null;
+  document_title: string | null;
+  source_kind: string;
+}
+
+async function loadChunks(sql: Db, ids: string[]): Promise<Map<string, ChunkRow>> {
+  if (ids.length === 0) return new Map();
+  const rows = await sql<ChunkRow[]>`
+    select c.id, c.document_id, c.content, c.heading_path, c.char_start, c.char_end,
+           p.content as parent_content, d.title as document_title, d.source_kind
+    from brain.chunks c
+    left join brain.chunks p on p.id = c.parent_id
+    join brain.documents d on d.id = c.document_id
+    where c.id = any(${ids}::uuid[])`;
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
+function toPassage(row: ChunkRow, score: number, group: PassageGroup): Passage {
+  return {
+    chunkId: row.id,
+    documentId: row.document_id,
+    documentTitle: row.document_title,
+    sourceKind: row.source_kind,
+    content: row.content,
+    parentContent: row.parent_content,
+    headingPath: row.heading_path,
+    charStart: row.char_start,
+    charEnd: row.char_end,
+    score,
+    group,
+  };
+}
+
+/** Escapes LIKE metacharacters so the user's query matches literally (default escape char is backslash). */
+function likeLiteral(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => "\\" + c);
+}
+
+export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}): Promise<SearchResult> {
+  const { sql } = ctx;
+  const k = opts.k ?? config.retrieval.defaultK;
+  const kinds = opts.sourceKinds ?? null;
+  const since = opts.since ?? null;
+  const until = opts.until ?? null;
+
+  const [queryVector] = await ctx.embedder.embed([query], "query");
+  const qvec = toVector(queryVector);
+
+  const [chunkCands, docCands, entityRefs] = await Promise.all([
+    sql<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+      select chunk_id, vector_rank, keyword_rank
+      from brain.hybrid_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
+    sql<{ document_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+      select document_id, vector_rank, keyword_rank
+      from brain.summary_search(${query}, ${qvec}::vector, ${k}, ${kinds}::text[], ${since}, ${until})`,
+    detectEntities(sql, query),
+  ]);
+
+  // Layer 2: fused candidates, reranked.
+  const fused = reciprocalRankFusion(chunkCands.map((c) => ({ id: c.chunk_id, vectorRank: c.vector_rank, keywordRank: c.keyword_rank })));
+  const rows = await loadChunks(sql, fused.map((f) => f.id));
+  const ordered = fused.map((f) => rows.get(f.id)!).filter(Boolean);
+  const reranked = ordered.length ? await ctx.reranker.rerank(query, ordered.map((r) => r.content), k) : [];
+  const passages: Passage[] = reranked.map((h) => toPassage(ordered[h.index], h.score, "hybrid"));
+  const seen = new Set(passages.map((p) => p.chunkId));
+
+  // Layer 3: document summaries.
+  const docFused = reciprocalRankFusion(docCands.map((d) => ({ id: d.document_id, vectorRank: d.vector_rank, keywordRank: d.keyword_rank })));
+  const docRows = docFused.length
+    ? await sql<{ id: string; title: string | null; source_kind: string; summary: string | null }[]>`
+        select id, title, source_kind, summary from brain.documents where id = any(${docFused.map((d) => d.id)}::uuid[])`
+    : [];
+  const documents: DocHit[] = docFused
+    .map((d) => {
+      const r = docRows.find((x) => x.id === d.id);
+      return r ? { documentId: r.id, title: r.title, sourceKind: r.source_kind, summary: r.summary, score: d.fused } : null;
+    })
+    .filter((d): d is DocHit => d !== null);
+
+  // Layer 4: graph expansion from entities named in the query.
+  const entities: EntityHit[] = [];
+  for (const ref of entityRefs) {
+    const neighbors = await sql<Neighbor[]>`
+      select nb.node_id as id, x.type, x.name, nb.depth
+      from brain.neighbors(${ref.id}, 1, null) nb
+      join brain.nodes x on x.id = nb.node_id
+      where nb.depth > 0 and ${opts.verifiedOnly ? sql`x.verified` : sql`true`}
+      order by nb.depth, x.name`;
+    entities.push({ ...ref, neighbors });
+    const mentioned = await sql<{ id: string }[]>`
+      select c.id from brain.mentions m
+      join brain.chunks c on c.id = m.chunk_id
+      join brain.documents d on d.id = c.document_id
+      where m.node_id = ${ref.id} and c.level = 1
+        and (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
+      order by m.confidence desc nulls last, c.id limit 5`;
+    const extra = await loadChunks(sql, mentioned.map((m) => m.id).filter((id) => !seen.has(id)));
+    for (const row of extra.values()) {
+      passages.push(toPassage(row, 0, "graph"));
+      seen.add(row.id);
+    }
+  }
+
+  // Layer 5: facts, always loaded unless turned off.
+  let facts: FactRow[] = [];
+  if (opts.includeFacts !== false) {
+    const rowsF = await sql<{ id: string; predicate: string; object_text: string; confidence: number | null; verified: boolean; source_chunk_id: string | null }[]>`
+      select id, predicate, object_text, confidence, verified, source_chunk_id from brain.current_facts(null)`;
+    facts = rowsF
+      .filter((f) => !opts.verifiedOnly || f.verified)
+      .map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, confidence: f.confidence, verified: f.verified, sourceChunkId: f.source_chunk_id }));
+  }
+
+  // Fallback: raw substring scan when the best reranked hit is weak.
+  const topScore = passages.find((p) => p.group === "hybrid")?.score ?? null;
+  let usedFallback = false;
+  if (topScore === null || topScore < config.retrieval.fallbackThreshold) {
+    const hits = await sql<{ id: string; title: string | null; source_kind: string; raw_content: string; pos: number }[]>`
+      select id, title, source_kind, raw_content, position(lower(${query}) in lower(raw_content)) as pos
+      from brain.documents
+      where raw_content ilike ${"%" + likeLiteral(query) + "%"}
+        and (${kinds}::text[] is null or source_kind = any(${kinds}::text[]))
+      limit 10`;
+    for (const h of hits) {
+      usedFallback = true;
+      const at = Math.max(0, h.pos - 1);
+      const start = Math.max(0, at - 200);
+      const end = Math.min(h.raw_content.length, at + query.length + 200);
+      passages.push({
+        chunkId: null,
+        documentId: h.id,
+        documentTitle: h.title,
+        sourceKind: h.source_kind,
+        content: h.raw_content.slice(start, end),
+        parentContent: null,
+        headingPath: [],
+        charStart: start,
+        charEnd: end,
+        score: 0,
+        group: "fallback",
+      });
+    }
+  }
+
+  const layers = ["hybrid", "summary", ...(entities.length ? ["graph"] : []), ...(facts.length ? ["facts"] : []), ...(usedFallback ? ["fallback"] : [])];
+  const filters = { sourceKinds: kinds, since, until, verifiedOnly: opts.verifiedOnly ?? false };
+  await sql`
+    insert into brain.retrieval_log (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client)
+    values (${query}, ${sql.json(filters as unknown as postgres.JSONValue)}, ${layers}::text[],
+            ${passages.map((p) => p.chunkId).filter((id): id is string => id !== null)}::uuid[],
+            ${entities.map((e) => e.id)}::uuid[], ${topScore}, ${usedFallback}, ${opts.client ?? "cli"})`;
+
+  return { query, passages, documents, entities, facts, usedFallback, topScore };
+}
