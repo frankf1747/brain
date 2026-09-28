@@ -1,0 +1,14 @@
+{"question": "What is the salary range for the Acme Senior Data Analyst role?", "expected_origins": ["job_description--acme-senior-data-analyst.md"], "needs": "keyword"}
+{"question": "Who led Acme's Series B?", "expected_origins": ["news--acme-series-b.md"], "needs": "keyword"}
+{"question": "Does Acme sponsor work visas?", "expected_origins": ["job_description--acme-senior-data-analyst.md", "conversation--interview-prep-with-priya.md", "email--recruiter-followup-beta-ventures.md"], "needs": "semantic"}
+{"question": "What should I study before the SQL screen?", "expected_origins": ["conversation--interview-prep-with-priya.md"], "needs": "semantic"}
+{"question": "Why can't you satisfy every fairness definition at once?", "expected_origins": ["note--fairness-in-ml.md"], "needs": "semantic"}
+{"question": "How much did prepending context to chunks reduce retrieval failures?", "expected_origins": ["paper--contextual-retrieval-abstract.md"], "needs": "semantic"}
+{"question": "What do I know about Priya Natarajan?", "expected_origins": ["conversation--interview-prep-with-priya.md", "job_description--acme-senior-data-analyst.md", "email--recruiter-followup-beta-ventures.md"], "needs": "graph"}
+{"question": "Which companies is Beta Ventures connected to?", "expected_origins": ["news--acme-series-b.md", "email--recruiter-followup-beta-ventures.md"], "needs": "graph"}
+{"question": "What is the ZX-9000?", "expected_origins": ["news--acme-series-b.md", "job_description--acme-senior-data-analyst.md"], "needs": "graph"}
+{"question": "Acme funding news", "expected_origins": ["news--acme-series-b.md"], "needs": "filter", "filters": {"sourceKinds": ["news"]}}
+{"question": "remote product analyst Denver", "expected_origins": ["email--recruiter-followup-beta-ventures.md"], "needs": "filter", "filters": {"sourceKinds": ["email"]}}
+{"question": "Chouldechova", "expected_origins": ["note--fairness-in-ml.md"], "needs": "keyword"}
+{"question": "X-90", "expected_origins": ["news--acme-series-b.md", "job_description--acme-senior-data-analyst.md", "conversation--interview-prep-with-priya.md"], "needs": "fallback"}
+{"question": "$115k", "expected_origins": ["email--recruiter-followup-beta-ventures.md"], "needs": "fallback"}

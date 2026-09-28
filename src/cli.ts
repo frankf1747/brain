@@ -182,6 +182,24 @@ program
     });
   });
 
+program
+  .command("eval")
+  .description("Run the golden set and report recall@10 and MRR")
+  .option("--golden <path>", "golden set file", "eval/golden.jsonl")
+  .option("--ingest <dir>", "ingest this corpus directory first")
+  .option("--json")
+  .action(async (opts) => {
+    const { runEval, ingestCorpus } = await import("./eval/run.js");
+    await withCtx(async (ctx) => {
+      if (opts.ingest) await ingestCorpus(ctx, opts.ingest);
+      const { scored, summary } = await runEval(ctx, opts.golden);
+      if (opts.json) return void console.log(JSON.stringify({ scored, summary }, null, 2));
+      for (const s of scored) console.log(`${s.rank === null ? "MISS" : `#${String(s.rank).padStart(2)}`}  ${s.needs.padEnd(9)} ${s.question}`);
+      console.log(`\noverall  recall@10=${summary.overall.recallAt10.toFixed(2)}  mrr=${summary.overall.mrr.toFixed(2)}  n=${summary.overall.n}`);
+      for (const [needs, m] of Object.entries(summary.byNeeds)) console.log(`${needs.padEnd(9)} recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}  n=${m.n}`);
+    });
+  });
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);

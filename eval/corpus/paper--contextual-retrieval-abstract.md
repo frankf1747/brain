@@ -1,0 +1,3 @@
+# Contextual Retrieval: prepending document context to chunks
+
+Abstract. Retrieval-augmented generation systems split documents into chunks and embed each chunk independently, which discards the context a chunk needs to be understood. We propose prepending a short, document-specific context string to each chunk before embedding and before building the BM25 index. On a benchmark of 9 datasets the method reduced the top-20 retrieval failure rate by 49 percent, and by 67 percent when combined with a reranker. The context strings are generated once per chunk with a language model and cached, so the cost is paid at indexing time rather than at query time.
