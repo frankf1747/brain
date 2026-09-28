@@ -1,0 +1,184 @@
+import { config } from "../../config.js";
+import type postgres from "postgres";
+import type { Ctx } from "../../ctx.js";
+import { toVector, type Db } from "../../db.js";
+import { canonicalName } from "../../text/normalize.js";
+import { ExtractionSchema, type Extraction } from "./extract.js";
+
+export type Decision = { action: "match"; nodeId: string } | { action: "create"; possibleDuplicateOf: string | null };
+
+export function decide(
+  candidates: { id: string; similarity: number }[],
+  thresholds: { matchThreshold: number; flagThreshold: number } = config.resolution,
+): Decision {
+  let best: { id: string; similarity: number } | null = null;
+  for (const c of candidates) if (!best || c.similarity > best.similarity) best = c;
+  if (!best) return { action: "create", possibleDuplicateOf: null };
+  if (best.similarity >= thresholds.matchThreshold) return { action: "match", nodeId: best.id };
+  if (best.similarity >= thresholds.flagThreshold) return { action: "create", possibleDuplicateOf: best.id };
+  return { action: "create", possibleDuplicateOf: null };
+}
+
+/** Lowercase and squash whitespace, keeping a map from squashed index to original index. */
+function squashWithMap(s: string): { text: string; map: number[] } {
+  let text = "";
+  const map: number[] = [];
+  let pendingSpace = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (/\s/.test(ch)) {
+      pendingSpace = text.length > 0;
+      continue;
+    }
+    if (pendingSpace) {
+      text += " ";
+      map.push(i - 1);
+      pendingSpace = false;
+    }
+    text += ch.toLowerCase();
+    map.push(i);
+  }
+  return { text, map };
+}
+
+export interface QuoteLocation {
+  chunkId: string;
+  start: number;
+  end: number;
+}
+
+const MIN_PREFIX = 12;
+
+export function locateQuote(chunks: { id: string; content: string }[], quote: string): QuoteLocation | null {
+  const full = squashWithMap(quote).text;
+  if (!full) return null;
+  // Full quote, then its first 40 characters, then ever shorter word-boundary prefixes
+  // (never under MIN_PREFIX characters), since models often paraphrase the tail of a quote.
+  const needles = [full];
+  let prefix = full.slice(0, 40).trimEnd();
+  while (prefix.length >= MIN_PREFIX) {
+    if (!needles.includes(prefix)) needles.push(prefix);
+    const cut = prefix.lastIndexOf(" ");
+    if (cut < 0) break;
+    prefix = prefix.slice(0, cut);
+  }
+  for (const needle of needles) {
+    for (const c of chunks) {
+      const { text, map } = squashWithMap(c.content);
+      const idx = text.indexOf(needle);
+      if (idx >= 0) return { chunkId: c.id, start: map[idx], end: map[idx + needle.length - 1] + 1 };
+    }
+  }
+  return null;
+}
+
+export function normalizePredicate(p: string): string {
+  return p.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function dateOrNull(s: string | null): Date | null {
+  if (!s) return null;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : new Date(t);
+}
+
+async function canonicalId(sql: Db, id: string): Promise<string> {
+  const [row] = await sql<{ id: string }[]>`select brain.canonical_node(${id}) as id`;
+  return row.id;
+}
+
+async function resolveEntity(
+  sql: Db,
+  entity: Extraction["entities"][number],
+  vector: number[],
+  knownTypes: Set<string>,
+  model: string,
+): Promise<string> {
+  const type = knownTypes.has(entity.type) ? entity.type : "concept";
+  const baseProps: Record<string, unknown> = knownTypes.has(entity.type) ? {} : { untyped_hint: entity.untyped_hint ?? entity.type };
+  const canonical = canonicalName(entity.name);
+  const aliasKeys = [entity.name, ...entity.aliases].map(canonicalName).filter(Boolean);
+
+  const [exact] = await sql<{ id: string }[]>`select id from brain.nodes where type = ${type} and canonical_name = ${canonical}`;
+  if (exact) return canonicalId(sql, exact.id);
+
+  const [byAlias] = await sql<{ id: string }[]>`
+    select id from brain.nodes where type = ${type} and (aliases && ${aliasKeys}::text[] or canonical_name = any(${aliasKeys}::text[])) limit 1`;
+  if (byAlias) return canonicalId(sql, byAlias.id);
+
+  const vec = toVector(vector);
+  const candidates = await sql<{ id: string; similarity: number }[]>`
+    select id, 1 - (name_embedding <=> ${vec}::vector) as similarity
+    from brain.nodes where type = ${type} and name_embedding is not null
+    order by name_embedding <=> ${vec}::vector limit 3`;
+  const decision = decide(candidates.map((c) => ({ id: c.id, similarity: Number(c.similarity) })));
+  if (decision.action === "match") return canonicalId(sql, decision.nodeId);
+
+  const props = decision.possibleDuplicateOf ? { ...baseProps, possible_duplicate_of: decision.possibleDuplicateOf } : baseProps;
+  const storedAliases = entity.aliases.map(canonicalName).filter((a) => a && a !== canonical);
+  const [created] = await sql<{ id: string }[]>`
+    insert into brain.nodes (type, name, canonical_name, aliases, properties, name_embedding, verified_by)
+    values (${type}, ${entity.name}, ${canonical}, ${storedAliases}::text[], ${sql.json(props as postgres.JSONValue)}, ${vec}::vector, ${"extractor:" + model})
+    on conflict (type, canonical_name) do update set updated_at = now()
+    returning id`;
+  // A concurrent or earlier insert may own this canonical name, and it may since have been merged.
+  return canonicalId(sql, created.id);
+}
+
+/** Stage 6. Turns stored extractions into nodes, edges, mentions and facts. Safe to re-run. */
+export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
+  const { sql, embedder } = ctx;
+  const extractions = await sql<{ section_chunk_id: string; payload: unknown }[]>`
+    select section_chunk_id, payload from brain.extractions where document_id = ${documentId}`;
+  if (extractions.length === 0) return; // extraction skipped; the document is still searchable
+
+  const [self] = await sql<{ id: string }[]>`select id from brain.nodes where is_self`;
+  const knownTypes = new Set((await sql<{ name: string }[]>`select name from brain.node_types`).map((r) => r.name));
+  const knownEdges = new Set((await sql<{ name: string }[]>`select name from brain.edge_types`).map((r) => r.name));
+
+  for (const ex of extractions) {
+    const payload = ExtractionSchema.parse(ex.payload);
+    const passages = await sql<{ id: string; content: string }[]>`
+      select id, content from brain.chunks where parent_id = ${ex.section_chunk_id} order by ordinal`;
+    const evidenceFor = (quote: string) => locateQuote(passages, quote);
+
+    const names = payload.entities.map((e) => `${knownTypes.has(e.type) ? e.type : "concept"}: ${e.name}`);
+    const vectors = names.length ? await embedder.embed(names, "document") : [];
+
+    const keyToNode = new Map<string, string>();
+    for (let i = 0; i < payload.entities.length; i++) {
+      const e = payload.entities[i];
+      const nodeId = await resolveEntity(sql, e, vectors[i], knownTypes, ctx.llm.model);
+      keyToNode.set(e.key, nodeId);
+      const loc = evidenceFor(e.quote);
+      await sql`
+        insert into brain.mentions (chunk_id, node_id, confidence, span_start, span_end)
+        values (${loc?.chunkId ?? ex.section_chunk_id}, ${nodeId}, 1, ${loc?.start ?? null}, ${loc?.end ?? null})
+        on conflict do nothing`;
+    }
+
+    for (const r of payload.relations) {
+      const from = keyToNode.get(r.from_key);
+      const to = keyToNode.get(r.to_key);
+      if (!from || !to || from === to) continue;
+      const type = knownEdges.has(r.type) ? r.type : "related_to";
+      const props = knownEdges.has(r.type) ? {} : { original_type: r.type };
+      const loc = evidenceFor(r.quote);
+      await sql`
+        insert into brain.edges (from_node, to_node, type, confidence, properties, evidence_chunk_id, valid_from, valid_to)
+        values (${from}, ${to}, ${type}, ${r.confidence}, ${sql.json(props as postgres.JSONValue)}, ${loc?.chunkId ?? ex.section_chunk_id},
+                ${dateOrNull(r.valid_from)}, ${dateOrNull(r.valid_to)})
+        on conflict do nothing`;
+    }
+
+    for (const f of payload.facts_about_self) {
+      const loc = evidenceFor(f.quote);
+      const objectNode = f.object_key ? keyToNode.get(f.object_key) ?? null : null;
+      await sql`
+        insert into brain.facts (subject_id, predicate, object_text, object_node_id, confidence, source_chunk_id, verified_by, valid_from, valid_to)
+        values (${self.id}, ${normalizePredicate(f.predicate)}, ${f.object_text}, ${objectNode}, ${f.confidence},
+                ${loc?.chunkId ?? ex.section_chunk_id}, ${"extractor:" + ctx.llm.model}, ${dateOrNull(f.valid_from)}, ${dateOrNull(f.valid_to)})
+        on conflict do nothing`;
+    }
+  }
+}
