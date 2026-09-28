@@ -68,9 +68,12 @@ ${edgeList}
 Rules:
 - Extract every named person, organization, place, project, event and artifact. Extract a concept only when it is a clear topic of the text, not every noun.
 - Use the listed types. If nothing fits, use "concept" and fill untyped_hint with what kind of thing it is.
+- One entity per real-world thing. If the text refers to the same thing in several ways, emit it once and put the other forms in aliases.
+- The owner, ${reg.selfName}, may appear as "I", "me", "my" or by name. When the text states a relationship between the owner and another entity (applied to, works at, studied at, knows, created), include the owner as a person entity named exactly "${reg.selfName}" and add the relation.
 - Every entity, relation and fact carries a short verbatim quote copied from the text.
-- Relations: only those the text states or clearly implies. confidence is 0 to 1.
-- facts_about_self: statements about ${reg.selfName}, the owner of this knowledge base, who may appear as "I", "me", "my" or by name. Never put facts about other people here. Leave it empty when the document says nothing about the owner.
+- Relations: only those the text states or clearly implies. confidence is 0 to 1. Direction matters: from_key and to_key must follow the direction in the edge type's description (for example created goes from the maker to the thing made).
+- facts_about_self: durable statements about the owner that stay true until something changes them: identity, status (visa, employment, education), skills, preferences, goals, locations the owner lives in or accepts, commitments. Do not record one-off events, advice received, or next steps as facts; those belong in the graph as events and relations. Never put facts about other people here. Leave it empty when the document says nothing durable about the owner.
+- valid_from and valid_to mean the period during which a fact or relation holds. Leave valid_to null unless the text says it stopped being true. Do not put an event's date in valid_to.
 - Dates are ISO 8601 or null. Never invent names, dates or numbers.`;
 }
 
