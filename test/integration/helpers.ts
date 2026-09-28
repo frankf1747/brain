@@ -1,4 +1,7 @@
 import { connect, type Db } from "../../src/db.js";
+import type { Ctx } from "../../src/ctx.js";
+import { FakeLlm } from "../../src/llm/llm.js";
+import { FakeEmbedder, FakeReranker } from "../../src/llm/voyage.js";
 
 export function testDb(): Db {
   return connect(
@@ -23,4 +26,13 @@ export function fakeVector(seed: number, dims = 1024): number[] {
   }
   const norm = Math.sqrt(v.reduce((s, a) => s + a * a, 0));
   return v.map((a) => a / norm);
+}
+
+export interface FakeCtx extends Ctx {
+  llm: FakeLlm;
+  embedder: FakeEmbedder;
+}
+
+export function fakeCtx(sql: Db, handler: (args: { system: string; user: string }) => unknown = () => ({})): FakeCtx {
+  return { sql, llm: new FakeLlm(handler), embedder: new FakeEmbedder(), reranker: new FakeReranker() };
 }
