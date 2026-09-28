@@ -200,6 +200,17 @@ program
     });
   });
 
+program
+  .command("backfill")
+  .description("Run summarize and extract for every unfinished document through the Batches API (needs ANTHROPIC_API_KEY; half price, slower)")
+  .option("--limit <n>", "max documents per stage", "500")
+  .option("--poll <seconds>", "poll interval", "30")
+  .action(async (opts) => {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("backfill uses the Batches API and needs ANTHROPIC_API_KEY; normal ingestion does not");
+    const { backfill } = await import("./ingest/backfill.js");
+    await withCtx((ctx) => backfill(ctx, { limit: Number(opts.limit), pollMs: Number(opts.poll) * 1000 }));
+  });
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
