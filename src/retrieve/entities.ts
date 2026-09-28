@@ -11,13 +11,18 @@ export function candidateNames(query: string): string[] {
   const tokens = query.replace(/["“”?,!;:()]/g, " ").split(/\s+/).filter(Boolean);
   let run: string[] = [];
   const flush = () => {
+    while (run.length && QUESTION_WORDS.has(run[0].toLowerCase())) run.shift();
     while (run.length && CONNECTORS.has(run[run.length - 1].toLowerCase())) run.pop();
-    if (run.length === 1 && QUESTION_WORDS.has(run[0].toLowerCase())) run = [];
     if (run.length) names.add(run.join(" "));
     run = [];
   };
   for (const t of tokens) {
-    if (/^[A-Z]/.test(t)) run.push(t.replace(/\.$/, ""));
+    const possessive = /^([A-Z].*?)(?:['’]s|['’])$/.exec(t);
+    if (possessive) {
+      // "Acme's" ends the name: keep the stem, then start a new run.
+      run.push(possessive[1]);
+      flush();
+    } else if (/^[A-Z]/.test(t)) run.push(t.replace(/\.$/, ""));
     else if (run.length && CONNECTORS.has(t.toLowerCase())) run.push(t);
     else flush();
   }

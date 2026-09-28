@@ -3,6 +3,7 @@ import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { ingest } from "../../src/ingest/pipeline.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { search } from "../../src/retrieve/search.js";
+import { FakeReranker, type RerankHit } from "../../src/llm/voyage.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -66,5 +67,38 @@ describe("search", () => {
       expect(res.passages.filter((p) => p.group === "fallback")).toEqual([]);
       expect(res.usedFallback).toBe(false);
     }
+  });
+
+  it("applies since/until to graph and fallback passages too", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const old = await ingest(ctx, { text: "Zorblax Industries in Austin opened a lab in 2020.", sourceKind: "news", title: "Old Zorblax", occurredAt: new Date("2020-01-01T00:00:00Z") });
+    await ingest(ctx, { text: "Gardening notes: tomatoes need full sun and deep watering.", sourceKind: "note", title: "Garden" });
+    const unfiltered = await search(ctx, "Zorblax Industries");
+    expect(unfiltered.passages.some((p) => p.documentId === old.documentId)).toBe(true);
+    // With since, hybrid search drops the old document; the graph (mentions) and fallback (substring) layers must too.
+    const res = await search(ctx, "Zorblax Industries", { since: new Date("2025-01-01T00:00:00Z") });
+    expect(res.passages.filter((p) => p.documentId === old.documentId).map((p) => p.group)).toEqual([]);
+    expect(res.entities.map((e) => e.name)).toContain("Zorblax Industries");
+  });
+
+  it("reranks with the chunk's context prefix but returns bare chunk text", async () => {
+    const ctx = await seed();
+    const seen: string[] = [];
+    const inner = new FakeReranker();
+    ctx.reranker = {
+      rerank: async (q: string, docs: string[], k: number): Promise<RerankHit[]> => {
+        seen.push(...docs);
+        return inner.rerank(q, docs, k);
+      },
+    };
+    const res = await search(ctx, "What did Zorblax Industries release?");
+    expect(seen.some((d) => d.startsWith("Zorblax news\nA note.\n\n") && d.includes("ZX-9000"))).toBe(true);
+    const hit = res.passages.find((p) => p.group === "hybrid" && p.content.includes("ZX-9000"))!;
+    expect(hit.content.startsWith("Zorblax news")).toBe(false);
+  });
+
+  it("rejects an empty query", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await expect(search(ctx, "   ")).rejects.toThrow("Search query is empty");
   });
 });

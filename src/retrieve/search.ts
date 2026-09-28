@@ -74,6 +74,7 @@ interface ChunkRow {
   document_id: string;
   content: string;
   heading_path: string[];
+  context_prefix: string;
   char_start: number;
   char_end: number;
   parent_content: string | null;
@@ -84,7 +85,7 @@ interface ChunkRow {
 async function loadChunks(sql: Db, ids: string[]): Promise<Map<string, ChunkRow>> {
   if (ids.length === 0) return new Map();
   const rows = await sql<ChunkRow[]>`
-    select c.id, c.document_id, c.content, c.heading_path, c.char_start, c.char_end,
+    select c.id, c.document_id, c.content, c.heading_path, c.context_prefix, c.char_start, c.char_end,
            p.content as parent_content, d.title as document_title, d.source_kind
     from brain.chunks c
     left join brain.chunks p on p.id = c.parent_id
@@ -114,7 +115,15 @@ function likeLiteral(s: string): string {
   return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
+/** The same date window hybrid_search and summary_search apply, for queries that read documents directly. */
+function inDateRange(sql: Db, alias: string, since: Date | null, until: Date | null) {
+  const at = sql`coalesce(${sql(alias)}.occurred_at, ${sql(alias)}.ingested_at)`;
+  return sql`(${since}::timestamptz is null or ${at} >= ${since}::timestamptz)
+    and (${until}::timestamptz is null or ${at} <= ${until}::timestamptz)`;
+}
+
 export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}): Promise<SearchResult> {
+  if (!query.trim()) throw new Error("Search query is empty");
   const { sql } = ctx;
   const k = opts.k ?? config.retrieval.defaultK;
   const kinds = opts.sourceKinds ?? null;
@@ -138,7 +147,11 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   const fused = reciprocalRankFusion(chunkCands.map((c) => ({ id: c.chunk_id, vectorRank: c.vector_rank, keywordRank: c.keyword_rank })));
   const rows = await loadChunks(sql, fused.map((f) => f.id));
   const ordered = fused.map((f) => rows.get(f.id)!).filter(Boolean);
-  const reranked = ordered.length ? await ctx.reranker.rerank(query, ordered.map((r) => r.content), k) : [];
+  const reranked = ordered.length ? await ctx.reranker.rerank(
+        query,
+        ordered.map((r) => (r.context_prefix ? r.context_prefix + "\n\n" : "") + r.content),
+        k,
+      ) : [];
   const passages: Passage[] = reranked.map((h) => toPassage(ordered[h.index], h.score, "hybrid"));
   const seen = new Set(passages.map((p) => p.chunkId));
 
@@ -171,9 +184,13 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
       join brain.documents d on d.id = c.document_id
       where m.node_id = ${ref.id} and c.level = 1
         and (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
+        and ${inDateRange(sql, "d", since, until)}
       order by m.confidence desc nulls last, c.id limit 5`;
-    const extra = await loadChunks(sql, mentioned.map((m) => m.id).filter((id) => !seen.has(id)));
-    for (const row of extra.values()) {
+    const newIds = mentioned.map((m) => m.id).filter((id) => !seen.has(id));
+    const extra = await loadChunks(sql, newIds);
+    for (const id of newIds) {
+      const row = extra.get(id);
+      if (!row) continue;
       passages.push(toPassage(row, 0, "graph"));
       seen.add(row.id);
     }
@@ -194,10 +211,11 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   let usedFallback = false;
   if (topScore === null || topScore < config.retrieval.fallbackThreshold) {
     const hits = await sql<{ id: string; title: string | null; source_kind: string; raw_content: string; pos: number }[]>`
-      select id, title, source_kind, raw_content, position(lower(${query}) in lower(raw_content)) as pos
-      from brain.documents
-      where raw_content ilike ${"%" + likeLiteral(query) + "%"}
-        and (${kinds}::text[] is null or source_kind = any(${kinds}::text[]))
+      select d.id, d.title, d.source_kind, d.raw_content, position(lower(${query}) in lower(d.raw_content)) as pos
+      from brain.documents d
+      where d.raw_content ilike ${"%" + likeLiteral(query) + "%"}
+        and (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
+        and ${inDateRange(sql, "d", since, until)}
       limit 10`;
     for (const h of hits) {
       usedFallback = true;
