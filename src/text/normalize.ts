@@ -7,7 +7,7 @@ export function canonicalName(name: string): string {
   return squashWhitespace(
     name
       .toLowerCase()
-      .replace(/['']/g, "")
+      .replace(/['’]/g, "")
       .replace(/[^\p{L}\p{N}]+/gu, " "),
   );
 }
