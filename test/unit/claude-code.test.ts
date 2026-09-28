@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { ClaudeCodeLlm, type Exec } from "../../src/llm/claude-code.js";
+import { ClaudeCodeLlm, spawnExec, type Exec } from "../../src/llm/claude-code.js";
 
 function fakeExec(envelope: unknown) {
   const calls: { bin: string; args: string[]; input: string }[] = [];
@@ -42,5 +42,17 @@ describe("ClaudeCodeLlm", () => {
     const { exec, calls } = fakeExec({ is_error: false, result: "hello" });
     expect(await new ClaudeCodeLlm({ exec }).text({ system: "s", user: "u" })).toBe("hello");
     expect(calls[0].args).not.toContain("--json-schema");
+  });
+});
+
+describe("spawnExec", () => {
+  it("rejects with the exit code when the child exits before reading a large stdin", async () => {
+    await expect(spawnExec("sh", ["-c", "exit 2"], "x".repeat(2_000_000))).rejects.toThrow(/exited with 2/);
+  });
+
+  it("kills a hung child and rejects after the timeout", async () => {
+    const start = Date.now();
+    await expect(spawnExec(process.execPath, ["-e", "setTimeout(()=>{}, 60000)"], "", 200)).rejects.toThrow(/timed out/);
+    expect(Date.now() - start).toBeLessThan(1000);
   });
 });

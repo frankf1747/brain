@@ -60,7 +60,7 @@ export class VoyageClient implements Embedder, Reranker {
       query,
       documents,
       model: this.opts.rerankModel ?? config.voyageRerankModel,
-      top_k: topK,
+      top_k: Math.min(topK, documents.length),
     });
     return (body.data as { index: number; relevance_score: number }[]).map((d) => ({ index: d.index, score: d.relevance_score }));
   }
@@ -71,11 +71,20 @@ export class VoyageClient implements Embedder, Reranker {
     const delay = this.opts.retryDelayMs ?? 500;
     let lastError: Error | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
-      const res = await fetchFn(`${BASE}${path}`, {
+      const init = {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
         body: JSON.stringify(payload),
-      });
+      };
+      let res: Response;
+      try {
+        res = await fetchFn(`${BASE}${path}`, init);
+      } catch (err) {
+        // Network failure (DNS, reset, "fetch failed"): retry with backoff like a 5xx.
+        lastError = err instanceof Error ? err : new Error(String(err));
+        await new Promise((r) => setTimeout(r, delay * 2 ** attempt));
+        continue;
+      }
       if (res.ok) return res.json();
       const text = await res.text();
       lastError = new Error(`Voyage ${path} returned ${res.status}: ${text.slice(0, 200)}`);

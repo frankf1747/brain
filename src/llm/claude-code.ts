@@ -5,19 +5,39 @@ import type { Llm, StructuredArgs, TextArgs } from "./llm.js";
 
 export type Exec = (bin: string, args: string[], input: string) => Promise<{ stdout: string }>;
 
-/** Runs a binary, feeds `input` on stdin, resolves with stdout on exit 0. */
-export const spawnExec: Exec = (bin, args, input) =>
+export const CLAUDE_CODE_TIMEOUT_MS = 600_000;
+
+/** Runs a binary, feeds `input` on stdin, resolves with stdout on exit 0. Kills it after `timeoutMs`. */
+export const spawnExec = (
+  bin: string,
+  args: string[],
+  input: string,
+  timeoutMs: number = CLAUDE_CODE_TIMEOUT_MS,
+): Promise<{ stdout: string }> =>
   new Promise((resolve, reject) => {
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+      reject(new Error(`${bin} timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    child.on("error", reject);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) return;
       if (code === 0) resolve({ stdout });
       else reject(new Error(`${bin} exited with ${code}: ${(stderr || stdout).slice(0, 500)}`));
     });
+    // A child that exits before reading all of stdin makes the write fail with EPIPE; the close handler reports it.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 
@@ -43,7 +63,7 @@ export class ClaudeCodeLlm implements Llm {
   constructor(opts: { bin?: string; model?: string; exec?: Exec } = {}) {
     this.bin = opts.bin ?? config.claudeCodeBin;
     this.model = opts.model ?? config.claudeCodeModel;
-    this.exec = opts.exec ?? spawnExec;
+    this.exec = opts.exec ?? ((bin, args, input) => spawnExec(bin, args, input, CLAUDE_CODE_TIMEOUT_MS));
   }
 
   private args(system: string, schema?: z.ZodType<unknown>): string[] {

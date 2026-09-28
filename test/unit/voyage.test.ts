@@ -52,6 +52,35 @@ describe("VoyageClient", () => {
   });
 });
 
+describe("VoyageClient network errors and clamping", () => {
+  it("retries a thrown network error then succeeds", async () => {
+    let n = 0;
+    const fn = (async () => {
+      n++;
+      if (n === 1) throw new TypeError("fetch failed");
+      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1] }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(await new VoyageClient({ apiKey: "k", fetchFn: fn, retryDelayMs: 1 }).embed(["a"], "query")).toEqual([[1]]);
+    expect(n).toBe(2);
+  });
+
+  it("gives up after 4 attempts when fetch always throws", async () => {
+    let n = 0;
+    const fn = (async () => {
+      n++;
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    await expect(new VoyageClient({ apiKey: "k", fetchFn: fn, retryDelayMs: 1 }).embed(["a"], "query")).rejects.toThrow(/fetch failed/);
+    expect(n).toBe(4);
+  });
+
+  it("clamps top_k to the number of documents", async () => {
+    const { fn, calls } = fakeFetch([{ status: 200, body: { data: [{ index: 0, relevance_score: 0.5 }] } }]);
+    await new VoyageClient({ apiKey: "k", fetchFn: fn }).rerank("q", ["a", "b"], 10);
+    expect(calls[0].body.top_k).toBe(2);
+  });
+});
+
 describe("fakes", () => {
   it("hashVector is deterministic, unit length, and case/punctuation insensitive", () => {
     const a = hashVector("Acme, Inc.");
