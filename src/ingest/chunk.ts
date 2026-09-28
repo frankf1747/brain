@@ -30,6 +30,7 @@ export interface Block extends Span {
 }
 
 const HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+const FENCE = /^ {0,3}(```|~~~)/;
 
 function hasText(text: string, span: Span): boolean {
   return text.slice(span.start, span.end).trim().length > 0;
@@ -41,9 +42,15 @@ export function headingBlocks(text: string): Block[] {
   const stack: { level: number; title: string }[] = [];
   let cur: Block = { headingPath: [], start: 0, end: 0 };
   let pos = 0;
+  let inFence = false;
   for (const line of text.split("\n")) {
     const lineStart = pos;
     pos += line.length + 1;
+    if (FENCE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     const m = HEADING.exec(line);
     if (!m) continue;
     cur.end = lineStart;
@@ -71,7 +78,7 @@ export function sentenceSpans(text: string, block: Span): Span[] {
   const out: Span[] = [];
   const slice = text.slice(block.start, block.end);
   const paragraph = /(?:[^\n]|\n(?!\s*\n))+/g;
-  const sentence = /[^.!?]+(?:[.!?]+["')\]]*|$)/g;
+  const sentence = /[^.!?]*(?:[.!?]+["')\]]*|$)/g;
   for (const p of slice.matchAll(paragraph)) {
     const pStart = block.start + p.index!;
     let found = 0;
@@ -97,26 +104,24 @@ export function pack(text: string, units: Span[], maxTokens: number, overlapToke
   let i = 0;
   while (i < units.length) {
     let j = i;
-    let tokens = 0;
-    while (j < units.length && tokens + est(units[j]) <= maxTokens) {
-      tokens += est(units[j]);
-      j++;
-    }
+    while (j < units.length && est({ start: units[i].start, end: units[j].end }) <= maxTokens) j++;
     if (j === i) {
       const u = units[i];
-      const step = maxTokens * 4;
-      for (let s = u.start; s < u.end; s += step) out.push({ start: s, end: Math.min(s + step, u.end) });
+      const step = Math.max(1, Math.floor(maxTokens * 4));
+      for (let s = u.start; s < u.end; ) {
+        let e = Math.min(s + step, u.end);
+        if (e < u.end && e - 1 > s && /[\uD800-\uDBFF]/.test(text[e - 1])) e--;
+        const piece = trimSpan(text, { start: s, end: e });
+        if (piece) out.push(piece);
+        s = e;
+      }
       i++;
       continue;
     }
     out.push({ start: units[i].start, end: units[j - 1].end });
     if (j >= units.length) break;
     let back = j;
-    let overlap = 0;
-    while (back - 1 > i && overlap + est(units[back - 1]) <= overlapTokens) {
-      overlap += est(units[back - 1]);
-      back--;
-    }
+    while (back - 1 > i && est({ start: units[back - 1].start, end: units[j - 1].end }) <= overlapTokens) back--;
     i = back;
   }
   return out;
