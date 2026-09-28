@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { VoyageClient, FakeEmbedder, FakeReranker, hashVector } from "../../src/llm/voyage.js";
 
 function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
@@ -36,7 +36,7 @@ describe("VoyageClient", () => {
   it("retries a 429 then succeeds, and throws on 400", async () => {
     const ok = { data: [{ index: 0, embedding: [1] }] };
     const { fn } = fakeFetch([{ status: 429, body: {} }, { status: 200, body: ok }]);
-    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, retryDelayMs: 1 });
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, retryDelayMs: 1, rateLimitDelayMs: 1 });
     expect(await client.embed(["a"], "query")).toEqual([[1]]);
     const bad = fakeFetch([{ status: 400, body: { detail: "nope" } }]);
     await expect(new VoyageClient({ apiKey: "k", fetchFn: bad.fn }).embed(["a"], "query")).rejects.toThrow(/400/);
@@ -78,6 +78,91 @@ describe("VoyageClient network errors and clamping", () => {
     const { fn, calls } = fakeFetch([{ status: 200, body: { data: [{ index: 0, relevance_score: 0.5 }] } }]);
     await new VoyageClient({ apiKey: "k", fetchFn: fn }).rerank("q", ["a", "b"], 10);
     expect(calls[0].body.top_k).toBe(2);
+  });
+});
+
+describe("VoyageClient rate limits", () => {
+  const ok = { data: [{ index: 0, embedding: [1] }] };
+
+  function seqFetch(responses: Array<{ status: number; headers?: Record<string, string> }>) {
+    let n = 0;
+    const fn = (async () => {
+      const r = responses[Math.min(n, responses.length - 1)];
+      n++;
+      return new Response(JSON.stringify(r.status === 200 ? ok : { detail: "rate limited" }), {
+        status: r.status,
+        headers: r.headers,
+      });
+    }) as unknown as typeof fetch;
+    return { fn, count: () => n };
+  }
+
+  function recorder() {
+    const waits: number[] = [];
+    return { waits, sleep: async (ms: number) => void waits.push(ms) };
+  }
+
+  it("honors a Retry-After header in seconds", async () => {
+    const { fn } = seqFetch([{ status: 429, headers: { "retry-after": "2" } }, { status: 200 }]);
+    const { waits, sleep } = recorder();
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const out = vi.spyOn(process.stdout, "write");
+    try {
+      const client = new VoyageClient({ apiKey: "k", fetchFn: fn, sleep });
+      expect(await client.embed(["a"], "query")).toEqual([[1]]);
+      expect(waits).toEqual([2000]);
+      expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: Voyage rate limited, waiting 2s");
+      expect(out.mock.calls.map((c) => String(c[0])).join("")).not.toContain("rate limited");
+    } finally {
+      err.mockRestore();
+      out.mockRestore();
+    }
+  });
+
+  it("honors a Retry-After header given as an HTTP date", async () => {
+    const at = new Date(Date.now() + 5000).toUTCString();
+    const { fn } = seqFetch([{ status: 429, headers: { "retry-after": at } }, { status: 200 }]);
+    const { waits, sleep } = recorder();
+    await new VoyageClient({ apiKey: "k", fetchFn: fn, sleep }).embed(["a"], "query");
+    expect(waits.length).toBe(1);
+    expect(waits[0]).toBeGreaterThan(2000);
+    expect(waits[0]).toBeLessThanOrEqual(5000);
+  });
+
+  it("without Retry-After, doubles rateLimitDelayMs and caps each wait at 60s", async () => {
+    const { fn } = seqFetch([
+      { status: 429 }, { status: 429 }, { status: 429 }, { status: 429 }, { status: 429 }, { status: 200 },
+    ]);
+    const { waits, sleep } = recorder();
+    await new VoyageClient({ apiKey: "k", fetchFn: fn, sleep }).embed(["a"], "query");
+    expect(waits).toEqual([20_000, 40_000, 60_000, 60_000, 60_000]);
+  });
+
+  it("gives up after 6 attempts of 429", async () => {
+    const { fn, count } = seqFetch([{ status: 429 }]);
+    const { sleep } = recorder();
+    await expect(
+      new VoyageClient({ apiKey: "k", fetchFn: fn, sleep, rateLimitDelayMs: 1 }).embed(["a"], "query"),
+    ).rejects.toThrow(/429/);
+    expect(count()).toBe(6);
+  });
+
+  it("does not retry a 400", async () => {
+    const { fn, count } = seqFetch([{ status: 400 }]);
+    const { waits, sleep } = recorder();
+    await expect(new VoyageClient({ apiKey: "k", fetchFn: fn, sleep }).embed(["a"], "query")).rejects.toThrow(/400/);
+    expect(count()).toBe(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("keeps 4 attempts and retryDelayMs backoff for 5xx", async () => {
+    const { fn, count } = seqFetch([{ status: 503 }]);
+    const { waits, sleep } = recorder();
+    await expect(
+      new VoyageClient({ apiKey: "k", fetchFn: fn, sleep, retryDelayMs: 10 }).embed(["a"], "query"),
+    ).rejects.toThrow(/503/);
+    expect(count()).toBe(4);
+    expect(waits).toEqual([10, 20, 40]);
   });
 });
 

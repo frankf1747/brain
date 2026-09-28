@@ -25,6 +25,26 @@ export interface VoyageOptions {
   fetchFn?: typeof fetch;
   batchSize?: number;
   retryDelayMs?: number;
+  /** Base wait after a 429 without Retry-After; doubles per attempt, capped at 60 s. */
+  rateLimitDelayMs?: number;
+  /** Injected for tests; defaults to a setTimeout-based sleep. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const MAX_ATTEMPTS = 4;
+const MAX_RATE_LIMIT_ATTEMPTS = 6;
+const MAX_RATE_LIMIT_WAIT_MS = 60_000;
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Parses a Retry-After header (delta seconds or an HTTP date) into milliseconds, or undefined. */
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed) * 1000;
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, at - Date.now());
 }
 
 export class VoyageClient implements Embedder, Reranker {
@@ -68,9 +88,14 @@ export class VoyageClient implements Embedder, Reranker {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async post(path: string, payload: unknown): Promise<any> {
     const fetchFn = this.opts.fetchFn ?? fetch;
+    const sleep = this.opts.sleep ?? defaultSleep;
     const delay = this.opts.retryDelayMs ?? 500;
+    const rateDelay = this.opts.rateLimitDelayMs ?? 20_000;
     let lastError: Error | undefined;
-    for (let attempt = 0; attempt < 4; attempt++) {
+    // 429s and other transient failures have separate budgets: rate limits need minute-scale waits.
+    let failures = 0;
+    let rateLimits = 0;
+    for (;;) {
       const init = {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
@@ -82,16 +107,27 @@ export class VoyageClient implements Embedder, Reranker {
       } catch (err) {
         // Network failure (DNS, reset, "fetch failed"): retry with backoff like a 5xx.
         lastError = err instanceof Error ? err : new Error(String(err));
-        await new Promise((r) => setTimeout(r, delay * 2 ** attempt));
+        if (++failures >= MAX_ATTEMPTS) throw lastError;
+        await sleep(delay * 2 ** (failures - 1));
         continue;
       }
       if (res.ok) return res.json();
       const text = await res.text();
       lastError = new Error(`Voyage ${path} returned ${res.status}: ${text.slice(0, 200)}`);
-      if (res.status !== 429 && res.status < 500) throw lastError;
-      await new Promise((r) => setTimeout(r, delay * 2 ** attempt));
+      if (res.status === 429) {
+        if (++rateLimits >= MAX_RATE_LIMIT_ATTEMPTS) throw lastError;
+        const wait = Math.min(
+          retryAfterMs(res.headers.get("retry-after")) ?? rateDelay * 2 ** (rateLimits - 1),
+          MAX_RATE_LIMIT_WAIT_MS,
+        );
+        process.stderr.write(`brain: Voyage rate limited, waiting ${Math.ceil(wait / 1000)}s\n`);
+        await sleep(wait);
+        continue;
+      }
+      if (res.status < 500) throw lastError;
+      if (++failures >= MAX_ATTEMPTS) throw lastError;
+      await sleep(delay * 2 ** (failures - 1));
     }
-    throw lastError;
   }
 }
 
