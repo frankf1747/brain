@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { testDb, wipe } from "./helpers.js";
 import { storeDocument } from "../../src/ingest/store.js";
+import { sha256Hex } from "../../src/text/hash.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -27,6 +28,16 @@ describe("storeDocument", () => {
     expect(b.created).toBe(false);
     const [{ n }] = await sql<{ n: string }[]>`select count(*)::text as n from brain.documents`;
     expect(Number(n)).toBe(1);
+  });
+
+  it("heals a document that has no ingest job", async () => {
+    const text = "orphaned document text";
+    const [row] = await sql<{ id: string }[]>`
+      insert into brain.documents (content_hash, source_kind, raw_content) values (${sha256Hex(text)}, 'paste', ${text}) returning id`;
+    const res = await storeDocument(sql, { text });
+    expect(res).toEqual({ id: row.id, created: false });
+    const jobs = await sql<{ stage: string }[]>`select stage from brain.ingest_jobs where document_id = ${row.id}`;
+    expect(jobs.map((j) => j.stage)).toEqual(["stored"]);
   });
 
   it("refuses empty input", async () => {

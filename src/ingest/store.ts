@@ -17,19 +17,30 @@ export async function storeDocument(sql: Db, input: StoreInput): Promise<{ id: s
   if (!input.text.trim()) throw new Error("Refusing to store an empty document");
   const hash = sha256Hex(input.text);
 
-  const [existing] = await sql<{ id: string }[]>`select id from brain.documents where content_hash = ${hash}`;
-  if (existing) return { id: existing.id, created: false };
+  const healJob = (id: string) => sql`insert into brain.ingest_jobs (document_id, stage) values (${id}, 'stored') on conflict do nothing`;
 
-  const [row] = await sql<{ id: string }[]>`
-    insert into brain.documents (content_hash, source_kind, title, origin, raw_content, mime_type, metadata, occurred_at)
-    values (${hash}, ${input.sourceKind ?? "paste"}, ${input.title ?? null}, ${input.origin ?? null},
-            ${input.text}, ${input.mimeType ?? "text/plain"}, ${sql.json((input.metadata ?? {}) as postgres.JSONValue)}, ${input.occurredAt ?? null})
-    on conflict (content_hash) do nothing
-    returning id`;
+  const [existing] = await sql<{ id: string }[]>`select id from brain.documents where content_hash = ${hash}`;
+  if (existing) {
+    // A document without a job (e.g. stored before stores were atomic) would strand runPipeline; heal it.
+    await healJob(existing.id);
+    return { id: existing.id, created: false };
+  }
+
+  // Document and job are written together so a crash can never leave one without the other.
+  const row = await sql.begin(async (tx) => {
+    const [inserted] = await tx<{ id: string }[]>`
+      insert into brain.documents (content_hash, source_kind, title, origin, raw_content, mime_type, metadata, occurred_at)
+      values (${hash}, ${input.sourceKind ?? "paste"}, ${input.title ?? null}, ${input.origin ?? null},
+              ${input.text}, ${input.mimeType ?? "text/plain"}, ${sql.json((input.metadata ?? {}) as postgres.JSONValue)}, ${input.occurredAt ?? null})
+      on conflict (content_hash) do nothing
+      returning id`;
+    if (inserted) await tx`insert into brain.ingest_jobs (document_id, stage) values (${inserted.id}, 'stored') on conflict do nothing`;
+    return inserted as { id: string } | undefined;
+  });
   if (!row) {
     const [raced] = await sql<{ id: string }[]>`select id from brain.documents where content_hash = ${hash}`;
+    await healJob(raced.id);
     return { id: raced.id, created: false };
   }
-  await sql`insert into brain.ingest_jobs (document_id, stage) values (${row.id}, 'stored') on conflict do nothing`;
   return { id: row.id, created: true };
 }
