@@ -8,15 +8,16 @@ beforeEach(() => wipe(sql));
 
 describe("facts", () => {
   it("adds an unverified fact labeled with the writer, and dedupes", async () => {
-    const a = await addFact(sql, { predicate: "Lives In", objectText: "Los Angeles", by: "agent:test" });
-    const b = await addFact(sql, { predicate: "lives_in", objectText: "Los Angeles", by: "agent:test" });
+    const { id: a, predicate } = await addFact(sql, { predicate: "Lives In", objectText: "Los Angeles", by: "agent:test" });
+    expect(predicate).toBe("lives_in");
+    const { id: b } = await addFact(sql, { predicate: "lives_in", objectText: "Los Angeles", by: "agent:test" });
     expect(b).toBe(a);
     const [f] = await listFacts(sql, false);
     expect(f).toEqual(expect.objectContaining({ id: a, predicate: "lives_in", objectText: "Los Angeles", verified: false, verifiedBy: "agent:test" }));
   });
 
   it("supersedes: the old fact leaves the current view, history remains", async () => {
-    const a = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
+    const { id: a } = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
     const b = await supersedeFact(sql, a, { objectText: "Los Angeles", by: "agent:test", validFrom: new Date("2026-09-01") });
     const current = await listFacts(sql, false);
     expect(current.map((f) => f.id)).toEqual([b]);
@@ -26,7 +27,7 @@ describe("facts", () => {
   });
 
   it("verifies", async () => {
-    const a = await addFact(sql, { predicate: "prefers", objectText: "hybrid work", by: "agent:test" });
+    const { id: a } = await addFact(sql, { predicate: "prefers", objectText: "hybrid work", by: "agent:test" });
     expect(await verifyFact(sql, a, "frank")).toBe(true);
     expect(await verifyFact(sql, "00000000-0000-0000-0000-000000000000", "frank")).toBe(false);
     const [f] = await listFacts(sql, false);
@@ -51,5 +52,34 @@ describe("facts", () => {
     }
     expect((await listFacts(sql, false)).length).toBe(1);
     expect((await listFacts(sql, true)).length).toBe(2);
+  });
+
+  it("superseding back to an earlier value revives that fact instead of making a cycle", async () => {
+    const { id: a } = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
+    const b = await supersedeFact(sql, a, { objectText: "Los Angeles", by: "agent:test" });
+    const c = await supersedeFact(sql, b, { objectText: "Austin", by: "agent:test" });
+    expect(c).toBe(a);
+    const current = await listFacts(sql, false);
+    expect(current.map((f) => f.objectText)).toEqual(["Austin"]);
+    expect(current[0]).toEqual(expect.objectContaining({ id: a, supersededBy: null, validTo: null, verifiedBy: "agent:test" }));
+    const all = await listFacts(sql, true);
+    expect(all.map((f) => f.objectText).sort()).toEqual(["Austin", "Los Angeles"]);
+    expect(all.find((f) => f.id === b)?.supersededBy).toBe(a);
+  });
+
+  it("refuses to supersede a fact with its own value and leaves it current", async () => {
+    const { id: a } = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
+    await expect(supersedeFact(sql, a, { objectText: " Austin ", by: "agent:test" })).rejects.toThrow(/New value equals the current value/);
+    const current = await listFacts(sql, false);
+    expect(current.map((f) => [f.id, f.supersededBy])).toEqual([[a, null]]);
+  });
+
+  it("rejects empty predicates and values", async () => {
+    await expect(addFact(sql, { predicate: "!!!", objectText: "x", by: "t" })).rejects.toThrow(/predicate must contain letters or digits/);
+    await expect(addFact(sql, { predicate: "住在", objectText: "x", by: "t" })).rejects.toThrow(/predicate must contain letters or digits/);
+    await expect(addFact(sql, { predicate: "lives_in", objectText: "   ", by: "t" })).rejects.toThrow(/value must not be empty/);
+    const { id: a } = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
+    await expect(supersedeFact(sql, a, { objectText: "   ", by: "t" })).rejects.toThrow(/value must not be empty/);
+    expect((await listFacts(sql, true)).length).toBe(1);
   });
 });

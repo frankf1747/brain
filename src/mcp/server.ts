@@ -20,7 +20,10 @@ export interface ServerOptions {
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 const text = (t: string): ToolResult => ({ content: [{ type: "text", text: t }] });
 const fail = (err: unknown): ToolResult => ({ content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true });
-const dateOrUndefined = (s?: string) => (s && !Number.isNaN(Date.parse(s)) ? new Date(s) : undefined);
+const dateOrUndefined = (s?: string) => (s ? new Date(s) : undefined);
+/** Dates are validated up front, so an unparseable one is an error rather than a silently dropped filter. */
+const isoDate = z.string().refine((s) => !Number.isNaN(Date.parse(s)), "ISO date such as 2026-09-01");
+const log = (m: string) => process.stderr.write(m + "\n");
 
 export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
   const server = new McpServer({ name: "brain", version: "0.1.0" });
@@ -43,9 +46,9 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
       inputSchema: {
         query: z.string().min(1),
         k: z.number().int().min(1).max(30).optional().describe("Number of passages, default 10"),
-        source_kinds: z.array(z.string()).optional().describe("Only these kinds, e.g. [\"news\",\"conversation\"]"),
-        since: z.string().optional().describe("ISO date lower bound"),
-        until: z.string().optional().describe("ISO date upper bound"),
+        source_kinds: z.array(z.string()).optional().describe("Only these kinds (kinds listed by brain_orient), e.g. [\"news\",\"conversation\"]"),
+        since: isoDate.optional().describe("ISO date lower bound, e.g. 2026-09-01"),
+        until: isoDate.optional().describe("ISO date upper bound, e.g. 2026-09-30"),
         verified_only: z.boolean().optional(),
       },
     },
@@ -59,7 +62,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
 
   server.registerTool(
     "brain_get_document",
-    { title: "Read a document", description: "Metadata and a slice of the raw text of one document by id. Use offset to page.", inputSchema: { document_id: z.string(), offset: z.number().int().min(0).optional(), length: z.number().int().min(1).max(20000).optional() } },
+    { title: "Read a document", description: "Metadata and a slice of the raw text of one document by id. Use offset to page.", inputSchema: { document_id: z.string().describe("UUID shown as 'document <id>' in brain_search results"), offset: z.number().int().min(0).optional(), length: z.number().int().min(1).max(20000).optional() } },
     async (a) => {
       try {
         const d = await getDocument(ctx.sql, a.document_id, a.offset ?? 0, a.length ?? 4000);
@@ -111,7 +114,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         title: z.string().optional(),
         source_kind: z.string().optional().describe("Free label: note, conversation, news, job_description, email, paper, paste"),
         origin: z.string().optional().describe("URL, file path or other provenance"),
-        occurred_at: z.string().optional().describe("ISO date the content is about"),
+        occurred_at: isoDate.optional().describe("ISO date the content is about, e.g. 2026-09-01"),
         metadata: z.record(z.string(), z.string()).optional(),
       },
     },
@@ -128,7 +131,13 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         }
         if (first.error) return fail(new Error(`Stored as document ${id} but chunking failed: ${first.error}`));
         jobs.start(id);
-        const resumed = await jobs.resumeStalled();
+        let resumed: string[] = [];
+        try {
+          resumed = await jobs.resumeStalled();
+        } catch (e) {
+          // The document is stored and queued; failing to resume others must not turn this into an error.
+          log(`brain: resuming stalled jobs failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
         return text(`${saved}: document ${id} (stage ${first.stage}). Summary, embeddings and extraction continue in the background; brain_status shows progress.${resumed.length ? ` Also resumed ${resumed.length} stalled job(s).` : ""}`);
       } catch (e) { return fail(e); }
     },
@@ -136,18 +145,18 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
 
   server.registerTool(
     "brain_add_fact",
-    { title: "Record a fact about the owner", description: "Only for things the owner states about themselves. Stored unverified until the owner verifies it.", inputSchema: { predicate: z.string().min(1).describe("snake_case, e.g. lives_in, prefers, visa_status"), object_text: z.string().min(1), valid_from: z.string().optional() } },
+    { title: "Record a fact about the owner", description: "Only for things the owner states about themselves. Stored unverified until the owner verifies it.", inputSchema: { predicate: z.string().trim().min(1).describe("snake_case, e.g. lives_in, prefers, visa_status"), object_text: z.string().trim().min(1), valid_from: isoDate.optional().describe("ISO date the fact holds from, e.g. 2026-09-01") } },
     async (a) => {
       try {
-        const id = await addFact(ctx.sql, { predicate: a.predicate, objectText: a.object_text, by, validFrom: dateOrUndefined(a.valid_from) ?? null });
-        return text(`Recorded fact ${id}: ${a.predicate} = ${a.object_text} (unverified, ${by}).`);
+        const { id, predicate } = await addFact(ctx.sql, { predicate: a.predicate, objectText: a.object_text, by, validFrom: dateOrUndefined(a.valid_from) ?? null });
+        return text(`Recorded fact ${id}: ${predicate} = ${a.object_text} (unverified, ${by}).`);
       } catch (e) { return fail(e); }
     },
   );
 
   server.registerTool(
     "brain_supersede_fact",
-    { title: "Correct a fact", description: "Replace a fact's value. The old fact is kept as history and marked superseded.", inputSchema: { fact_id: z.string(), object_text: z.string().min(1), valid_from: z.string().optional() } },
+    { title: "Correct a fact", description: "Replace a fact's value. The old fact is kept as history and marked superseded.", inputSchema: { fact_id: z.string().describe("id from brain_get_facts"), object_text: z.string().trim().min(1), valid_from: isoDate.optional().describe("ISO date the new value holds from, e.g. 2026-09-01") } },
     async (a) => {
       try {
         const id = await supersedeFact(ctx.sql, a.fact_id, { objectText: a.object_text, by, validFrom: dateOrUndefined(a.valid_from) ?? null });

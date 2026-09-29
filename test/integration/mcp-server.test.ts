@@ -6,6 +6,7 @@ import { fakeExtraction } from "./fixtures.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { buildServer } from "../../src/mcp/server.js";
 import { JobManager } from "../../src/mcp/jobs.js";
+import { storeDocument } from "../../src/ingest/store.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -14,8 +15,8 @@ beforeEach(() => wipe(sql));
 const handler = ({ system }: { system: string }) =>
   system === SUMMARY_SYSTEM ? { title: "Acme note", summary_line: "L", summary: "S", occurred_at: null } : fakeExtraction;
 
-async function connect(readOnly = false) {
-  const ctx = fakeCtx(sql, handler);
+async function connect(readOnly = false, llmHandler: (args: { system: string; user: string }) => unknown = handler) {
+  const ctx = fakeCtx(sql, llmHandler);
   const jobs = new JobManager(ctx, () => {});
   const server = buildServer(ctx, { client: "test", jobs, readOnly });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -73,7 +74,8 @@ describe("brain MCP server", () => {
 
   it("adds and supersedes facts labeled with the client", async () => {
     const s = await connect();
-    const a = await s.call("brain_add_fact", { predicate: "lives_in", object_text: "Austin" });
+    const a = await s.call("brain_add_fact", { predicate: "Lives In", object_text: "Austin" });
+    expect(a.text).toContain("lives_in = Austin");
     const idA = /fact ([0-9a-f-]{36})/.exec(a.text)![1];
     const b = await s.call("brain_supersede_fact", { fact_id: idA, object_text: "Los Angeles" });
     const idB = /with fact ([0-9a-f-]{36})/.exec(b.text)![1];
@@ -92,6 +94,58 @@ describe("brain MCP server", () => {
     expect(r.text).toContain("not found");
     const d = await s.call("brain_get_document", { document_id: "nope" });
     expect(d.isError).toBe(true);
+    await s.close();
+  });
+
+  it("keeps a pipeline slot free so brain_ingest returns while background jobs run", async () => {
+    const slow = async (args: { system: string; user: string }) => {
+      await new Promise((r) => setTimeout(r, 500));
+      return handler(args);
+    };
+    const s = await connect(false, slow);
+    for (let i = 0; i < 5; i++) {
+      const { id } = await storeDocument(sql, { text: `Background note ${i} about Acme Corp.`, sourceKind: "note" });
+      s.jobs.start(id);
+    }
+    expect(s.jobs.pending.length).toBe(5);
+    await new Promise((r) => setTimeout(r, 100));
+    const t0 = Date.now();
+    const ing = await s.call("brain_ingest", { text: "A quick save while the queue is busy.", source_kind: "note" });
+    const elapsed = Date.now() - t0;
+    expect(ing.isError).toBe(false);
+    expect(elapsed).toBeLessThan(400);
+    expect(s.jobs.pending.length).toBe(6);
+    await s.jobs.drain();
+    expect(s.jobs.pending).toEqual([]);
+    const rows = await sql<{ stage: string }[]>`select stage from brain.ingest_jobs`;
+    expect(rows.map((r) => r.stage)).toEqual(Array(6).fill("done"));
+    await s.close();
+  }, 30000);
+
+  it("validates inputs: dates, empty predicates and values", async () => {
+    const s = await connect();
+    const r = await s.call("brain_search", { query: "Acme", since: "last week" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("ISO date");
+    const blank = await s.call("brain_add_fact", { predicate: "lives_in", object_text: "   " });
+    expect(blank.isError).toBe(true);
+    const sym = await s.call("brain_add_fact", { predicate: "!!!", object_text: "x" });
+    expect(sym.isError).toBe(true);
+    expect(sym.text).toContain("predicate must contain letters or digits");
+    const vf = await s.call("brain_add_fact", { predicate: "lives_in", object_text: "Austin", valid_from: "someday" });
+    expect(vf.isError).toBe(true);
+    expect(vf.text).toContain("ISO date");
+    expect((await sql`select id from brain.facts`).length).toBe(0);
+    await s.close();
+  });
+
+  it("supersede with the same value is an error", async () => {
+    const s = await connect();
+    const a = await s.call("brain_add_fact", { predicate: "lives_in", object_text: "Austin" });
+    const idA = /fact ([0-9a-f-]{36})/.exec(a.text)![1];
+    const r = await s.call("brain_supersede_fact", { fact_id: idA, object_text: "Austin" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("New value equals the current value");
     await s.close();
   });
 });

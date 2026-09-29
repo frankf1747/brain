@@ -21,32 +21,63 @@ async function selfId(sql: Db): Promise<string> {
   return row.id;
 }
 
-/** Inserts an unverified fact about the owner. Same predicate and value returns the existing id. */
-export async function addFact(sql: Db, input: { predicate: string; objectText: string; by: string; validFrom?: Date | null; subjectId?: string }): Promise<string> {
+function cleanPredicate(predicate: string): string {
+  const p = normalizePredicate(predicate);
+  if (!p) throw new Error(`predicate must contain letters or digits (a-z, 0-9); got "${predicate}"`);
+  return p;
+}
+
+function cleanValue(value: string): string {
+  const v = value.trim();
+  if (!v) throw new Error("value must not be empty");
+  return v;
+}
+
+/**
+ * Inserts an unverified fact about the owner. Same predicate and value returns the existing id.
+ * Returns the id and the predicate as stored (normalized to snake_case).
+ */
+export async function addFact(
+  sql: Db,
+  input: { predicate: string; objectText: string; by: string; validFrom?: Date | null; subjectId?: string },
+): Promise<{ id: string; predicate: string }> {
+  const predicate = cleanPredicate(input.predicate);
+  const objectText = cleanValue(input.objectText);
   const subject = input.subjectId ?? (await selfId(sql));
   const [row] = await sql<{ id: string }[]>`
     insert into brain.facts (subject_id, predicate, object_text, confidence, verified, verified_by, valid_from)
-    values (${subject}, ${normalizePredicate(input.predicate)}, ${input.objectText.trim()}, 1, false, ${input.by}, ${input.validFrom ?? null})
+    values (${subject}, ${predicate}, ${objectText}, 1, false, ${input.by}, ${input.validFrom ?? null})
     on conflict (subject_id, predicate, object_text, coalesce(source_chunk_id, '00000000-0000-0000-0000-000000000000'::uuid))
     do update set created_at = brain.facts.created_at
     returning id`;
-  return row.id;
+  return { id: row.id, predicate };
 }
 
 /** Replaces a fact's value. The old fact is kept and points at the new one. */
 export async function supersedeFact(sql: Db, factId: string, input: { objectText: string; by: string; validFrom?: Date | null }): Promise<string> {
+  const objectText = cleanValue(input.objectText);
   if (!UUID.test(factId)) throw new Error(`Fact ${factId} not found`);
   const [old] = await sql<{ subject_id: string; predicate: string; superseded_by: string | null }[]>`
     select subject_id, predicate, superseded_by from brain.facts where id = ${factId}`;
   if (!old) throw new Error(`Fact ${factId} not found`);
   if (old.superseded_by) throw new Error(`Fact ${factId} is already superseded by ${old.superseded_by}`);
   return sql.begin(async (tx) => {
-    const [row] = await tx<{ id: string }[]>`
+    const [row] = await tx<{ id: string; superseded_by: string | null }[]>`
       insert into brain.facts (subject_id, predicate, object_text, confidence, verified, verified_by, valid_from)
-      values (${old.subject_id}, ${old.predicate}, ${input.objectText.trim()}, 1, false, ${input.by}, ${input.validFrom ?? null})
+      values (${old.subject_id}, ${old.predicate}, ${objectText}, 1, false, ${input.by}, ${input.validFrom ?? null})
       on conflict (subject_id, predicate, object_text, coalesce(source_chunk_id, '00000000-0000-0000-0000-000000000000'::uuid))
       do update set created_at = brain.facts.created_at
-      returning id`;
+      returning id, superseded_by`;
+    // The conflict clause hands back an existing row with the same value.
+    if (row.id === factId) throw new Error("New value equals the current value");
+    if (row.superseded_by) {
+      // Returning to an earlier value: revive that row rather than pointing the chain back at it (a cycle).
+      await tx`
+        update brain.facts
+        set superseded_by = null, valid_to = null, verified_by = ${input.by},
+            valid_from = coalesce(${input.validFrom ?? null}::date, valid_from)
+        where id = ${row.id}`;
+    }
     await tx`update brain.facts set superseded_by = ${row.id}, valid_to = coalesce(valid_to, current_date) where id = ${factId}`;
     return row.id;
   });
