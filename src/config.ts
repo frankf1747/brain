@@ -16,6 +16,8 @@ export const config = {
   voyageApiKey: process.env.VOYAGE_API_KEY ?? "",
   voyageEmbedModel: process.env.VOYAGE_EMBED_MODEL ?? "voyage-4-large",
   voyageRerankModel: process.env.VOYAGE_RERANK_MODEL ?? "rerank-2.5",
+  obsidianVaultPath: process.env.OBSIDIAN_VAULT_PATH ?? "/Users/frankfu/Documents/Obsidian/General",
+  obsidianFolder: process.env.OBSIDIAN_FOLDER ?? "Brain",
   embeddingDimensions: 1024,
   chunking: { sectionTokens: 1500, passageTokens: 400, overlapRatio: 0.15 },
   resolution: { matchThreshold: 0.92, flagThreshold: 0.85, lexicalThreshold: 0.6 },
