@@ -135,7 +135,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   let degraded = false;
   let qvec: string | null = null;
   try {
-    const [queryVector] = await ctx.embedder.embed([query], "query");
+    const [queryVector] = await (ctx.queryEmbedder ?? ctx.embedder).embed([query], "query");
     qvec = toVector(queryVector);
   } catch (err) {
     degraded = true;
@@ -157,10 +157,14 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   const rows = await loadChunks(sql, fused.map((f) => f.id));
   const present = fused.filter((f) => rows.has(f.id));
   const ordered = present.map((f) => rows.get(f.id)!);
+  const fusedOrder = () => present.slice(0, k).map((f, index) => ({ index, score: f.fused }));
   let reranked: { index: number; score: number }[] = [];
-  if (ordered.length) {
+  if (ordered.length && qvec === null) {
+    // Voyage just failed for the query embedding; a rerank call would most likely fail too, after its own retries.
+    reranked = fusedOrder();
+  } else if (ordered.length) {
     try {
-      reranked = await ctx.reranker.rerank(
+      reranked = await (ctx.queryReranker ?? ctx.reranker).rerank(
         query,
         ordered.map((r) => (r.context_prefix ? r.context_prefix + "\n\n" : "") + r.content),
         k,
@@ -168,7 +172,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
     } catch (err) {
       degraded = true;
       process.stderr.write(`brain: reranking failed, keeping fused order: ${err instanceof Error ? err.message : String(err)}\n`);
-      reranked = present.slice(0, k).map((f, index) => ({ index, score: f.fused }));
+      reranked = fusedOrder();
     }
   }
   const passages: Passage[] = reranked.map((h) => toPassage(ordered[h.index], h.score, "hybrid"));

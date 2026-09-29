@@ -116,6 +116,37 @@ describe("search", () => {
     expect(log.layers).toContain("degraded");
   });
 
+  it("does not call the reranker after the query embedding failed", async () => {
+    const ctx = await seed();
+    ctx.embedder = { embed: async () => { throw new Error("voyage 429"); } } as unknown as typeof ctx.embedder;
+    const rerankCalls: string[] = [];
+    ctx.reranker = { rerank: async (q: string) => { rerankCalls.push(q); return []; } };
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await search(ctx, "Zorblax Industries drill");
+      expect(res.degraded).toBe(true);
+      expect(rerankCalls).toEqual([]);
+      const hybrid = res.passages.filter((p) => p.group === "hybrid");
+      expect(hybrid.length).toBeGreaterThan(0);
+      expect(hybrid[0].content).toContain("ZX-9000");
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("uses the query-time embedder and reranker when the context has them", async () => {
+    const ctx = await seed();
+    const used: string[] = [];
+    const real = ctx.embedder;
+    ctx.queryEmbedder = { embed: async (texts, type) => { used.push("embed"); return real.embed(texts, type); } };
+    ctx.queryReranker = { rerank: async (q, docs, k) => { used.push("rerank"); return new FakeReranker().rerank(q, docs, k); } };
+    ctx.embedder = { embed: async () => { throw new Error("ingest embedder must not be used"); } } as unknown as typeof ctx.embedder;
+    ctx.reranker = { rerank: async () => { throw new Error("ingest reranker must not be used"); } };
+    const res = await search(ctx, "What did Zorblax Industries release?");
+    expect(res.degraded).toBe(false);
+    expect(used).toEqual(["embed", "rerank"]);
+  });
+
   it("keeps fused order with RRF scores when the reranker fails", async () => {
     const ctx = await seed();
     ctx.reranker = { rerank: async () => { throw new Error("rerank down"); } };

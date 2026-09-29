@@ -9,6 +9,9 @@ export interface Ctx {
   llm: Llm;
   embedder: Embedder;
   reranker: Reranker;
+  /** Query-time clients with small retry budgets, so search degrades fast instead of waiting out a Voyage outage. */
+  queryEmbedder?: Embedder;
+  queryReranker?: Reranker;
 }
 
 export function makeLlm(): Llm {
@@ -17,5 +20,13 @@ export function makeLlm(): Llm {
 
 export function makeCtx(): Ctx {
   const voyage = new VoyageClient();
-  return { sql: connect(config.databaseUrl), llm: makeLlm(), embedder: voyage, reranker: voyage };
+  const queryVoyage = new VoyageClient({ maxRateLimitAttempts: 1, maxAttempts: 2 });
+  return {
+    sql: connect(config.databaseUrl),
+    llm: makeLlm(),
+    embedder: voyage,
+    reranker: voyage,
+    queryEmbedder: queryVoyage,
+    queryReranker: queryVoyage,
+  };
 }

@@ -166,6 +166,35 @@ describe("VoyageClient rate limits", () => {
   });
 });
 
+describe("VoyageClient attempt budgets", () => {
+  it("with maxRateLimitAttempts 1, makes one call on a 429 and rejects without waiting", async () => {
+    let n = 0;
+    const fn = (async () => {
+      n++;
+      return new Response(JSON.stringify({ detail: "rate limited" }), { status: 429, headers: { "retry-after": "30" } });
+    }) as unknown as typeof fetch;
+    const sleep = vi.fn(async (_ms: number) => {});
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, sleep, maxRateLimitAttempts: 1 });
+    await expect(client.embed(["a"], "query")).rejects.toThrow(/429/);
+    expect(n).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("with maxAttempts 2, gives up on 5xx and network errors after two calls", async () => {
+    let n = 0;
+    const fn = (async () => {
+      n++;
+      if (n === 1) throw new TypeError("fetch failed");
+      return new Response("{}", { status: 503 });
+    }) as unknown as typeof fetch;
+    const sleep = vi.fn(async (_ms: number) => {});
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, sleep, retryDelayMs: 1, maxAttempts: 2 });
+    await expect(client.rerank("q", ["a"], 1)).rejects.toThrow(/503/);
+    expect(n).toBe(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("fakes", () => {
   it("hashVector is deterministic, unit length, and case/punctuation insensitive", () => {
     const a = hashVector("Acme, Inc.");

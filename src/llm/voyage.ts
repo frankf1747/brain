@@ -29,6 +29,10 @@ export interface VoyageOptions {
   rateLimitDelayMs?: number;
   /** Injected for tests; defaults to a setTimeout-based sleep. */
   sleep?: (ms: number) => Promise<void>;
+  /** Total calls allowed while Voyage answers 429 (default 6). 1 means fail on the first 429 without waiting. */
+  maxRateLimitAttempts?: number;
+  /** Total calls allowed across 5xx responses and network errors (default 4). */
+  maxAttempts?: number;
 }
 
 const MAX_ATTEMPTS = 4;
@@ -91,6 +95,8 @@ export class VoyageClient implements Embedder, Reranker {
     const sleep = this.opts.sleep ?? defaultSleep;
     const delay = this.opts.retryDelayMs ?? 500;
     const rateDelay = this.opts.rateLimitDelayMs ?? 20_000;
+    const maxAttempts = this.opts.maxAttempts ?? MAX_ATTEMPTS;
+    const maxRateLimitAttempts = this.opts.maxRateLimitAttempts ?? MAX_RATE_LIMIT_ATTEMPTS;
     let lastError: Error | undefined;
     // 429s and other transient failures have separate budgets: rate limits need minute-scale waits.
     let failures = 0;
@@ -107,7 +113,7 @@ export class VoyageClient implements Embedder, Reranker {
       } catch (err) {
         // Network failure (DNS, reset, "fetch failed"): retry with backoff like a 5xx.
         lastError = err instanceof Error ? err : new Error(String(err));
-        if (++failures >= MAX_ATTEMPTS) throw lastError;
+        if (++failures >= maxAttempts) throw lastError;
         await sleep(delay * 2 ** (failures - 1));
         continue;
       }
@@ -115,7 +121,7 @@ export class VoyageClient implements Embedder, Reranker {
       const text = await res.text();
       lastError = new Error(`Voyage ${path} returned ${res.status}: ${text.slice(0, 200)}`);
       if (res.status === 429) {
-        if (++rateLimits >= MAX_RATE_LIMIT_ATTEMPTS) throw lastError;
+        if (++rateLimits >= maxRateLimitAttempts) throw lastError;
         const wait = Math.min(
           retryAfterMs(res.headers.get("retry-after")) ?? rateDelay * 2 ** (rateLimits - 1),
           MAX_RATE_LIMIT_WAIT_MS,
@@ -125,7 +131,7 @@ export class VoyageClient implements Embedder, Reranker {
         continue;
       }
       if (res.status < 500) throw lastError;
-      if (++failures >= MAX_ATTEMPTS) throw lastError;
+      if (++failures >= maxAttempts) throw lastError;
       await sleep(delay * 2 ** (failures - 1));
     }
   }
