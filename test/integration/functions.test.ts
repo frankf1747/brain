@@ -72,3 +72,43 @@ describe("current_facts", () => {
     expect(rows.length).toBe(1);
   });
 });
+
+describe("search recall before embedding", () => {
+  it("hybrid_search returns keyword hits for chunks that have no embedding yet", async () => {
+    const { storeDocument } = await import("../../src/ingest/store.js");
+    const { runChunk } = await import("../../src/ingest/stages/chunk.js");
+    const { fakeCtx } = await import("./helpers.js");
+    const ctx = fakeCtx(sql);
+    const { id } = await storeDocument(sql, { text: "Notes on the Quuxfrobnicate project kickoff.", title: "Kickoff" });
+    await runChunk(ctx, id);
+    const rows = await sql<{ document_id: string; keyword_rank: number | null; vector_rank: number | null }[]>`
+      select * from brain.hybrid_search('Quuxfrobnicate', ${toVector(fakeVector(7))}::vector, 10, null, null, null)`;
+    expect(rows.length).toBe(1);
+    expect(rows[0].document_id).toBe(id);
+    expect(rows[0].keyword_rank).toBe(1);
+    expect(rows[0].vector_rank).toBeNull();
+  });
+
+  it("hybrid_search and summary_search accept a null embedding and still return keyword hits", async () => {
+    await seedDoc("Zorblax", ["The Zorblax memo."], 1);
+    const rows = await sql<{ keyword_rank: number | null; vector_rank: number | null }[]>`
+      select * from brain.hybrid_search('Zorblax', null::vector, 10, null, null, null)`;
+    expect(rows.length).toBe(1);
+    expect(rows[0].keyword_rank).toBe(1);
+    expect(rows[0].vector_rank).toBeNull();
+    const sums = await sql<{ keyword_rank: number | null; vector_rank: number | null }[]>`
+      select * from brain.summary_search('Zorblax', null::vector, 10, null, null, null)`;
+    expect(sums.length).toBe(1);
+    expect(sums[0].vector_rank).toBeNull();
+  });
+
+  it("summary_search returns keyword hits for documents without a summary embedding", async () => {
+    const [doc] = await sql<{ id: string }[]>`
+      insert into brain.documents (content_hash, title, raw_content, source_kind, summary)
+      values ('h1', 'S', 'x', 'note', 'A summary mentioning Plonkworthy') returning id`;
+    const rows = await sql<{ document_id: string; keyword_rank: number | null }[]>`
+      select * from brain.summary_search('Plonkworthy', ${toVector(fakeVector(3))}::vector, 10, null, null, null)`;
+    expect(rows.map((r) => r.document_id)).toEqual([doc.id]);
+    expect(rows[0].keyword_rank).toBe(1);
+  });
+});
