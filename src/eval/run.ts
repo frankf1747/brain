@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Ctx } from "../ctx.js";
 import { readInput } from "../ingest/readers.js";
-import { ingest } from "../ingest/pipeline.js";
+import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions } from "../retrieve/search.js";
 
 export interface GoldenItem {
@@ -50,11 +50,18 @@ export function summarize(items: Scored[]): { overall: Metrics; byNeeds: Record<
   return { overall: metrics(items), byNeeds };
 }
 
-export async function ingestCorpus(ctx: Ctx, dir: string): Promise<void> {
-  for (const r of await readInput(dir)) {
-    const res = await ingest(ctx, { text: r.text, title: r.title, sourceKind: kindFromFilename(basename(r.origin)), origin: r.origin, mimeType: r.mimeType });
-    console.log(`${res.created ? "new" : "dup"} ${res.stage.padEnd(10)} ${r.origin}${res.error ? " ERROR " + res.error : ""}`);
-  }
+/** Ingests every file under dir; an item that cannot be stored is logged and skipped. Returns how many failed. */
+export async function ingestCorpus(ctx: Ctx, dir: string): Promise<number> {
+  const { failed } = await ingestAll(
+    ctx,
+    await readInput(dir),
+    { toInput: (r) => ({ text: r.text, title: r.title, sourceKind: kindFromFilename(basename(r.origin)), origin: r.origin, mimeType: r.mimeType }) },
+    {
+      done: (r, res) => console.log(`${res.created ? "new" : "dup"} ${res.stage.padEnd(10)} ${r.origin}${res.error ? " ERROR " + res.error : ""}`),
+      skip: logSkip,
+    },
+  );
+  return failed.length;
 }
 
 export async function runEval(ctx: Ctx, goldenPath: string): Promise<{ scored: (Scored & { question: string; rank: number | null })[]; summary: ReturnType<typeof summarize> }> {

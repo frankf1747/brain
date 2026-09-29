@@ -1,7 +1,8 @@
 import { Command } from "commander";
 import { makeCtx, type Ctx } from "./ctx.js";
 import { readInput } from "./ingest/readers.js";
-import { ingest, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
+import { retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
+import { ingestAll, logSkip } from "./ingest/batch.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
 import { canonicalName } from "./text/normalize.js";
@@ -47,22 +48,28 @@ program
   .action(async (input: string, opts) => {
     if (opts.until && !STAGES.includes(opts.until)) throw new Error(`Unknown stage ${opts.until}`);
     await withCtx(async (ctx) => {
-      for (const r of await readInput(input)) {
-        const res = await ingest(
-          ctx,
-          {
+      const meta = parseMeta(opts.meta);
+      const { failed } = await ingestAll(
+        ctx,
+        await readInput(input),
+        {
+          until: opts.until as Stage | undefined,
+          toInput: (r) => ({
             text: r.text,
             title: opts.title ?? r.title,
             sourceKind: opts.kind,
             origin: r.origin,
             mimeType: r.mimeType,
-            metadata: { ...r.metadata, ...parseMeta(opts.meta) },
+            metadata: { ...r.metadata, ...meta },
             occurredAt: opts.occurredAt ? new Date(opts.occurredAt) : null,
-          },
-          { until: opts.until as Stage | undefined },
-        );
-        console.log(`${res.created ? "new " : "dup "} ${res.id} ${res.stage.padEnd(10)} ${res.error ? "ERROR " + res.error + " " : ""}${r.origin}`);
-      }
+          }),
+        },
+        {
+          done: (r, res) => console.log(`${res.created ? "new " : "dup "} ${res.id} ${res.stage.padEnd(10)} ${res.error ? "ERROR " + res.error + " " : ""}${r.origin}`),
+          skip: logSkip,
+        },
+      );
+      if (failed.length) process.exitCode = 1;
     });
   });
 
@@ -191,7 +198,7 @@ program
   .action(async (opts) => {
     const { runEval, ingestCorpus } = await import("./eval/run.js");
     await withCtx(async (ctx) => {
-      if (opts.ingest) await ingestCorpus(ctx, opts.ingest);
+      if (opts.ingest && (await ingestCorpus(ctx, opts.ingest)) > 0) process.exitCode = 1;
       const { scored, summary } = await runEval(ctx, opts.golden);
       if (opts.json) return void console.log(JSON.stringify({ scored, summary }, null, 2));
       for (const s of scored) console.log(`${s.rank === null ? "MISS" : `#${String(s.rank).padStart(2)}`}  ${s.needs.padEnd(9)} ${s.question}`);
