@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { fakeExtraction } from "./fixtures.js";
 import { ingest } from "../../src/ingest/pipeline.js";
@@ -58,5 +58,59 @@ describe("projectObsidian", () => {
     expect(changed.deleted).toBe(1);
     expect(changed.written + changed.unchanged).toBe(3); // README, Frank Fu, the document
     expect(await readme()).toContain("2026-09-03T00:00:00.000Z");
+  });
+
+  it("gives every note a unique name across nodes, documents and the README", async () => {
+    const ctx = fakeCtx(sql);
+    const [self] = await sql<{ id: string; name: string }[]>`select id, name from brain.nodes where is_self`;
+    let seq = 0;
+    const node = async (type: string, name: string) => {
+      seq++;
+      const [r] = await sql<{ id: string }[]>`insert into brain.nodes (type, name, canonical_name, created_at)
+        values (${type}, ${name}, ${`${name.toLowerCase()}#${seq}`}, now() + ${`${seq} seconds`}::interval) returning id`;
+      return r!.id;
+    };
+    const doc = async (title: string) => {
+      seq++;
+      const [d] = await sql<{ id: string }[]>`insert into brain.documents (content_hash, title, raw_content, occurred_at, ingested_at)
+        values (${`h${seq}`}, ${title}, 'body', '2026-01-01', now() + ${`${seq} seconds`}::interval) returning id`;
+      const [c] = await sql<{ id: string }[]>`insert into brain.chunks (document_id, level, ordinal, content, token_count, char_start, char_end)
+        values (${d!.id}, 0, 0, 'body', 1, 0, 4) returning id`;
+      return { id: d!.id, chunk: c!.id };
+    };
+    const acme = await node("organization", "Acme");
+    const readmeNode = await node("concept", "readme");
+    const acmeDoc = await doc("Acme");
+    const selfDoc = await doc(self!.name);
+    const readmeDoc = await doc("README");
+    for (const [chunk, id] of [[acmeDoc.chunk, acme], [selfDoc.chunk, self!.id], [readmeDoc.chunk, readmeNode]] as const) {
+      await sql`insert into brain.mentions (chunk_id, node_id) values (${chunk}, ${id})`;
+    }
+    await sql`insert into brain.edges (from_node, to_node, type, evidence_chunk_id) values (${self!.id}, ${acme}, 'works_at', ${acmeDoc.chunk})`;
+
+    const vault = await mkdtemp(join(tmpdir(), "vault-"));
+    await projectObsidian(ctx, { vault, folder: "Brain" });
+    const root = join(vault, "Brain");
+    const walk = async (d: string): Promise<string[]> =>
+      (await Promise.all((await readdir(d, { withFileTypes: true })).map((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)])))).flat();
+    const files = (await walk(root)).map((f) => relative(root, f));
+    const base = (f: string) => f.split("/").pop()!.slice(0, -3);
+
+    expect(await readFile(join(root, `${self!.name}.md`), "utf8")).toContain(`brain_id: "${self!.id}"`);
+    expect(await readFile(join(root, "README.md"), "utf8")).toContain("# Brain");
+    expect(await readFile(join(root, "nodes/organization/Acme.md"), "utf8")).toContain(`brain_id: "${acme}"`);
+    const bases = files.map((f) => base(f).toLowerCase());
+    expect(new Set(bases).size).toBe(bases.length);
+    expect(bases.filter((b) => b === "readme")).toEqual(["readme"]);
+
+    const byName = new Map<string, number>();
+    for (const b of bases) byName.set(b, (byName.get(b) ?? 0) + 1);
+    const links: string[] = [];
+    for (const f of files) {
+      const text = await readFile(join(root, f), "utf8");
+      for (const m of text.matchAll(/\[\[([^\]]+)\]\]/g)) links.push(m[1]!);
+    }
+    expect(links.length).toBeGreaterThan(5);
+    for (const l of links) expect([l, byName.get(l.toLowerCase())]).toEqual([l, 1]);
   });
 });

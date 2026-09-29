@@ -22,3 +22,19 @@ describe("uniqueNames", () => {
     expect(m.get("cccccccc-1")).toBe("Other");
   });
 });
+
+describe("uniqueNames reserved names", () => {
+  it("suffixes anything whose key equals a reserved name, even the oldest", () => {
+    const m = uniqueNames(
+      [
+        { id: "aaaaaaaa-1", name: "readme", createdAt: new Date("2026-01-01") },
+        { id: "bbbbbbbb-1", name: "README", createdAt: new Date("2026-02-01") },
+        { id: "cccccccc-1", name: "Other", createdAt: new Date("2026-03-01") },
+      ],
+      ["README"],
+    );
+    expect(m.get("aaaaaaaa-1")).toBe("readme (aaaaaaaa)");
+    expect(m.get("bbbbbbbb-1")).toBe("README (bbbbbbbb)");
+    expect(m.get("cccccccc-1")).toBe("Other");
+  });
+});

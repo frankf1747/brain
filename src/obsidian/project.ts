@@ -19,8 +19,17 @@ export async function projectObsidian(ctx: Ctx, opts: ProjectOptions = {}): Prom
   const now = opts.now ?? new Date();
   const g = await loadGraph(ctx.sql);
 
-  const nodeNames = uniqueNames(g.nodes.map((n) => ({ id: n.id, name: n.name, createdAt: n.createdAt })));
-  const docNames = uniqueNames(g.documents.map((d) => ({ id: d.id, name: d.title ?? `Untitled ${d.id.slice(0, 8)}`, createdAt: d.ingestedAt })));
+  // Obsidian resolves [[Name]] by file name across the whole vault, so nodes, documents and the README
+  // share one namespace. The self node is created by the migration, so it is the oldest and keeps its name.
+  const noteNames = uniqueNames(
+    [
+      ...g.nodes.map((n) => ({ id: n.id, name: n.name, createdAt: n.createdAt })),
+      ...g.documents.map((d) => ({ id: d.id, name: d.title ?? `Untitled ${d.id.slice(0, 8)}`, createdAt: d.ingestedAt })),
+    ],
+    ["README"],
+  );
+  const nodeNames = new Map(g.nodes.map((n) => [n.id, noteNames.get(n.id)!]));
+  const docNames = new Map(g.documents.map((d) => [d.id, noteNames.get(d.id)!]));
   const docById = new Map(g.documents.map((d) => [d.id, d]));
   const nodeIds = new Set(g.nodes.map((n) => n.id));
   const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
