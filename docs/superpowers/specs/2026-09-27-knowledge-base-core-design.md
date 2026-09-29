@@ -150,8 +150,9 @@ Indexes: HNSW on `chunks.embedding` and `documents.summary_embedding` (cosine), 
 
 **ingest_jobs**
 - `document_id` uuid pk fk documents
-- `stage` text: `stored`, `chunked`, `summarized`, `embedded`, `extracted`, `resolved`, `done`, `failed`
-- `error` text nullable, `attempts` int, `updated_at`
+- `stage` text: last completed stage, one of `stored`, `chunked`, `summarized`, `embedded`, `extracted`, `resolved`, `done`
+- `error` text nullable: set when the next stage failed; the document stays at its last completed stage
+- `attempts` int, `updated_at`
 
 **retrieval_log**
 - `id` uuid pk, `query` text, `filters` jsonb, `layers` text[], `chunk_ids` uuid[], `node_ids` uuid[], `top_score` real, `used_fallback` boolean, `client` text, `created_at`
@@ -242,3 +243,15 @@ Listed so they are not forgotten, each gets its own spec:
 - Repo remote: `gh` is not installed on this machine; Frank creates the GitHub remote and the plan includes the `git remote add` step.
 - Claude Code backend limits: the Max plan has rolling usage windows. Ingesting a few hundred documents fits; thousands at once will hit the window, and `brain retry` resumes when it opens. For a large one-time import, set `BRAIN_LLM=api` and use `brain backfill`.
 - The Claude Code backend calls the official `claude` binary only. The subscription token is never extracted for use with the SDK.
+
+## 12. Changes during implementation
+
+- Supabase ports moved to 5532x (55320-55329) to avoid clashing with another local project.
+- Claude Code CLI backend added, with `$schema` stripped from the JSON schemas it is given.
+- Extraction prompt includes the owner as an entity and keeps facts durable.
+- Alias matching never merges on shared aliases.
+- Vector merges of people and organizations require trigram similarity >= 0.6 (measured: "Frank Fu"/"Frank Liu" cosine 0.947).
+- Edge direction is enforced for `created`, `works_at`, `studied_at`, `applied_to`, `located_in`.
+- The Voyage client waits out 429 responses.
+- Search applies date filters in every layer and reranks with context prefixes.
+- `documents.summary_line` column and `brain.extractions` table added.
