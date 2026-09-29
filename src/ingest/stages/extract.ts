@@ -114,6 +114,11 @@ export async function applyExtraction(sql: Db, req: ExtractionRequest, payload: 
     do update set payload = excluded.payload, model = excluded.model, created_at = now()`;
 }
 
+/** Records that extraction was skipped for (part of) a document, so it can still advance. */
+export async function markExtractionSkipped(sql: Db, documentId: string): Promise<void> {
+  await sql`update brain.documents set metadata = metadata || '{"extraction":"skipped"}'::jsonb where id = ${documentId}`;
+}
+
 /** One call with one retry on a schema failure. Returns null on a refusal or a second schema failure; other errors throw. */
 async function extractWithRetry(ctx: Ctx, req: ExtractionRequest): Promise<Extraction | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -135,7 +140,7 @@ export async function runExtract(ctx: Ctx, documentId: string): Promise<void> {
     if (payload) {
       await applyExtraction(ctx.sql, req, payload, ctx.llm.model);
     } else {
-      await ctx.sql`update brain.documents set metadata = metadata || '{"extraction":"skipped"}'::jsonb where id = ${documentId}`;
+      await markExtractionSkipped(ctx.sql, documentId);
     }
   }
 }
