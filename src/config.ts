@@ -2,7 +2,8 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "node:url";
 
 // Resolve .env from the repository root so the MCP server works from any cwd.
-dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
+// quiet: dotenv 17 otherwise logs to stdout, which would corrupt an MCP stdio stream.
+dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)), quiet: true });
 
 export const config = {
   databaseUrl:
