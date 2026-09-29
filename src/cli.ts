@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { makeCtx, type Ctx } from "./ctx.js";
 import { readInput } from "./ingest/readers.js";
-import { retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
+import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
 import { ingestAll, logSkip } from "./ingest/batch.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
@@ -89,11 +89,14 @@ program
   .command("retry")
   .description("Re-run every job that is not done")
   .option("--stage <stage>", "only jobs currently at this stage")
+  .option("--skipped", "redo documents whose summary or extraction was skipped (stubbed after a refusal or schema failure)")
   .option("--limit <n>", "max jobs", "1000")
   .action(async (opts) => {
     await withCtx(async (ctx) => {
-      for (const r of await retryFailed(ctx, { stage: opts.stage as Stage | undefined, limit: Number(opts.limit) })) {
-        console.log(`${r.documentId} ${r.stage}${r.error ? " ERROR " + r.error : ""}`);
+      const limit = Number(opts.limit);
+      const results = opts.skipped ? await redoSkipped(ctx, { limit }) : await retryFailed(ctx, { stage: opts.stage as Stage | undefined, limit });
+      for (const r of results) {
+        console.log(`${r.documentId} ${r.stage}${r.skipped ? " (busy, left alone)" : ""}${r.error ? " ERROR " + r.error : ""}`);
       }
     });
   });

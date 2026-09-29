@@ -87,9 +87,9 @@ export class ClaudeCodeLlm implements Llm {
     }
     if (envelope.is_error) {
       const detail = envelope.result ?? envelope.subtype ?? "unknown";
-      // The CLI's own structured-output retries ran out (or it ran out of turns trying): a schema failure.
-      const why = `${envelope.subtype ?? ""} ${envelope.result ?? ""}`;
-      if (schema && /structured.output|schema|max_turns/i.test(why)) {
+      // Only the CLI's own structured-output retries running out is a schema failure. Anything else (running
+      // out of turns, a CLI that rejects --json-schema) is a retryable error, not a reason to downgrade the document.
+      if (schema && envelope.subtype === "error_max_structured_output_retries") {
         throw new SchemaFailure(`Model output did not match the schema: Claude Code ${detail}`);
       }
       throw new Error(`Claude Code error: ${detail}`);

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { testDb, wipe, fakeCtx } from "./helpers.js";
-import { ingest, retryFailed, runPipeline, MAX_CONCURRENT_PIPELINES } from "../../src/ingest/pipeline.js";
+import { ingest, retryFailed, runPipeline, redoSkipped, MAX_CONCURRENT_PIPELINES } from "../../src/ingest/pipeline.js";
+import { ModelRefusal } from "../../src/llm/errors.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { fakeExtraction } from "./fixtures.js";
 import { toVector } from "../../src/db.js";
@@ -135,5 +136,74 @@ describe("pipeline", () => {
     for (const r of results) expect(r).toMatchObject({ stage: "done", error: null });
     expect(results.some((r) => r.skipped)).toBe(false);
     expect(peak).toBe(MAX_CONCURRENT_PIPELINES);
+  });
+});
+
+describe("redoSkipped", () => {
+  type Doc = { summary: string | null; metadata: Record<string, unknown> };
+  const docOf = async (id: string) => (await sql<Doc[]>`select summary, metadata from brain.documents where id = ${id}`)[0];
+
+  it("redoes a stubbed summary once the model cooperates", async () => {
+    const state = { refuse: true };
+    const ctx = fakeCtx(sql, ({ system }) => {
+      if (system === SUMMARY_SYSTEM) {
+        if (state.refuse) throw new ModelRefusal("Model refused: no");
+        return summary;
+      }
+      return fakeExtraction;
+    });
+    const res = await ingest(ctx, { text: "I applied to Acme Corp. I am on F-1 OPT.", sourceKind: "note" });
+    expect(res).toMatchObject({ stage: "done", error: null });
+    expect((await docOf(res.id)).metadata.summary).toBe("skipped");
+
+    state.refuse = false;
+    const redone = await redoSkipped(ctx, {});
+    expect(redone).toEqual([expect.objectContaining({ documentId: res.id, stage: "done", error: null })]);
+    const doc = await docOf(res.id);
+    expect(doc.summary).toBe(summary.summary);
+    expect(doc.metadata).not.toHaveProperty("summary");
+    const [job] = await sql<{ stage: string; error: string | null }[]>`select stage, error from brain.ingest_jobs where document_id = ${res.id}`;
+    expect(job).toEqual({ stage: "done", error: null });
+    // Nothing is left to redo.
+    expect(await redoSkipped(ctx, {})).toEqual([]);
+  });
+
+  it("redoes a skipped extraction from the embedded stage without re-summarizing", async () => {
+    const state = { refuse: true };
+    const ctx = fakeCtx(sql, ({ system }) => {
+      if (system === SUMMARY_SYSTEM) return summary;
+      if (state.refuse) throw new ModelRefusal("Model refused: no");
+      return fakeExtraction;
+    });
+    const res = await ingest(ctx, { text: "I applied to Acme Corp. I am on F-1 OPT.", sourceKind: "note" });
+    expect(res.stage).toBe("done");
+    expect((await docOf(res.id)).metadata.extraction).toBe("skipped");
+
+    state.refuse = false;
+    const before = ctx.llm.calls.filter((c) => c.system === SUMMARY_SYSTEM).length;
+    const redone = await redoSkipped(ctx, {});
+    expect(redone).toEqual([expect.objectContaining({ documentId: res.id, stage: "done", error: null })]);
+    expect(ctx.llm.calls.filter((c) => c.system === SUMMARY_SYSTEM).length).toBe(before);
+    expect((await docOf(res.id)).metadata).not.toHaveProperty("extraction");
+    const [{ n }] = await sql<{ n: string }[]>`select count(*)::text as n from brain.edges`;
+    expect(Number(n)).toBe(1);
+  });
+
+  it("leaves a document alone while another runner holds its lock", async () => {
+    const ctx = fakeCtx(sql, ({ system }) => {
+      if (system === SUMMARY_SYSTEM) throw new ModelRefusal("Model refused: no");
+      return fakeExtraction;
+    });
+    const res = await ingest(ctx, { text: "I applied to Acme Corp.", sourceKind: "note" });
+    const holder = await sql.reserve();
+    try {
+      await holder`select pg_advisory_lock(hashtextextended(${res.id}::text, 0))`;
+      const redone = await redoSkipped(ctx, {});
+      expect(redone).toEqual([expect.objectContaining({ documentId: res.id, stage: "done", skipped: true })]);
+      expect((await docOf(res.id)).metadata.summary).toBe("skipped");
+      await holder`select pg_advisory_unlock(hashtextextended(${res.id}::text, 0))`;
+    } finally {
+      holder.release();
+    }
   });
 });

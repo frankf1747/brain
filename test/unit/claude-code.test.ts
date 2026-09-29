@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { ClaudeCodeLlm, spawnExec, type Exec } from "../../src/llm/claude-code.js";
-import { SchemaFailure } from "../../src/llm/errors.js";
+import { SchemaFailure, isSchemaFailure } from "../../src/llm/errors.js";
 
 function fakeExec(envelope: unknown) {
   const calls: { bin: string; args: string[]; input: string }[] = [];
@@ -44,7 +44,16 @@ describe("ClaudeCodeLlm", () => {
     const retries = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, subtype: "error_max_structured_output_retries" }).exec });
     await expect(retries.structured({ schema, system: "s", user: "u" })).rejects.toBeInstanceOf(SchemaFailure);
     const turns = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, subtype: "error_max_turns" }).exec });
-    await expect(turns.structured({ schema, system: "s", user: "u" })).rejects.toBeInstanceOf(SchemaFailure);
+    const turnsErr = await turns.structured({ schema, system: "s", user: "u" }).catch((e) => e);
+    expect(turnsErr).toBeInstanceOf(Error);
+    expect(turnsErr).not.toBeInstanceOf(SchemaFailure);
+    expect(isSchemaFailure(turnsErr)).toBe(false);
+    // A system-wide CLI problem that merely mentions the schema must stay a retryable error.
+    const flag = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, subtype: "error_during_execution", result: "error: unknown option '--json-schema'" }).exec });
+    const flagErr = await flag.structured({ schema, system: "s", user: "u" }).catch((e) => e);
+    expect(flagErr).toBeInstanceOf(Error);
+    expect(flagErr).not.toBeInstanceOf(SchemaFailure);
+    expect(isSchemaFailure(flagErr)).toBe(false);
     const auth = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, result: "OAuth access token has expired." }).exec });
     const err = await auth.structured({ schema, system: "s", user: "u" }).catch((e) => e);
     expect(err).not.toBeInstanceOf(SchemaFailure);
