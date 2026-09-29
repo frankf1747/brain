@@ -8,6 +8,15 @@ export type Exec = (bin: string, args: string[], input: string) => Promise<{ std
 
 export const CLAUDE_CODE_TIMEOUT_MS = 600_000;
 
+const SESSION_MARKERS = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"];
+
+/** The child `claude` process must not think it is nested inside the parent session. */
+export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const k of SESSION_MARKERS) delete out[k];
+  return out;
+}
+
 /** Runs a binary, feeds `input` on stdin, resolves with stdout on exit 0. Kills it after `timeoutMs`. */
 export const spawnExec = (
   bin: string,
@@ -16,7 +25,7 @@ export const spawnExec = (
   timeoutMs: number = CLAUDE_CODE_TIMEOUT_MS,
 ): Promise<{ stdout: string }> =>
   new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env: childEnv() });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
