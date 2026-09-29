@@ -255,3 +255,11 @@ Listed so they are not forgotten, each gets its own spec:
 - The Voyage client waits out 429 responses.
 - Search applies date filters in every layer and reranks with context prefixes.
 - `documents.summary_line` column and `brain.extractions` table added.
+- Raw bytes are not kept for HTML and PDF inputs. The stored `raw_content` and the `content_hash` are of the extracted text, not the original file. Re-ingesting the same file therefore dedupes by its text. An image-only PDF yields no text and is rejected with a clear message rather than stored. Keeping original bytes (a bytea column or a file store) is deferred.
+- Keyword search no longer waits for embeddings (migration `20260929000004_search_recall.sql`), and `hybrid_search`/`summary_search` accept a null query embedding for keyword-only search.
+- Summarize falls back to a text-prefix stub summary after a refusal or two schema failures, and extraction skips refused sections, so neither stage can strand a document.
+- Heading lines are part of chunk content, so heading words are keyword-searchable and heading-only notes are ingested.
+- Search degrades to keyword-only results with a raw scan when Voyage embedding or reranking fails, and marks the result `degraded`.
+- The document insert and its ingest job are written in one transaction; ingesting a batch skips failing items instead of aborting.
+- Each document's pipeline run holds a Postgres advisory lock, stage updates are conditional, and at most 3 pipelines run at once per process (pool size 10), so concurrent runners cannot corrupt a document or deadlock the pool.
+- LLM backends throw typed `SchemaFailure` and `ModelRefusal` errors; backfill uses short batch ids, clears stale errors, skips locked documents and applies the same fallbacks as the online path.
