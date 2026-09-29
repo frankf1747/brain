@@ -55,6 +55,18 @@ describe("renderNode", () => {
   });
 });
 
+describe("renderNode evidence", () => {
+  it("escapes wikilinks and tags in evidence quotes so they cannot create links or tags", () => {
+    const t = renderNode({
+      ...node,
+      edges: [{ direction: "out", type: "located_in", otherNoteName: "Austin", evidence: "#launch see [[Secret]] and ![[img.png]] then #later", evidenceDocNoteName: "Doc" }],
+    });
+    const rel = t.split("\n").find((l) => l.startsWith("- located_in"))!;
+    expect(rel).toBe('- located_in → [[Austin]] · "\\#launch see \\[\\[Secret]] and !\\[\\[img.png]] then \\#later" ([[Doc]])');
+    expect([...rel.matchAll(/(?<!\\)\[\[/g)].length).toBe(2); // only [[Austin]] and [[Doc]]
+  });
+});
+
 describe("renderDocument", () => {
   const doc: DocView = {
     id: "3f2a0000-0000-0000-0000-000000000000", noteName: "Acme raises Series B", title: "Acme raises Series B", kind: "news", origin: "https://x.test/a",

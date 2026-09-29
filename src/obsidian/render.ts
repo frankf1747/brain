@@ -19,6 +19,14 @@ export function frontmatter(fields: Record<string, Scalar | Scalar[]>): string {
 const NOTICE = "> Read-only. Generated from the knowledge base; edits here are overwritten on the next projection.\n";
 const link = (name: string) => `[[${name}]]`;
 
+/**
+ * Evidence quotes are verbatim source text on one line. Escape "[[" and a "#" that starts a word so a quote
+ * cannot create a stray link, embed or tag.
+ */
+function escapeQuote(text: string): string {
+  return text.replace(/\s+/g, " ").trim().replace(/\[\[/g, "\\[\\[").replace(/(^|\s)#/g, "$1\\#");
+}
+
 export interface NodeView {
   id: string;
   type: string;
@@ -52,7 +60,7 @@ export function renderNode(n: NodeView): string {
       ? n.edges
           .map((e) => {
             const arrow = e.direction === "out" ? "→" : "←";
-            const ev = e.evidence ? ` · "${e.evidence.replace(/\s+/g, " ").trim()}"${e.evidenceDocNoteName ? ` (${link(e.evidenceDocNoteName)})` : ""}` : "";
+            const ev = e.evidence ? ` · "${escapeQuote(e.evidence)}"${e.evidenceDocNoteName ? ` (${link(e.evidenceDocNoteName)})` : ""}` : "";
             return `- ${e.type} ${arrow} ${link(e.otherNoteName)}${ev}`;
           })
           .join("\n")
