@@ -92,7 +92,7 @@ export async function buildExtractionRequests(sql: Db, documentId: string): Prom
   if (!doc) throw new Error(`Document ${documentId} not found`);
   const sections = await sql<{ id: string; content: string; ordinal: number }[]>`
     select id, content, ordinal from brain.chunks where document_id = ${documentId} and level = 0 order by ordinal`;
-  if (sections.length === 0) throw new Error(`Document ${documentId} has no sections; run the chunk stage first`);
+  if (sections.length === 0) return []; // nothing to extract from; the document proceeds
   const system = extractionSystem(reg);
   const header = `Document title: ${doc.title ?? "(none)"}\nSource kind: ${doc.source_kind}\nDocument summary: ${doc.summary_line ?? "(none)"}`;
   if (sections.length === 1) {

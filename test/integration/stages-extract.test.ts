@@ -47,3 +47,13 @@ describe("runExtract", () => {
     await expect(runExtract(ctx, id)).rejects.toThrow("network down");
   });
 });
+
+describe("runExtract with no sections", () => {
+  it("does nothing for a document with zero sections", async () => {
+    const ctx = fakeCtx(sql, () => fakeExtraction);
+    const { id } = await storeDocument(sql, { text: "# Only a heading" });
+    // no chunk rows: the zero-section case
+    await expect(runExtract(ctx, id)).resolves.toBeUndefined();
+    expect(ctx.llm.calls.length).toBe(0);
+  });
+});

@@ -56,4 +56,13 @@ describe("pipeline", () => {
     const later = await runPipeline(ctx, res.id);
     expect(later.stage).toBe("done");
   });
+
+  it("takes a heading-only note to done and makes the heading keyword-searchable", async () => {
+    const ctx = fakeCtx(sql, handlerWith({ failExtract: false }));
+    const res = await ingest(ctx, { text: "# Call about the Quuxworth offer" });
+    expect(res.stage).toBe("done");
+    expect(res.error).toBeNull();
+    const hits = await sql`select * from brain.hybrid_search('Quuxworth', null::vector, 10, null, null, null)`;
+    expect(hits.length).toBe(1);
+  });
 });

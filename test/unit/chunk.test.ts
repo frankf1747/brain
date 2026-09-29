@@ -13,7 +13,13 @@ describe("headingBlocks", () => {
     const text = "# A\n\nfirst\n\n## B\n\nsecond\n\n# C\n\nthird\n";
     const blocks = headingBlocks(text);
     expect(blocks.map((b) => b.headingPath)).toEqual([["A"], ["A", "B"], ["C"]]);
-    expect(blocks.map((b) => text.slice(b.start, b.end).trim())).toEqual(["first", "second", "third"]);
+    expect(blocks.map((b) => text.slice(b.start, b.end).trim())).toEqual(["# A\n\nfirst", "## B\n\nsecond", "# C\n\nthird"]);
+  });
+  it("keeps a heading-only block, since the heading is text", () => {
+    const text = "# A\n## B\n\nbody";
+    const blocks = headingBlocks(text);
+    expect(blocks.map((b) => b.headingPath)).toEqual([["A"], ["A", "B"]]);
+    expect(blocks.map((b) => text.slice(b.start, b.end).trim())).toEqual(["# A", "## B\n\nbody"]);
   });
   it("treats a document without headings as one block", () => {
     expect(headingBlocks("just text").length).toBe(1);
@@ -103,5 +109,28 @@ describe("chunker edge cases", () => {
     expect(blocks.map((b) => b.headingPath)).toEqual([["Setup"]]);
     const passages = chunkDocument(text, small).filter((d) => d.level === 1);
     expect(passages.some((p) => p.content.includes("# install deps"))).toBe(true);
+  });
+});
+
+describe("headings inside chunks", () => {
+  it("puts the heading text in a passage so it is keyword-searchable", () => {
+    const text = "# Stripe offer\n\nThey raised it to 180k.";
+    const drafts = chunkDocument(text, small);
+    const passages = drafts.filter((d) => d.level === 1);
+    expect(passages.some((p) => p.content.includes("Stripe"))).toBe(true);
+    for (const d of drafts) expect(text.slice(d.charStart, d.charEnd)).toBe(d.content);
+    expect(passages[0].headingPath).toEqual(["Stripe offer"]);
+  });
+
+  it("chunks a heading-only note into one section and one passage", () => {
+    const text = "# Call about the offer";
+    const drafts = chunkDocument(text, small);
+    const sections = drafts.filter((d) => d.level === 0);
+    const passages = drafts.filter((d) => d.level === 1);
+    expect(sections.length).toBe(1);
+    expect(passages.length).toBe(1);
+    expect(passages[0].content).toBe("# Call about the offer");
+    expect(passages[0].charStart).toBe(0);
+    expect(passages[0].charEnd).toBe(text.length);
   });
 });

@@ -36,7 +36,7 @@ function hasText(text: string, span: Span): boolean {
   return text.slice(span.start, span.end).trim().length > 0;
 }
 
-/** Split on markdown headings, keeping the heading stack as a path. */
+/** Split on markdown headings, keeping the heading stack as a path. Each block starts at its heading line, so heading text is in the content. */
 export function headingBlocks(text: string): Block[] {
   const blocks: Block[] = [];
   const stack: { level: number; title: string }[] = [];
@@ -58,7 +58,7 @@ export function headingBlocks(text: string): Block[] {
     const level = m[1].length;
     while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
     stack.push({ level, title: m[2] });
-    cur = { headingPath: stack.map((h) => h.title), start: Math.min(pos, text.length), end: 0 };
+    cur = { headingPath: stack.map((h) => h.title), start: lineStart, end: 0 };
   }
   cur.end = text.length;
   if (hasText(text, cur)) blocks.push(cur);
