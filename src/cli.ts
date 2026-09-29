@@ -5,7 +5,6 @@ import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ing
 import { ingestAll, logSkip } from "./ingest/batch.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
-import { canonicalName } from "./text/normalize.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -145,31 +144,19 @@ program
   .command("node <nameOrId>")
   .description("Show a node with its facts, edges and evidence")
   .action(async (nameOrId: string) => {
+    const { describeNode } = await import("./graph/inspect.js");
     await withCtx(async (ctx) => {
-      const isUuid = /^[0-9a-f-]{36}$/i.test(nameOrId);
-      const key = canonicalName(nameOrId);
-      const [node] = await ctx.sql<{ id: string; type: string; name: string; aliases: string[]; properties: unknown; verified: boolean }[]>`
-        select x.id, x.type, x.name, x.aliases, x.properties, x.verified
-        from brain.nodes n join brain.nodes x on x.id = brain.canonical_node(n.id)
-        where ${isUuid ? ctx.sql`n.id = ${nameOrId}` : ctx.sql`(n.canonical_name = ${key} or ${key} = any(n.aliases))`}
-        limit 1`;
-      if (!node) return void console.log("No such node");
-      console.log(`${node.type}: ${node.name}${node.verified ? " (verified)" : ""}  ${node.id}`);
-      if (node.aliases.length) console.log(`aliases: ${node.aliases.join(", ")}`);
-      console.log(`properties: ${JSON.stringify(node.properties)}`);
-      const edges = await ctx.sql<{ dir: string; type: string; other: string; other_type: string; evidence: string | null }[]>`
-        select case when e.from_node = ${node.id} then '->' else '<-' end as dir, e.type,
-               o.name as other, o.type as other_type, left(c.content, 160) as evidence
-        from brain.edges e
-        join brain.nodes o on o.id = case when e.from_node = ${node.id} then e.to_node else e.from_node end
-        left join brain.chunks c on c.id = e.evidence_chunk_id
-        where e.from_node = ${node.id} or e.to_node = ${node.id}
-        order by e.type`;
-      for (const e of edges) console.log(`  ${e.dir} ${e.type} ${e.other} (${e.other_type})${e.evidence ? `\n       "${e.evidence.replace(/\s+/g, " ")}"` : ""}`);
-      const facts = await ctx.sql<{ predicate: string; object_text: string }[]>`select predicate, object_text from brain.current_facts(${node.id})`;
-      for (const f of facts) console.log(`  fact ${f.predicate}: ${f.object_text}`);
-      const mentions = await ctx.sql<{ n: string }[]>`select count(*)::text as n from brain.mentions where node_id = ${node.id}`;
-      console.log(`mentioned in ${mentions[0].n} passages`);
+      const r = await describeNode(ctx.sql, nameOrId);
+      if (!r) return void console.log("No such node");
+      console.log(`${r.type}: ${r.name}${r.verified ? " (verified)" : ""}  ${r.id}`);
+      if (r.aliases.length) console.log(`aliases: ${r.aliases.join(", ")}`);
+      console.log(`properties: ${JSON.stringify(r.properties)}`);
+      for (const e of r.edges) {
+        console.log(`  ${e.direction === "out" ? "->" : "<-"} ${e.type} ${e.otherName} (${e.otherType})`);
+        if (e.evidence) console.log(`       "${e.evidence.replace(/\s+/g, " ")}"${e.evidenceDocumentTitle ? ` — ${e.evidenceDocumentTitle}` : ""}`);
+      }
+      for (const f of r.facts) console.log(`  fact ${f.predicate}: ${f.objectText}${f.verified ? "" : " (unverified)"}`);
+      console.log(`mentioned in ${r.mentionCount} passages across ${r.mentionedIn.length} documents`);
     });
   });
 
