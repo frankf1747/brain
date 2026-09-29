@@ -1,14 +1,18 @@
-/** Safe for macOS, Windows, Obsidian file names and inside [[wikilinks]]. */
+/** Safe for macOS, Windows, Obsidian file names and inside [[wikilinks]]. Returns NFC. */
 export function sanitizeName(s: string): string {
-  let out = s.replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim();
+  let out = s.normalize("NFC").replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim();
   if (out.length > 120) out = out.slice(0, 120).trim();
-  out = out.replace(/\.+$/, "").trim();
+  out = out.replace(/\.+$/, "").replace(/^\.+/, "").trim();
+  // Obsidian treats "Resume.pdf" or "notes.md" as an attachment link; keep the words, drop the extension dot.
+  out = out.replace(/\.([A-Za-z]{1,5})$/, " $1");
   return out || "untitled";
 }
 
 /** Collision key: how the file system and Obsidian compare note names. */
 export function nameKey(name: string): string {
-  return sanitizeName(name).toLowerCase();
+  // macOS (APFS/HFS+) compares names case-insensitively and normalization-insensitively; upper-then-lower
+  // also folds ß with SS.
+  return sanitizeName(name).normalize("NFC").toUpperCase().toLowerCase();
 }
 
 /**

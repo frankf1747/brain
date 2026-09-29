@@ -38,3 +38,33 @@ describe("uniqueNames reserved names", () => {
     expect(m.get("cccccccc-1")).toBe("Other");
   });
 });
+
+describe("macOS-like name folding", () => {
+  const at = (id: string, name: string, day: number) => ({ id, name, createdAt: new Date(2026, 0, day) });
+
+  it("collides NFC and NFD forms and ß with SS", () => {
+    const m = uniqueNames([
+      at("aaaaaaaa-1", "éclair", 1),
+      at("bbbbbbbb-1", "éclair", 2),
+      at("cccccccc-1", "Straße", 3),
+      at("dddddddd-1", "STRASSE", 4),
+    ]);
+    expect(m.get("aaaaaaaa-1")).toBe("éclair");
+    expect(m.get("bbbbbbbb-1")).toBe("éclair (bbbbbbbb)");
+    expect(m.get("cccccccc-1")).toBe("Straße");
+    expect(m.get("dddddddd-1")).toBe("STRASSE (dddddddd)");
+  });
+
+  it("returns NFC names", () => {
+    expect(sanitizeName("éclair")).toBe("éclair");
+  });
+
+  it("strips leading dots and neutralises attachment-like extensions", () => {
+    expect(sanitizeName(".hidden")).toBe("hidden");
+    expect(sanitizeName("...")).toBe("untitled");
+    expect(sanitizeName("Resume.pdf")).toBe("Resume pdf");
+    expect(sanitizeName("notes.md")).toBe("notes md");
+    expect(sanitizeName("v1.2 notes")).toBe("v1.2 notes");
+    expect(sanitizeName("v1.2")).toBe("v1.2");
+  });
+});
