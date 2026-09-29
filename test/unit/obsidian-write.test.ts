@@ -163,3 +163,18 @@ describe("syncFolder safety", () => {
     expect(await exists(join(root, "nodes/person/picture.png"))).toBe(true);
   });
 });
+
+describe("syncFolder with existing files at rendered paths", () => {
+  it("never overwrites an unmanaged file at a rendered path, but rewrites a managed one", async () => {
+    const root = await tmp("unmanaged");
+    await mkdir(join(root, "nodes/organization"), { recursive: true });
+    await writeFile(join(root, "nodes/organization/Acme.md"), "my own note\n");
+    await writeFile(join(root, "Old.md"), managed("old"));
+
+    const r = await syncFolder(root, new Map([["nodes/organization/Acme.md", managed("acme")], ["Old.md", managed("new")]]));
+    expect(r.written).toBe(1);
+    expect(r.skipped).toEqual(["nodes/organization/Acme.md"]);
+    expect(await readFile(join(root, "nodes/organization/Acme.md"), "utf8")).toBe("my own note\n");
+    expect(await readFile(join(root, "Old.md"), "utf8")).toBe(managed("new"));
+  });
+});

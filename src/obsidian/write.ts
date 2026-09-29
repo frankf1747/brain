@@ -100,6 +100,11 @@ export async function syncFolder(root: string, files: Map<string, string>): Prom
       continue;
     }
     const current = (await lstatOrNull(full)) ? await readFile(full, "utf8") : null;
+    if (current !== null && !isManaged(current)) {
+      // A note the projection did not write; never overwrite it.
+      result.skipped.push(rel);
+      continue;
+    }
     if (current === content) {
       result.unchanged++;
     } else {
