@@ -38,7 +38,7 @@ npm run brain -- backfill [--limit 500] [--poll 30]
 ## Tests
 
 - `npm run test:unit` needs nothing.
-- `npm run test:int` needs `npm run db:start`. It uses fakes for Claude and Voyage and wipes the brain tables, so do not run it against a database whose contents you want to keep.
+- `npm run test:int` needs `npm run db:start`. It recreates a separate `brain_test` database from the migrations and runs there with fakes for Claude and Voyage, so your real knowledge base is never touched. The test helper refuses any database whose name does not end in `_test`.
 - `npm run brain -- eval --ingest eval/corpus` is the retrieval gate; run it after changing chunking, embedding or fusion. Latest result: recall@10 1.00 and MRR 1.00 on 14 questions over 6 documents. The set is small, so treat it as a regression check, not a quality estimate.
 
 ## Layout

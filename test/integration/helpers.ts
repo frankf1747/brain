@@ -3,11 +3,24 @@ import type { Ctx } from "../../src/ctx.js";
 import { FakeLlm } from "../../src/llm/llm.js";
 import { FakeEmbedder, FakeReranker } from "../../src/llm/voyage.js";
 
+/**
+ * Integration tests wipe brain tables, so they only ever run against a database whose name ends in
+ * "_test" (created by scripts/prepare-test-db.sh). DATABASE_URL is deliberately ignored: it points at
+ * the real knowledge base.
+ */
+export const TEST_DATABASE_URL =
+  process.env.TEST_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:55322/brain_test";
+
+export function assertTestDatabase(url: string): void {
+  const name = new URL(url).pathname.replace(/^\//, "");
+  if (!name.endsWith("_test")) {
+    throw new Error(`Refusing to run integration tests against "${name}": the database name must end in _test`);
+  }
+}
+
 export function testDb(): Db {
-  return connect(
-    process.env.DATABASE_URL ??
-      "postgresql://postgres:postgres@127.0.0.1:55322/postgres",
-  );
+  assertTestDatabase(TEST_DATABASE_URL);
+  return connect(TEST_DATABASE_URL);
 }
 
 /** Removes data but keeps registries and the self node. */
