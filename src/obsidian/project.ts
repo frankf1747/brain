@@ -1,5 +1,5 @@
 import { lstat, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Ctx } from "../ctx.js";
 import { config } from "../config.js";
 import { loadGraph } from "./load.js";
@@ -13,9 +13,27 @@ export interface ProjectOptions {
   now?: Date;
 }
 
+/**
+ * The projection folder inside the vault. The folder must be one plain path segment (an empty value means
+ * the default "Brain"), and the result must be strictly inside the vault.
+ */
+export function projectionRoot(vault: string, folder: string | undefined): string {
+  const name = folder === undefined || folder === "" ? "Brain" : folder;
+  if (name.trim() === "" || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
+    throw new Error(`Invalid Obsidian projection folder ${JSON.stringify(folder)}: it must be a single folder name inside the vault, such as "Brain"`);
+  }
+  const base = resolve(vault);
+  const root = resolve(base, name);
+  const rel = relative(base, root);
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || rel.includes(sep)) {
+    throw new Error(`Invalid Obsidian projection folder ${JSON.stringify(folder)}: it resolves outside the vault`);
+  }
+  return root;
+}
+
 export async function projectObsidian(ctx: Ctx, opts: ProjectOptions = {}): Promise<SyncResult> {
   const vault = opts.vault ?? config.obsidianVaultPath;
-  const folder = opts.folder ?? config.obsidianFolder;
+  const root = projectionRoot(vault, opts.folder || config.obsidianFolder);
   const now = opts.now ?? new Date();
   const g = await loadGraph(ctx.sql);
 
@@ -79,7 +97,6 @@ export async function projectObsidian(ctx: Ctx, opts: ProjectOptions = {}): Prom
 
   // The README carries a timestamp. Keep the previous one unless another note changed, so a run over an
   // unchanged graph writes nothing.
-  const root = join(vault, folder);
   const counts = { nodes: g.nodes.length, documents: g.documents.length };
   const oldReadme = await readManagedFile(join(root, "README.md"));
   const prev = previousGeneratedAt(oldReadme);
