@@ -44,3 +44,55 @@ npm run brain -- backfill [--limit 500] [--poll 30]
 ## Layout
 
 See the file structure section of `docs/superpowers/plans/2026-09-27-knowledge-base-core.md`.
+
+## MCP
+
+The server exposes the knowledge base as nine tools:
+
+- `brain_orient`: what the base holds (counts, recent documents, facts about you) and which tool to use; call first.
+- `brain_search`: hybrid keyword, vector and graph search.
+- `brain_get_document`: fetch one document.
+- `brain_get_node`: fetch an entity and its neighbours.
+- `brain_get_facts`: list current facts.
+- `brain_status`: pipeline progress for documents.
+- `brain_ingest`: save text or a URL.
+- `brain_add_fact`: record a fact.
+- `brain_supersede_fact`: replace a fact with a corrected one.
+
+With `BRAIN_MCP_READONLY=1` only the six read tools (the first six) are exposed.
+
+`brain_ingest` returns once the document is stored and chunked. Summary, embeddings and extraction continue in the background, at most 2 pipelines at once so a slot stays free for new saves. `brain_status` shows progress; unfinished work resumes on later saves or with `npm run brain -- retry`.
+
+Facts written by an agent are unverified until you run `npm run brain -- verify-fact <id>`. Corrections supersede the old fact; nothing is deleted.
+
+### Claude Code (this Mac)
+
+Register once at user scope so every chat gets the `brain_*` tools:
+
+```bash
+claude mcp add --scope user --transport stdio brain -- /Users/frankfu/Documents/GitHub/brain/node_modules/.bin/tsx /Users/frankfu/Documents/GitHub/brain/src/mcp/stdio.ts
+```
+
+Say "save this to my brain" in any chat to ingest; ask anything and the model calls `brain_search` when it needs your material. The stdio server stops when Claude Code closes it.
+
+### Other clients (HTTP)
+
+The hosted server needs `DATABASE_URL` pointing at the Supabase project (run `supabase db push` first so the schema exists there), `VOYAGE_API_KEY`, and `BRAIN_TOKENS` as `name:token` pairs. Each token must be at least 32 characters (`openssl rand -hex 32`) and is sent as `Authorization: Bearer <token>`. The server refuses to start with no tokens or with short ones. The image runs as the non-root `node` user with `BRAIN_LLM=api`, so ingestion over HTTP also needs `ANTHROPIC_API_KEY`; set `BRAIN_MCP_READONLY=1` to expose only the read tools and skip that key.
+
+Fly.io example (adapt names and region):
+
+```bash
+fly launch --no-deploy --name brain-mcp --region sjc
+fly secrets set DATABASE_URL='postgresql://...' VOYAGE_API_KEY='...' BRAIN_MCP_READONLY=1 \
+  BRAIN_TOKENS="claude-desktop:$(openssl rand -hex 32),chatgpt:$(openssl rand -hex 32)"
+fly deploy
+curl https://brain-mcp.fly.dev/healthz
+```
+
+Then register the remote server in Claude Code as a second entry (example):
+
+```bash
+claude mcp add --transport http brain-remote https://brain-mcp.fly.dev/mcp --header "Authorization: Bearer <token>"
+```
+
+Claude Desktop and ChatGPT take the same URL and header in their connector settings. Alternative with no hosting: run `npm run mcp:http` on the Mac and expose the port through Tailscale or a Cloudflare Tunnel.
