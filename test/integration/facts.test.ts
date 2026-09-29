@@ -56,12 +56,13 @@ describe("facts", () => {
 
   it("superseding back to an earlier value revives that fact instead of making a cycle", async () => {
     const { id: a } = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
+    expect(await verifyFact(sql, a, "frank")).toBe(true);
     const b = await supersedeFact(sql, a, { objectText: "Los Angeles", by: "agent:test" });
     const c = await supersedeFact(sql, b, { objectText: "Austin", by: "agent:test" });
     expect(c).toBe(a);
     const current = await listFacts(sql, false);
     expect(current.map((f) => f.objectText)).toEqual(["Austin"]);
-    expect(current[0]).toEqual(expect.objectContaining({ id: a, supersededBy: null, validTo: null, verifiedBy: "agent:test" }));
+    expect(current[0]).toEqual(expect.objectContaining({ id: a, supersededBy: null, validTo: null, verified: false, verifiedBy: "agent:test" }));
     const all = await listFacts(sql, true);
     expect(all.map((f) => f.objectText).sort()).toEqual(["Austin", "Los Angeles"]);
     expect(all.find((f) => f.id === b)?.supersededBy).toBe(a);

@@ -72,9 +72,10 @@ export async function supersedeFact(sql: Db, factId: string, input: { objectText
     if (row.id === factId) throw new Error("New value equals the current value");
     if (row.superseded_by) {
       // Returning to an earlier value: revive that row rather than pointing the chain back at it (a cycle).
+      // It comes back unverified: verification is a deliberate owner action an agent's correction must not inherit.
       await tx`
         update brain.facts
-        set superseded_by = null, valid_to = null, verified_by = ${input.by},
+        set superseded_by = null, valid_to = null, verified = false, verified_by = ${input.by},
             valid_from = coalesce(${input.validFrom ?? null}::date, valid_from)
         where id = ${row.id}`;
     }
