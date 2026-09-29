@@ -215,6 +215,43 @@ program
     await withCtx((ctx) => backfill(ctx, { limit: Number(opts.limit), pollMs: Number(opts.poll) * 1000 }));
   });
 
+program
+  .command("project-obsidian")
+  .description("Write a read-only mirror of the graph into an Obsidian vault folder")
+  .option("--vault <path>", "vault path (default from OBSIDIAN_VAULT_PATH)")
+  .option("--folder <name>", "folder inside the vault (default Brain)")
+  .option("--watch <minutes>", "re-run every N minutes")
+  .option("--list-vaults", "print vaults Obsidian knows about and exit")
+  .action(async (opts) => {
+    if (opts.listVaults) {
+      const { listVaults } = await import("./obsidian/vaults.js");
+      for (const v of await listVaults()) console.log(`${v.open ? "*" : " "} ${v.name.padEnd(16)} ${v.path}`);
+      return;
+    }
+    const minutes = opts.watch === undefined ? null : Number(opts.watch);
+    if (minutes !== null && !(minutes > 0)) throw new Error(`--watch needs a positive number of minutes, got ${JSON.stringify(opts.watch)}`);
+    const { projectObsidian } = await import("./obsidian/project.js");
+    await withCtx(async (ctx) => {
+      const run = async () => {
+        const r = await projectObsidian(ctx, { vault: opts.vault, folder: opts.folder });
+        console.log(`${new Date().toISOString()} written ${r.written}, unchanged ${r.unchanged}, deleted ${r.deleted}${r.skipped.length ? `, left alone: ${r.skipped.join(", ")}` : ""}`);
+      };
+      await run();
+      if (minutes !== null) {
+        let running = false;
+        await new Promise<never>(() =>
+          setInterval(() => {
+            if (running) return; // previous run still going; skip this tick rather than stack runs
+            running = true;
+            run()
+              .catch((e) => console.error(e instanceof Error ? e.message : e))
+              .finally(() => (running = false));
+          }, minutes * 60_000),
+        );
+      }
+    });
+  });
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
