@@ -67,6 +67,8 @@ export interface SearchResult {
   facts: FactRow[];
   usedFallback: boolean;
   topScore: number | null;
+  /** True when the query embedding or the reranker failed and results come from keyword search and fused order. */
+  degraded: boolean;
 }
 
 interface ChunkRow {
@@ -130,8 +132,15 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   const since = opts.since ?? null;
   const until = opts.until ?? null;
 
-  const [queryVector] = await ctx.embedder.embed([query], "query");
-  const qvec = toVector(queryVector);
+  let degraded = false;
+  let qvec: string | null = null;
+  try {
+    const [queryVector] = await ctx.embedder.embed([query], "query");
+    qvec = toVector(queryVector);
+  } catch (err) {
+    degraded = true;
+    process.stderr.write(`brain: query embedding failed, keyword search only: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
 
   const [chunkCands, docCands, entityRefs] = await Promise.all([
     sql<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
@@ -146,12 +155,22 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   // Layer 2: fused candidates, reranked.
   const fused = reciprocalRankFusion(chunkCands.map((c) => ({ id: c.chunk_id, vectorRank: c.vector_rank, keywordRank: c.keyword_rank })));
   const rows = await loadChunks(sql, fused.map((f) => f.id));
-  const ordered = fused.map((f) => rows.get(f.id)!).filter(Boolean);
-  const reranked = ordered.length ? await ctx.reranker.rerank(
+  const present = fused.filter((f) => rows.has(f.id));
+  const ordered = present.map((f) => rows.get(f.id)!);
+  let reranked: { index: number; score: number }[] = [];
+  if (ordered.length) {
+    try {
+      reranked = await ctx.reranker.rerank(
         query,
         ordered.map((r) => (r.context_prefix ? r.context_prefix + "\n\n" : "") + r.content),
         k,
-      ) : [];
+      );
+    } catch (err) {
+      degraded = true;
+      process.stderr.write(`brain: reranking failed, keeping fused order: ${err instanceof Error ? err.message : String(err)}\n`);
+      reranked = present.slice(0, k).map((f, index) => ({ index, score: f.fused }));
+    }
+  }
   const passages: Passage[] = reranked.map((h) => toPassage(ordered[h.index], h.score, "hybrid"));
   const seen = new Set(passages.map((p) => p.chunkId));
 
@@ -209,7 +228,8 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   // Fallback: raw substring scan when the best reranked hit is weak.
   const topScore = passages.find((p) => p.group === "hybrid")?.score ?? null;
   let usedFallback = false;
-  if (topScore === null || topScore < config.retrieval.fallbackThreshold) {
+  // In degraded mode scores are RRF values (or keyword-only), so the threshold means nothing: always scan.
+  if (degraded || topScore === null || topScore < config.retrieval.fallbackThreshold) {
     const hits = await sql<{ id: string; title: string | null; source_kind: string; raw_content: string; pos: number }[]>`
       select d.id, d.title, d.source_kind, d.raw_content, position(lower(${query}) in lower(d.raw_content)) as pos
       from brain.documents d
@@ -238,7 +258,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
     }
   }
 
-  const layers = ["hybrid", "summary", ...(entities.length ? ["graph"] : []), ...(facts.length ? ["facts"] : []), ...(usedFallback ? ["fallback"] : [])];
+  const layers = ["hybrid", "summary", ...(entities.length ? ["graph"] : []), ...(facts.length ? ["facts"] : []), ...(usedFallback ? ["fallback"] : []), ...(degraded ? ["degraded"] : [])];
   const filters = { sourceKinds: kinds, since, until, verifiedOnly: opts.verifiedOnly ?? false };
   await sql`
     insert into brain.retrieval_log (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client)
@@ -246,5 +266,5 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
             ${passages.map((p) => p.chunkId).filter((id): id is string => id !== null)}::uuid[],
             ${entities.map((e) => e.id)}::uuid[], ${topScore}, ${usedFallback}, ${opts.client ?? "cli"})`;
 
-  return { query, passages, documents, entities, facts, usedFallback, topScore };
+  return { query, passages, documents, entities, facts, usedFallback, topScore, degraded };
 }

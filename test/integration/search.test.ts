@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { ingest } from "../../src/ingest/pipeline.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { search } from "../../src/retrieve/search.js";
 import { FakeReranker, type RerankHit } from "../../src/llm/voyage.js";
+import { reciprocalRankFusion } from "../../src/retrieve/fuse.js";
+import { toVector } from "../../src/db.js";
+import { config } from "../../src/config.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -95,6 +98,48 @@ describe("search", () => {
     expect(seen.some((d) => d.startsWith("Zorblax news\nA note.\n\n") && d.includes("ZX-9000"))).toBe(true);
     const hit = res.passages.find((p) => p.group === "hybrid" && p.content.includes("ZX-9000"))!;
     expect(hit.content.startsWith("Zorblax news")).toBe(false);
+  });
+
+  it("falls back to keyword-only search when the query embedding fails", async () => {
+    const ctx = await seed();
+    ctx.embedder = { embed: async () => { throw new Error("voyage 503"); } } as unknown as typeof ctx.embedder;
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await search(ctx, "What did Zorblax Industries release?");
+      expect(res.degraded).toBe(true);
+      expect(res.passages.some((p) => p.content.includes("ZX-9000"))).toBe(true);
+      expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: query embedding failed, keyword search only: voyage 503");
+    } finally {
+      err.mockRestore();
+    }
+    const [log] = await sql<{ layers: string[] }[]>`select layers from brain.retrieval_log`;
+    expect(log.layers).toContain("degraded");
+  });
+
+  it("keeps fused order with RRF scores when the reranker fails", async () => {
+    const ctx = await seed();
+    ctx.reranker = { rerank: async () => { throw new Error("rerank down"); } };
+    const [qv] = await ctx.embedder.embed(["Zorblax Industries drill"], "query");
+    const cands = await sql<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+      select chunk_id, vector_rank, keyword_rank from brain.hybrid_search(${"Zorblax Industries drill"}, ${toVector(qv)}::vector, ${config.retrieval.candidateK}, null::text[], null, null)`;
+    const fused = reciprocalRankFusion(cands.map((c) => ({ id: c.chunk_id, vectorRank: c.vector_rank, keywordRank: c.keyword_rank })));
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await search(ctx, "Zorblax Industries drill");
+      expect(res.degraded).toBe(true);
+      const hybrid = res.passages.filter((p) => p.group === "hybrid");
+      expect(hybrid.length).toBeGreaterThan(0);
+      expect(hybrid.map((p) => p.chunkId)).toEqual(fused.slice(0, hybrid.length).map((f) => f.id));
+      expect(hybrid.map((p) => p.score)).toEqual(fused.slice(0, hybrid.length).map((f) => f.fused));
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("is not degraded when embedding and reranking succeed", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "What did Zorblax Industries release?");
+    expect(res.degraded).toBe(false);
   });
 
   it("rejects an empty query", async () => {
