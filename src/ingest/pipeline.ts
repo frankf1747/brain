@@ -23,25 +23,55 @@ export interface PipelineResult {
   documentId: string;
   stage: Stage;
   error: string | null;
+  /** True when another runner holds this document's lock, so this call did nothing. */
+  skipped?: boolean;
 }
 
-/** Advances a document stage by stage until `until` (default done) or the first failure. */
+async function currentStage(ctx: Ctx, documentId: string): Promise<Stage> {
+  const [job] = await ctx.sql<{ stage: Stage }[]>`select stage from brain.ingest_jobs where document_id = ${documentId}`;
+  if (!job) throw new Error(`No ingest job for document ${documentId}`);
+  return job.stage;
+}
+
+/**
+ * Advances a document stage by stage until `until` (default done) or the first failure.
+ * Holds a per-document session advisory lock for the whole run; if another runner holds it,
+ * returns the current stage with skipped: true and does nothing.
+ */
 export async function runPipeline(ctx: Ctx, documentId: string, opts: { until?: Stage } = {}): Promise<PipelineResult> {
-  const target = opts.until ?? "done";
+  const reserved = await ctx.sql.reserve();
+  try {
+    const [{ locked }] = await reserved<{ locked: boolean }[]>`
+      select pg_try_advisory_lock(hashtextextended(${documentId}::text, 0)) as locked`;
+    if (!locked) return { documentId, stage: await currentStage(ctx, documentId), error: null, skipped: true };
+    try {
+      return await advance(ctx, documentId, opts.until ?? "done");
+    } finally {
+      await reserved`select pg_advisory_unlock(hashtextextended(${documentId}::text, 0))`;
+    }
+  } finally {
+    reserved.release();
+  }
+}
+
+async function advance(ctx: Ctx, documentId: string, target: Stage): Promise<PipelineResult> {
   for (;;) {
-    const [job] = await ctx.sql<{ stage: Stage }[]>`select stage from brain.ingest_jobs where document_id = ${documentId}`;
-    if (!job) throw new Error(`No ingest job for document ${documentId}`);
-    const idx = STAGES.indexOf(job.stage);
-    if (idx >= STAGES.indexOf(target)) return { documentId, stage: job.stage, error: null };
+    const stage = await currentStage(ctx, documentId);
+    const idx = STAGES.indexOf(stage);
+    if (idx >= STAGES.indexOf(target)) return { documentId, stage, error: null };
     const next = STAGES[idx + 1] as Exclude<Stage, "stored">;
     try {
       await RUNNERS[next](ctx, documentId);
-      await ctx.sql`update brain.ingest_jobs set stage = ${next}, error = null, updated_at = now() where document_id = ${documentId}`;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await ctx.sql`update brain.ingest_jobs set error = ${message}, attempts = attempts + 1, updated_at = now() where document_id = ${documentId}`;
-      return { documentId, stage: job.stage, error: message };
+      return { documentId, stage, error: message };
     }
+    // Only advance from the stage this run started from, so a stage can never move backwards.
+    const moved = await ctx.sql`
+      update brain.ingest_jobs set stage = ${next}, error = null, updated_at = now()
+      where document_id = ${documentId} and stage = ${stage}`;
+    if (moved.count === 0) return { documentId, stage: await currentStage(ctx, documentId), error: null };
   }
 }
 
