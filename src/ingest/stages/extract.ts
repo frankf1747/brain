@@ -2,7 +2,7 @@ import { z } from "zod";
 import type postgres from "postgres";
 import type { Ctx } from "../../ctx.js";
 import type { Db } from "../../db.js";
-import { isSchemaFailure } from "../../llm/errors.js";
+import { isRefusal, isSchemaFailure } from "../../llm/errors.js";
 
 export const EntitySchema = z.object({
   key: z.string().describe("Short key unique within this output, such as e1, e2."),
@@ -114,18 +114,20 @@ export async function applyExtraction(sql: Db, req: ExtractionRequest, payload: 
     do update set payload = excluded.payload, model = excluded.model, created_at = now()`;
 }
 
+/** One call with one retry on a schema failure. Returns null on a refusal or a second schema failure; other errors throw. */
 async function extractWithRetry(ctx: Ctx, req: ExtractionRequest): Promise<Extraction | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await ctx.llm.structured({ schema: ExtractionSchema, system: req.system, user: req.user });
     } catch (err) {
+      if (isRefusal(err)) return null;
       if (!isSchemaFailure(err)) throw err;
     }
   }
   return null;
 }
 
-/** Stage 5. Schema failures skip extraction for the document; other errors propagate so the pipeline records them. */
+/** Stage 5. Refusals and repeated schema failures skip extraction for the section; other errors propagate so the pipeline records them. */
 export async function runExtract(ctx: Ctx, documentId: string): Promise<void> {
   const requests = await buildExtractionRequests(ctx.sql, documentId);
   for (const req of requests) {

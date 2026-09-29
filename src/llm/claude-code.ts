@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { z } from "zod";
 import { config } from "../config.js";
 import type { Llm, StructuredArgs, TextArgs } from "./llm.js";
+import { SchemaFailure } from "./errors.js";
 
 export type Exec = (bin: string, args: string[], input: string) => Promise<{ stdout: string }>;
 
@@ -84,7 +85,15 @@ export class ClaudeCodeLlm implements Llm {
     } catch {
       throw new Error(`Claude Code returned non-JSON output: ${stdout.slice(0, 300)}`);
     }
-    if (envelope.is_error) throw new Error(`Claude Code error: ${envelope.result ?? envelope.subtype ?? "unknown"}`);
+    if (envelope.is_error) {
+      const detail = envelope.result ?? envelope.subtype ?? "unknown";
+      // The CLI's own structured-output retries ran out (or it ran out of turns trying): a schema failure.
+      const why = `${envelope.subtype ?? ""} ${envelope.result ?? ""}`;
+      if (schema && /structured.output|schema|max_turns/i.test(why)) {
+        throw new SchemaFailure(`Model output did not match the schema: Claude Code ${detail}`);
+      }
+      throw new Error(`Claude Code error: ${detail}`);
+    }
     return envelope;
   }
 
@@ -95,10 +104,12 @@ export class ClaudeCodeLlm implements Llm {
       try {
         raw = JSON.parse(envelope.result ?? "");
       } catch {
-        throw new Error("Model output did not match the schema: not JSON");
+        throw new SchemaFailure("Model output did not match the schema: not JSON");
       }
     }
-    return schema.parse(raw);
+    const result = schema.safeParse(raw);
+    if (!result.success) throw new SchemaFailure(`Model output did not match the schema: ${result.error.message.slice(0, 300)}`);
+    return result.data;
   }
 
   async text({ system, user }: TextArgs): Promise<string> {

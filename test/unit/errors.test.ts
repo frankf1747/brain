@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { isSchemaFailure } from "../../src/llm/errors.js";
+import { isSchemaFailure, isRefusal, SchemaFailure, ModelRefusal } from "../../src/llm/errors.js";
 
 describe("isSchemaFailure", () => {
   it("recognizes ZodError and the schema-failure messages", () => {
@@ -17,5 +17,16 @@ describe("isSchemaFailure", () => {
     expect(isSchemaFailure(new Error("schema registry offline"))).toBe(false);
     expect(isSchemaFailure("did not match the schema")).toBe(false);
     expect(isSchemaFailure(null)).toBe(false);
+  });
+});
+
+describe("typed LLM errors", () => {
+  it("classifies SchemaFailure and ModelRefusal by type", () => {
+    expect(isSchemaFailure(new SchemaFailure("anything"))).toBe(true);
+    expect(isRefusal(new SchemaFailure("anything"))).toBe(false);
+    expect(isRefusal(new ModelRefusal("anything"))).toBe(true);
+    expect(isSchemaFailure(new ModelRefusal("anything"))).toBe(false);
+    expect(isRefusal(new Error("Model refused: x"))).toBe(true);
+    expect(isRefusal(new Error("network down"))).toBe(false);
   });
 });

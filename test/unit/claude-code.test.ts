@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { ClaudeCodeLlm, spawnExec, type Exec } from "../../src/llm/claude-code.js";
+import { SchemaFailure } from "../../src/llm/errors.js";
 
 function fakeExec(envelope: unknown) {
   const calls: { bin: string; args: string[]; input: string }[] = [];
@@ -30,7 +31,24 @@ describe("ClaudeCodeLlm", () => {
     const good = new ClaudeCodeLlm({ exec: fakeExec({ is_error: false, result: '{"n": 2}' }).exec });
     expect(await good.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).toEqual({ n: 2 });
     const bad = new ClaudeCodeLlm({ exec: fakeExec({ is_error: false, result: '{"n": "x"}' }).exec });
-    await expect(bad.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).rejects.toThrow();
+    await expect(bad.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).rejects.toBeInstanceOf(SchemaFailure);
+  });
+
+  it("reports a non-JSON result as a SchemaFailure", async () => {
+    const llm = new ClaudeCodeLlm({ exec: fakeExec({ is_error: false, result: "Sorry, here is prose." }).exec });
+    await expect(llm.structured({ schema: z.object({ n: z.number() }), system: "s", user: "u" })).rejects.toBeInstanceOf(SchemaFailure);
+  });
+
+  it("reports CLI-side structured-output failures as SchemaFailure, other CLI errors as plain errors", async () => {
+    const schema = z.object({ n: z.number() });
+    const retries = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, subtype: "error_max_structured_output_retries" }).exec });
+    await expect(retries.structured({ schema, system: "s", user: "u" })).rejects.toBeInstanceOf(SchemaFailure);
+    const turns = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, subtype: "error_max_turns" }).exec });
+    await expect(turns.structured({ schema, system: "s", user: "u" })).rejects.toBeInstanceOf(SchemaFailure);
+    const auth = new ClaudeCodeLlm({ exec: fakeExec({ is_error: true, result: "OAuth access token has expired." }).exec });
+    const err = await auth.structured({ schema, system: "s", user: "u" }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(SchemaFailure);
+    expect(err.message).toMatch(/expired/);
   });
 
   it("surfaces CLI errors such as an expired login", async () => {

@@ -4,6 +4,9 @@ import { fakeExtraction } from "./fixtures.js";
 import { storeDocument } from "../../src/ingest/store.js";
 import { runChunk } from "../../src/ingest/stages/chunk.js";
 import { runExtract } from "../../src/ingest/stages/extract.js";
+import { runPipeline } from "../../src/ingest/pipeline.js";
+import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
+import { ModelRefusal } from "../../src/llm/errors.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -38,6 +41,20 @@ describe("runExtract", () => {
     expect(doc.metadata.extraction).toBe("skipped");
     const extractions = await sql`select id from brain.extractions where document_id = ${id}`;
     expect(extractions.length).toBe(0);
+  });
+
+  it("skips a refused extraction without retrying, and the document still reaches done", async () => {
+    const summary = { title: "t", summary_line: "l", summary: "s", occurred_at: null };
+    const ctx = fakeCtx(sql, ({ system }) => {
+      if (system === SUMMARY_SYSTEM) return summary;
+      throw new ModelRefusal("Model refused: policy");
+    });
+    const { id } = await storeDocument(sql, { text });
+    const res = await runPipeline(ctx, id);
+    expect(res).toMatchObject({ stage: "done", error: null });
+    expect(ctx.llm.calls.filter((c) => c.system !== SUMMARY_SYSTEM).length).toBe(1);
+    const [doc] = await sql<{ metadata: { extraction?: string } }[]>`select metadata from brain.documents where id = ${id}`;
+    expect(doc.metadata.extraction).toBe("skipped");
   });
 
   it("rethrows non-schema errors so the pipeline records a retryable failure", async () => {
