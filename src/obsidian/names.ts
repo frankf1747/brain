@@ -8,11 +8,17 @@ export function sanitizeName(s: string): string {
   return out || "untitled";
 }
 
-/** Collision key: how the file system and Obsidian compare note names. */
+/**
+ * How macOS (APFS/HFS+) and Obsidian compare names: case-insensitively and normalization-insensitively.
+ * Upper-then-lower also folds ß with SS.
+ */
+export function foldName(s: string): string {
+  return s.normalize("NFC").toUpperCase().toLowerCase();
+}
+
+/** Collision key for a note name. */
 export function nameKey(name: string): string {
-  // macOS (APFS/HFS+) compares names case-insensitively and normalization-insensitively; upper-then-lower
-  // also folds ß with SS.
-  return sanitizeName(name).normalize("NFC").toUpperCase().toLowerCase();
+  return foldName(sanitizeName(name));
 }
 
 /**

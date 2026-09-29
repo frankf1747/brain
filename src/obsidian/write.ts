@@ -1,5 +1,6 @@
-import { lstat, mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { foldName } from "./names.js";
 
 export interface SyncResult {
   written: number;
@@ -91,13 +92,27 @@ export async function syncFolder(root: string, files: Map<string, string>): Prom
 
   await mkdir(root, { recursive: true });
   const result: SyncResult = { written: 0, unchanged: 0, deleted: 0, skipped: [] };
-  const existing = new Set(await walk(root, root));
+  // Existing files keyed by folded relative path, because the file system compares names the same way:
+  // "Dup target.md" and "Dup TARGET.md" are one file on macOS.
+  const existing = new Map((await walk(root, root)).map((rel) => [foldName(rel), rel]));
 
   for (const { rel, content, full } of targets) {
-    existing.delete(relative(root, full));
+    const key = foldName(relative(root, full));
+    const old = existing.get(key);
+    existing.delete(key);
     if (await unsafeTarget(root, full)) {
       result.skipped.push(rel);
       continue;
+    }
+    if (old !== undefined && old !== relative(root, full)) {
+      // Same file under a name differing only by case or normalization: rename a managed one in place.
+      const oldFull = resolveInside(root, old);
+      if (!isManaged(await readFile(oldFull, "utf8"))) {
+        result.skipped.push(rel);
+        continue;
+      }
+      await mkdir(dirname(full), { recursive: true });
+      await rename(oldFull, full);
     }
     const current = (await lstatOrNull(full)) ? await readFile(full, "utf8") : null;
     if (current !== null && !isManaged(current)) {
@@ -114,7 +129,7 @@ export async function syncFolder(root: string, files: Map<string, string>): Prom
     }
   }
 
-  for (const rel of existing) {
+  for (const rel of existing.values()) {
     const full = resolveInside(root, rel);
     const st = await lstatOrNull(full);
     if (!st || !st.isFile()) continue;

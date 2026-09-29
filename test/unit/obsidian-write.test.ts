@@ -178,3 +178,24 @@ describe("syncFolder with existing files at rendered paths", () => {
     expect(await readFile(join(root, "Old.md"), "utf8")).toBe(managed("new"));
   });
 });
+
+describe("syncFolder renames", () => {
+  it("renames a note whose name changed only by case instead of writing into it and deleting it", async () => {
+    const root = await tmp("case");
+    await syncFolder(root, new Map([["nodes/concept/Dup target.md", managed("v1")]]));
+    const r = await syncFolder(root, new Map([["nodes/concept/Dup TARGET.md", managed("v2")]]));
+    expect(r.deleted).toBe(0);
+    expect(r.skipped).toEqual([]);
+    expect(await readdir(join(root, "nodes/concept"))).toEqual(["Dup TARGET.md"]);
+    expect(await readFile(join(root, "nodes/concept/Dup TARGET.md"), "utf8")).toBe(managed("v2"));
+  });
+
+  it("renames across Unicode normalization forms", async () => {
+    const root = await tmp("nfd");
+    await writeFile(join(root, "éclair.md"), managed("same"));
+    const r = await syncFolder(root, new Map([["éclair.md", managed("same")]]));
+    expect(r.deleted).toBe(0);
+    expect((await readdir(root)).map((n) => n.normalize("NFC"))).toEqual(["éclair.md"]);
+    expect(await readFile(join(root, "éclair.md"), "utf8")).toBe(managed("same"));
+  });
+});
