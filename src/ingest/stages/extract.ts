@@ -1,7 +1,8 @@
-import { z, ZodError } from "zod";
+import { z } from "zod";
 import type postgres from "postgres";
 import type { Ctx } from "../../ctx.js";
 import type { Db } from "../../db.js";
+import { isSchemaFailure } from "../../llm/errors.js";
 
 export const EntitySchema = z.object({
   key: z.string().describe("Short key unique within this output, such as e1, e2."),
@@ -111,10 +112,6 @@ export async function applyExtraction(sql: Db, req: ExtractionRequest, payload: 
     values (${req.documentId}, ${req.sectionChunkId}, ${model}, ${sql.json(payload as unknown as postgres.JSONValue)})
     on conflict (document_id, section_chunk_id)
     do update set payload = excluded.payload, model = excluded.model, created_at = now()`;
-}
-
-function isSchemaFailure(err: unknown): boolean {
-  return err instanceof ZodError || (err instanceof Error && /schema/i.test(err.message));
 }
 
 async function extractWithRetry(ctx: Ctx, req: ExtractionRequest): Promise<Extraction | null> {

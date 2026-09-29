@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Ctx } from "../../ctx.js";
 import type { Db } from "../../db.js";
+import { isRefusal, isSchemaFailure } from "../../llm/errors.js";
 
 export const SummarySchema = z.object({
   title: z.string().describe("A short title for the document. Keep the given title if there is one."),
@@ -58,14 +59,48 @@ export async function applySummary(sql: Db, documentId: string, summary: Summary
     where id = ${documentId}`;
 }
 
-/** Stage 3. */
+/**
+ * Stub used when the model cannot produce a summary: the text's first 200 characters on one line.
+ * Keeps any existing title; otherwise the first markdown heading, else the first 80 characters.
+ */
+export async function applyStubSummary(sql: Db, documentId: string): Promise<void> {
+  const [doc] = await sql<{ raw_content: string }[]>`select raw_content from brain.documents where id = ${documentId}`;
+  if (!doc) throw new Error(`Document ${documentId} not found`);
+  const oneLine = doc.raw_content.replace(/\s+/g, " ").trim();
+  const heading = /^#{1,6}[ \t]+(.+?)[ \t#]*$/m.exec(doc.raw_content)?.[1]?.trim();
+  const fallbackTitle = heading || oneLine.slice(0, 80) || null;
+  await sql`
+    update brain.documents
+    set summary = null,
+        summary_line = ${oneLine.slice(0, 200)},
+        title = coalesce(title, ${fallbackTitle}),
+        metadata = metadata || '{"summary":"skipped"}'::jsonb
+    where id = ${documentId}`;
+}
+
+/** One call with one retry on a schema failure. Returns null on a refusal or a second schema failure; other errors throw. */
+async function summarizeCall(ctx: Ctx, system: string, user: string): Promise<Summary | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await ctx.llm.structured({ schema: SummarySchema, system, user });
+    } catch (err) {
+      if (isRefusal(err)) return null;
+      if (!isSchemaFailure(err)) throw err;
+    }
+  }
+  return null;
+}
+
+/** Stage 3. A refusal or repeated schema failure writes a text-prefix stub so the document can continue. */
 export async function runSummarize(ctx: Ctx, documentId: string): Promise<void> {
   const requests = await buildSummaryRequests(ctx.sql, documentId);
   const parts: Summary[] = [];
-  for (const r of requests) parts.push(await ctx.llm.structured({ schema: SummarySchema, system: r.system, user: r.user }));
-  const final =
-    parts.length === 1
-      ? parts[0]
-      : await ctx.llm.structured({ schema: SummarySchema, system: SUMMARY_SYSTEM, user: combinePrompt(parts) });
+  for (const r of requests) {
+    const part = await summarizeCall(ctx, r.system, r.user);
+    if (!part) return applyStubSummary(ctx.sql, documentId);
+    parts.push(part);
+  }
+  const final = parts.length === 1 ? parts[0] : await summarizeCall(ctx, SUMMARY_SYSTEM, combinePrompt(parts));
+  if (!final) return applyStubSummary(ctx.sql, documentId);
   await applySummary(ctx.sql, documentId, final);
 }
