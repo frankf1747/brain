@@ -1,7 +1,8 @@
 /** Safe for macOS, Windows, Obsidian file names and inside [[wikilinks]]. Returns NFC. */
 export function sanitizeName(s: string): string {
   let out = s.normalize("NFC").replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim();
-  if (out.length > 120) out = out.slice(0, 120).trim();
+  // Truncate by code point so a long name never ends in half of an emoji or other astral character.
+  if ([...out].length > 120) out = [...out].slice(0, 120).join("").trim();
   out = out.replace(/\.+$/, "").replace(/^\.+/, "").trim();
   // Obsidian treats "Resume.pdf" or "notes.md" as an attachment link; keep the words, drop the extension dot.
   out = out.replace(/\.([A-Za-z]{1,5})$/, " $1");

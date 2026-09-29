@@ -68,3 +68,11 @@ describe("macOS-like name folding", () => {
     expect(sanitizeName("v1.2")).toBe("v1.2");
   });
 });
+
+describe("sanitizeName truncation", () => {
+  it("never splits an astral character", () => {
+    const out = sanitizeName("😀".repeat(200));
+    expect([...out].length).toBe(120);
+    expect(out).toBe("😀".repeat(120));
+  });
+});
