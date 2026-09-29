@@ -27,6 +27,33 @@ export interface PipelineResult {
   skipped?: boolean;
 }
 
+/**
+ * Each running pipeline pins one reserved connection (its advisory lock) and needs up to a few pooled
+ * connections for its stage queries. With the pool at max 10 (src/db.ts), three at once leave room for
+ * their stage queries and for other work; without a cap, as many pipelines as pool slots would each
+ * reserve one and their stage queries would wait forever.
+ */
+export const MAX_CONCURRENT_PIPELINES = 3;
+
+/** Process-wide counting semaphore: excess runPipeline calls wait for a slot instead of failing. */
+let running = 0;
+const waiting: (() => void)[] = [];
+
+async function acquireSlot(): Promise<void> {
+  if (running < MAX_CONCURRENT_PIPELINES) {
+    running++;
+    return;
+  }
+  // The releaser hands its slot straight to us, so `running` stays unchanged.
+  await new Promise<void>((resolve) => waiting.push(resolve));
+}
+
+function releaseSlot(): void {
+  const next = waiting.shift();
+  if (next) next();
+  else running--;
+}
+
 async function currentStage(ctx: Ctx, documentId: string): Promise<Stage> {
   const [job] = await ctx.sql<{ stage: Stage }[]>`select stage from brain.ingest_jobs where document_id = ${documentId}`;
   if (!job) throw new Error(`No ingest job for document ${documentId}`);
@@ -36,16 +63,26 @@ async function currentStage(ctx: Ctx, documentId: string): Promise<Stage> {
 /**
  * Advances a document stage by stage until `until` (default done) or the first failure.
  * Holds a per-document session advisory lock for the whole run; if another runner holds it,
- * returns the current stage with skipped: true and does nothing.
+ * returns the current stage with skipped: true and does nothing. At most MAX_CONCURRENT_PIPELINES
+ * runs proceed at once per process; the rest wait their turn.
  */
 export async function runPipeline(ctx: Ctx, documentId: string, opts: { until?: Stage } = {}): Promise<PipelineResult> {
+  await acquireSlot();
+  try {
+    return await runLocked(ctx, documentId, opts.until ?? "done");
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function runLocked(ctx: Ctx, documentId: string, until: Stage): Promise<PipelineResult> {
   const reserved = await ctx.sql.reserve();
   try {
     const [{ locked }] = await reserved<{ locked: boolean }[]>`
       select pg_try_advisory_lock(hashtextextended(${documentId}::text, 0)) as locked`;
     if (!locked) return { documentId, stage: await currentStage(ctx, documentId), error: null, skipped: true };
     try {
-      return await advance(ctx, documentId, opts.until ?? "done");
+      return await advance(ctx, documentId, until);
     } finally {
       await reserved`select pg_advisory_unlock(hashtextextended(${documentId}::text, 0))`;
     }

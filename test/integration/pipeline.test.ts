@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { testDb, wipe, fakeCtx } from "./helpers.js";
-import { ingest, retryFailed, runPipeline } from "../../src/ingest/pipeline.js";
+import { ingest, retryFailed, runPipeline, MAX_CONCURRENT_PIPELINES } from "../../src/ingest/pipeline.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { fakeExtraction } from "./fixtures.js";
 import { toVector } from "../../src/db.js";
@@ -109,5 +109,31 @@ describe("pipeline", () => {
     const second = await runPipeline(ctx, id);
     expect(second.skipped).toBeFalsy();
     expect(second).toMatchObject({ stage: "done", error: null });
+  });
+
+  it("caps concurrent runs so six pipelines at once all finish without exhausting the pool", async () => {
+    expect(MAX_CONCURRENT_PIPELINES).toBe(3);
+    let inside = 0;
+    let peak = 0;
+    const slow = async ({ system }: { system: string }) => {
+      inside++;
+      peak = Math.max(peak, inside);
+      try {
+        await new Promise((r) => setTimeout(r, 200));
+        return system === SUMMARY_SYSTEM ? summary : fakeExtraction;
+      } finally {
+        inside--;
+      }
+    };
+    const ctx = fakeCtx(sql, slow);
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const { id } = await storeDocument(sql, { text: `Note ${i}: I applied to Acme Corp.`, sourceKind: "note" });
+      ids.push(id);
+    }
+    const results = await Promise.all(ids.map((id) => runPipeline(ctx, id)));
+    for (const r of results) expect(r).toMatchObject({ stage: "done", error: null });
+    expect(results.some((r) => r.skipped)).toBe(false);
+    expect(peak).toBe(MAX_CONCURRENT_PIPELINES);
   });
 });
