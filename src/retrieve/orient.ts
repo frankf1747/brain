@@ -19,7 +19,11 @@ export async function orient(ctx: Ctx): Promise<Orientation> {
       select id, title, source_kind as "sourceKind", occurred_at as "occurredAt", ingested_at as "ingestedAt"
       from brain.documents order by ingested_at desc limit 10`,
     sql<{ id: string; predicate: string; object_text: string; verified: boolean }[]>`
-      select id, predicate, object_text, verified from brain.current_facts(null) order by verified desc, predicate limit 50`,
+      select * from (
+        select distinct on (predicate, lower(object_text)) id, predicate, object_text, verified
+        from brain.current_facts(null)
+        order by predicate, lower(object_text), verified desc, created_at
+      ) d order by verified desc, predicate limit 50`,
     stageCounts(ctx),
   ]);
   return {

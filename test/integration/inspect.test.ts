@@ -53,7 +53,7 @@ describe("orient", () => {
     expect(o.documentsByKind).toEqual(expect.arrayContaining([{ kind: "news", count: 1 }, { kind: "note", count: 1 }]));
     expect(o.nodesByType.find((n) => n.type === "organization")?.count).toBe(1);
     expect(o.recent[0].title).toBe("Acme note");
-    expect(o.facts.length).toBe(2); // same fact, two evidence chunks; the ops agent later merges these
+    expect(o.facts.length).toBe(1); // same fact from two evidence chunks, collapsed by predicate and value
     expect(o.pipeline.find((p) => p.stage === "done")?.count).toBe(2);
   });
 });

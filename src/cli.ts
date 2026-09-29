@@ -162,21 +162,28 @@ program
 
 program
   .command("facts")
-  .description("Current facts about the owner")
+  .description("Current facts about the owner, with ids")
   .option("--all", "include superseded and expired facts")
   .action(async (opts) => {
+    const { listFacts } = await import("./graph/facts.js");
     await withCtx(async (ctx) => {
-      const rows = opts.all
-        ? await ctx.sql<{ predicate: string; object_text: string; verified: boolean; valid_to: Date | null; superseded_by: string | null }[]>`
-            select predicate, object_text, verified, valid_to, superseded_by from brain.facts
-            where subject_id = (select id from brain.nodes where is_self) order by predicate, created_at`
-        : await ctx.sql<{ predicate: string; object_text: string; verified: boolean; valid_to: Date | null; superseded_by: null }[]>`
-            select predicate, object_text, verified, valid_to, null as superseded_by from brain.current_facts(null)`;
-      for (const f of rows) {
-        const flags = [f.verified ? "verified" : "unverified", f.superseded_by ? "superseded" : null, f.valid_to ? `until ${f.valid_to.toISOString().slice(0, 10)}` : null].filter(Boolean).join(", ");
-        console.log(`${f.predicate.padEnd(24)} ${f.object_text}  (${flags})`);
+      for (const f of await listFacts(ctx.sql, Boolean(opts.all))) {
+        const flags = [
+          f.verified ? `verified by ${f.verifiedBy}` : `unverified, ${f.verifiedBy ?? "unknown"}`,
+          f.supersededBy ? "superseded" : null,
+          f.validTo ? `until ${f.validTo.toISOString().slice(0, 10)}` : null,
+        ].filter(Boolean).join("; ");
+        console.log(`${f.id}  ${f.predicate.padEnd(24)} ${f.objectText}  (${flags})`);
       }
     });
+  });
+
+program
+  .command("verify-fact <id>")
+  .description("Mark a fact as verified by you")
+  .action(async (id: string) => {
+    const { verifyFact } = await import("./graph/facts.js");
+    await withCtx(async (ctx) => console.log((await verifyFact(ctx.sql, id, "frank")) ? "verified" : "no such fact"));
   });
 
 program
