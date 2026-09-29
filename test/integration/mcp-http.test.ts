@@ -27,6 +27,9 @@ describe("MCP over HTTP", () => {
       expect(wrong.status).toBe(401);
       const nearMiss = await fetch(url, { method: "POST", headers: { ...headers, authorization: "Bearer secret124" }, body: "{}" });
       expect(nearMiss.status).toBe(401);
+      // The token is checked before the body is parsed: an unauthenticated malformed body gets 401, not 400.
+      const unparsed = await fetch(url, { method: "POST", headers, body: "{not json" });
+      expect(unparsed.status).toBe(401);
       expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
 
       const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: "Bearer secret123" } } });

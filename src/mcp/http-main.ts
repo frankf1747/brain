@@ -1,9 +1,14 @@
 import { makeCtx } from "../ctx.js";
-import { buildApp, parseTokens } from "./http.js";
+import { buildApp, parseTokens, weakTokenClients, MIN_TOKEN_LENGTH } from "./http.js";
 
 const tokens = parseTokens(process.env.BRAIN_TOKENS);
 if (tokens.size === 0) {
   process.stderr.write("brain: BRAIN_TOKENS is empty; refusing to start an unauthenticated server\n");
+  process.exit(1);
+}
+const weak = weakTokenClients(tokens);
+if (weak.length) {
+  process.stderr.write(`brain: tokens for ${weak.join(", ")} are shorter than ${MIN_TOKEN_LENGTH} characters; generate them with \`openssl rand -hex 32\`\n`);
   process.exit(1);
 }
 const ctx = makeCtx();

@@ -33,9 +33,16 @@ export function matchToken(tokens: Map<string, string>, candidate: string): stri
   return found;
 }
 
+/** Tokens shorter than this are refused at startup; generate them with `openssl rand -hex 32`. */
+export const MIN_TOKEN_LENGTH = 32;
+
+/** Client names whose token is too short to be safe against guessing. */
+export function weakTokenClients(tokens: Map<string, string>): string[] {
+  return [...tokens].filter(([token]) => token.length < MIN_TOKEN_LENGTH).map(([, name]) => name);
+}
+
 export function buildApp(ctx: Ctx, tokens: Map<string, string>, jobs = new JobManager(ctx), readOnly = false) {
   const app = express();
-  app.use(express.json({ limit: "20mb" }));
   app.get("/healthz", (_req, res) => void res.status(200).send("ok"));
 
   const auth = (req: Request, res: Response, next: NextFunction) => {
@@ -49,7 +56,8 @@ export function buildApp(ctx: Ctx, tokens: Map<string, string>, jobs = new JobMa
 
   // Stateless: a fresh server and transport per request, all sharing one JobManager so the
   // background-slot reservation holds across requests.
-  app.post("/mcp", auth, async (req, res) => {
+  // Authenticate before parsing the body, so unauthenticated callers cannot make the server parse large payloads.
+  app.post("/mcp", auth, express.json({ limit: "20mb" }), async (req, res) => {
     const server = buildServer(ctx, { client: String(res.locals.client), jobs, readOnly });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {

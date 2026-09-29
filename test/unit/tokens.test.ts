@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseTokens, matchToken } from "../../src/mcp/http.js";
+import { parseTokens, matchToken, weakTokenClients, MIN_TOKEN_LENGTH } from "../../src/mcp/http.js";
 
 describe("parseTokens", () => {
   it("maps token to client name and ignores malformed entries", () => {
@@ -27,5 +27,14 @@ describe("matchToken", () => {
     expect(matchToken(tokens, "secret12")).toBeUndefined();
     expect(matchToken(tokens, "secret1234")).toBeUndefined();
     expect(matchToken(tokens, "")).toBeUndefined();
+  });
+});
+
+describe("weakTokenClients", () => {
+  it("names clients whose token is shorter than the minimum", () => {
+    const strong = "a".repeat(MIN_TOKEN_LENGTH);
+    expect(MIN_TOKEN_LENGTH).toBeGreaterThanOrEqual(32);
+    expect(weakTokenClients(parseTokens(`ok:${strong},weak:abc`))).toEqual(["weak"]);
+    expect(weakTokenClients(parseTokens(`ok:${strong}`))).toEqual([]);
   });
 });
