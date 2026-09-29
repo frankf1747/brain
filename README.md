@@ -55,7 +55,7 @@ The server exposes the knowledge base as nine tools:
 - `brain_get_node`: fetch an entity and its neighbours.
 - `brain_get_facts`: list current facts.
 - `brain_status`: pipeline progress for documents.
-- `brain_ingest`: save text or a URL.
+- `brain_ingest`: save text such as a note, pasted article or conversation (a URL can be recorded as its origin, not fetched).
 - `brain_add_fact`: record a fact.
 - `brain_supersede_fact`: replace a fact with a corrected one.
 
