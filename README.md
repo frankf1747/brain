@@ -96,3 +96,20 @@ claude mcp add --transport http brain-remote https://brain-mcp.fly.dev/mcp --hea
 ```
 
 Claude Desktop and ChatGPT take the same URL and header in their connector settings. Alternative with no hosting: run `npm run mcp:http` on the Mac and expose the port through Tailscale or a Cloudflare Tunnel.
+
+## Obsidian
+
+`npm run brain -- project-obsidian` writes a read-only mirror of the graph into your vault so Obsidian's graph view can draw it. The vault and folder default to `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_FOLDER` (override with `--vault <path>` and `--folder <name>`). `--list-vaults` prints the vaults Obsidian knows about and exits.
+
+Re-run it after ingesting, or keep it fresh with `--watch <minutes>` (for example `--watch 30`); runs never overlap, a tick is skipped while the previous run is still going.
+
+Layout inside the folder (`Brain` by default):
+
+- `Brain/<your name>.md`: the self node
+- `Brain/nodes/<type>/`: one note per entity, grouped by type
+- `Brain/documents/<year>/`: one note per document
+- `Brain/README.md`: counts and graph view tips
+
+Only files whose frontmatter starts with `---` and contains `brain_managed: true` are ever rewritten or deleted. Symlinks are never followed. Your own notes placed in the folder are left alone and listed in the run output.
+
+Graph view: filter `path:Brain`, then add color groups by `path:Brain/nodes/person`, `path:Brain/nodes/organization`, `path:Brain/documents`, or `tag:#brain/unverified`.
