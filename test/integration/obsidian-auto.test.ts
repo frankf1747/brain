@@ -19,12 +19,12 @@ const handler = ({ system }: { system: string }) =>
   system === SUMMARY_SYSTEM ? { title: "Acme note", summary_line: "L", summary: "Applying to Acme.", occurred_at: "2026-09-01" } : fakeExtraction;
 
 /** A test ctx whose saves refresh a temporary vault, the way makeCtx wires the real one. */
-async function autoCtx(opts: { project?: (ctx: Ctx) => Promise<SyncResult>; handler?: (args: { system: string; user: string }) => unknown } = {}) {
+async function autoCtx(opts: { debounceMs?: number; project?: (ctx: Ctx) => Promise<SyncResult>; handler?: (args: { system: string; user: string }) => unknown } = {}) {
   const vault = await mkdtemp(join(tmpdir(), "vault-auto-"));
   const logs: string[] = [];
   const ctx: Ctx = fakeCtx(sql, opts.handler ?? handler);
   const projector = new ObsidianAutoProjector(ctx, {
-    debounceMs: 50,
+    debounceMs: opts.debounceMs ?? 50,
     project: opts.project ?? ((c) => projectObsidian(c, { vault, folder: "Brain" })),
     log: (m) => logs.push(m),
   });
@@ -80,7 +80,9 @@ describe("automatic Obsidian refresh", () => {
 
   it("a failing projection or change hook never changes the ingest result", async () => {
     const text = "I applied to Acme Corp in September. I am on F-1 OPT.";
+    // A long debounce so only the flush runs the projection, making exactly one failure to log.
     const { ctx, projector, logs } = await autoCtx({
+      debounceMs: 60_000,
       project: async () => {
         throw new Error("vault unwritable");
       },
