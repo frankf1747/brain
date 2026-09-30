@@ -50,7 +50,7 @@ export async function describeNode(sql: Db, nameOrId: string): Promise<NodeRepor
   const edges = await sql<NodeEdge[]>`
     select case when brain.canonical_node(e.from_node) = ${ref.id} then 'out' else 'in' end as direction,
            e.type, o.id as "otherId", o.name as "otherName", o.type as "otherType",
-           left(c.content, 200) as evidence, c.document_id as "evidenceDocumentId", d.title as "evidenceDocumentTitle"
+           coalesce(nullif(e.properties->>'quote', ''), left(c.content, 200)) as evidence, c.document_id as "evidenceDocumentId", d.title as "evidenceDocumentTitle"
     from brain.edges e
     join brain.nodes o on o.id = brain.canonical_node(case when brain.canonical_node(e.from_node) = ${ref.id} then e.to_node else e.from_node end)
     left join brain.chunks c on c.id = e.evidence_chunk_id

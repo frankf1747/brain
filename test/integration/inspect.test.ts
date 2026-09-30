@@ -41,6 +41,16 @@ describe("describeNode", () => {
     expect(self.facts.map((f) => f.predicate)).toEqual(["visa_status"]);
     expect(await describeNode(sql, "nobody here")).toBeNull();
   });
+
+  it("reports the relation's own quote as evidence, falling back to the passage start without one", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await ingest(ctx, { text: "Opening line about my week. I applied to Acme Corp in September. I am on F-1 OPT." });
+    const withQuote = (await describeNode(sql, "Acme Corp"))!;
+    expect(withQuote.edges[0].evidence).toBe("applied to Acme Corp");
+    await sql`update brain.edges set properties = properties - 'quote'`;
+    const fallback = (await describeNode(sql, "Acme Corp"))!;
+    expect(fallback.edges[0].evidence).toContain("Opening line about my week.");
+  });
 });
 
 describe("orient", () => {

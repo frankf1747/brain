@@ -63,7 +63,7 @@ export async function loadGraph(sql: Db): Promise<Graph> {
       from brain.nodes where merged_into is null order by type, name`,
     sql<GEdge[]>`
       select e.id, brain.canonical_node(e.from_node) as "fromNode", brain.canonical_node(e.to_node) as "toNode", e.type,
-             left(c.content, 200) as evidence, c.document_id as "evidenceDocumentId"
+             coalesce(nullif(e.properties->>'quote', ''), left(c.content, 200)) as evidence, c.document_id as "evidenceDocumentId"
       from brain.edges e left join brain.chunks c on c.id = e.evidence_chunk_id
       where e.valid_to is null or e.valid_to >= current_date
       order by e.type`,

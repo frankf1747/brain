@@ -125,6 +125,9 @@ export function checkDirection(edgeType: string, fromType: string, toType: strin
   return "unverified";
 }
 
+/** Longest relation quote kept on an edge as properties.quote, the evidence shown for the relationship. */
+const MAX_EDGE_QUOTE = 300;
+
 const LEXICALLY_CHECKED_TYPES = new Set(["person", "organization"]);
 
 async function resolveEntity(
@@ -245,6 +248,8 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
       const direction = checkDirection(type, nodeType.get(from)!, nodeType.get(to)!);
       if (direction === "swap") [from, to] = [to, from];
       else if (direction === "unverified") props.direction_unverified = true;
+      const quote = r.quote.trim().slice(0, MAX_EDGE_QUOTE);
+      if (quote) props.quote = quote;
       const loc = evidenceFor(r.quote);
       await sql`
         insert into brain.edges (from_node, to_node, type, confidence, properties, evidence_chunk_id, valid_from, valid_to)

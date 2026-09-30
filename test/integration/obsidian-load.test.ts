@@ -27,6 +27,22 @@ describe("loadGraph", () => {
     expect(g.documents[0].raw).toContain("F-1 OPT");
   });
 
+  it("uses the relation's own quote as evidence, not the start of the passage", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const text = "Opening line about my week that has nothing to do with it. I applied to Acme Corp in September. I am on F-1 OPT.";
+    await ingest(ctx, { text, sourceKind: "note" });
+    const g = await loadGraph(sql);
+    expect(g.edges[0].evidence).toBe("applied to Acme Corp");
+  });
+
+  it("falls back to the start of the evidence chunk when the edge has no stored quote", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await ingest(ctx, { text: "I applied to Acme Corp in September. I am on F-1 OPT.", sourceKind: "note" });
+    await sql`update brain.edges set properties = properties - 'quote'`;
+    const g = await loadGraph(sql);
+    expect(g.edges[0].evidence).toContain("I applied to Acme Corp in September");
+  });
+
   it("excludes merged duplicates and points their edges at the canonical node", async () => {
     const [a] = await sql<{ id: string }[]>`insert into brain.nodes (type, name, canonical_name) values ('organization','Beta','beta') returning id`;
     const [dup] = await sql<{ id: string }[]>`insert into brain.nodes (type, name, canonical_name, merged_into) values ('organization','Beta Co','beta co', ${a.id}) returning id`;

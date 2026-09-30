@@ -29,6 +29,7 @@ describe("projectObsidian", () => {
     const self = await readFile(join(vault, "Brain/Frank Fu.md"), "utf8");
     expect(self).toContain("visa_status: F-1 OPT");
     expect(self).toContain("applied_to → [[Acme Corp]]");
+    expect(self).toContain('applied_to → [[Acme Corp]] · "applied to Acme Corp" ([[Acme note]])');
     const doc = await readFile(join(vault, "Brain/documents/2026/Acme note.md"), "utf8");
     expect(doc).toContain("[[Acme Corp]]");
     expect(doc).toContain("I applied to Acme Corp");

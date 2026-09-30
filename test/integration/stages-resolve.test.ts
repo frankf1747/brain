@@ -233,6 +233,41 @@ describe("runResolve edge direction", () => {
     );
     const edges = await edgeEndpoints();
     expect(edges[0]).toMatchObject({ type: "part_of", from_name: "Boston", to_name: "Acme Corp" });
-    expect(edges[0].properties).toEqual({});
+    expect(edges[0].properties).toEqual({ quote: body });
+  });
+});
+
+describe("runResolve relation quotes", () => {
+  it("stores the relation's own quote on the edge, trimmed and capped at 300 characters", async () => {
+    const body = "Some filler text first. Acme Corp built the ZX-9000 printer. " + "x".repeat(400);
+    const long = "y".repeat(350);
+    await ingestWith(
+      {
+        entities: [entity("a", "artifact", "ZX-9000"), entity("o", "organization", "Acme Corp"), entity("p", "place", "Boston")],
+        relations: [relation("o", "a", "created", "  Acme Corp built the ZX-9000 printer.  "), relation("o", "p", "located_in", long)],
+        facts_about_self: [],
+      },
+      body,
+    );
+    const edges = await edgeEndpoints();
+    const created = edges.find((e) => e.type === "created")!;
+    expect(created.properties).toEqual({ quote: "Acme Corp built the ZX-9000 printer." });
+    const located = edges.find((e) => e.type === "located_in")!;
+    expect(located.properties.quote).toBe("y".repeat(300));
+  });
+
+  it("keeps original_type and direction_unverified alongside the quote", async () => {
+    const body = "Jane Smith works at Robert Chen. Ann Lee funded Jane Smith.";
+    await ingestWith(
+      {
+        entities: [entity("j", "person", "Jane Smith"), entity("r", "person", "Robert Chen"), entity("a", "person", "Ann Lee")],
+        relations: [relation("j", "r", "works_at", "Jane Smith works at Robert Chen."), relation("a", "j", "funded_by", "Ann Lee funded Jane Smith.")],
+        facts_about_self: [],
+      },
+      body,
+    );
+    const edges = await edgeEndpoints();
+    expect(edges.find((e) => e.type === "works_at")!.properties).toEqual({ direction_unverified: true, quote: "Jane Smith works at Robert Chen." });
+    expect(edges.find((e) => e.type === "related_to")!.properties).toEqual({ original_type: "funded_by", quote: "Ann Lee funded Jane Smith." });
   });
 });
