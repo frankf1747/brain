@@ -102,3 +102,13 @@ export class ObsidianAutoProjector {
     return run;
   }
 }
+
+/**
+ * Whether saves should refresh the Obsidian mirror: on when OBSIDIAN_VAULT_PATH names an existing
+ * directory, unless OBSIDIAN_AUTO is "0".
+ */
+export function autoProjectionEnabled(env: Record<string, string | undefined>, fsExists: (path: string) => boolean): boolean {
+  const vault = env.OBSIDIAN_VAULT_PATH;
+  if (!vault || env.OBSIDIAN_AUTO === "0") return false;
+  return fsExists(vault);
+}

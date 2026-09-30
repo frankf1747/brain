@@ -109,6 +109,17 @@ async function advance(ctx: Ctx, documentId: string, target: Stage): Promise<Pip
       update brain.ingest_jobs set stage = ${next}, error = null, updated_at = now()
       where document_id = ${documentId} and stage = ${stage}`;
     if (moved.count === 0) return { documentId, stage: await currentStage(ctx, documentId), error: null };
+    // The raw text is readable once chunked, and the enrichment once done; tell the mirror both times.
+    if (next === "chunked" || next === "done") documentChanged(ctx, documentId);
+  }
+}
+
+/** A change listener (the Obsidian mirror) must never fail or stall ingestion. */
+function documentChanged(ctx: Ctx, documentId: string): void {
+  try {
+    ctx.onDocumentChanged?.(documentId);
+  } catch (err) {
+    process.stderr.write(`brain: document change hook failed: ${err instanceof Error ? err.message : String(err)}\n`);
   }
 }
 

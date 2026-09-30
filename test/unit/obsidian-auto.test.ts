@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type { Ctx } from "../../src/ctx.js";
 import type { SyncResult } from "../../src/obsidian/write.js";
-import { ObsidianAutoProjector } from "../../src/obsidian/auto.js";
+import { ObsidianAutoProjector, autoProjectionEnabled } from "../../src/obsidian/auto.js";
 
 const ctx = {} as Ctx;
 const ok: SyncResult = { written: 0, unchanged: 0, deleted: 0, skipped: [] };
@@ -114,5 +114,21 @@ describe("ObsidianAutoProjector", () => {
     const timer = spy.mock.results.at(-1)!.value as NodeJS.Timeout;
     expect(timer.hasRef()).toBe(false);
     await p.close();
+  });
+});
+
+describe("autoProjectionEnabled", () => {
+  const exists = (paths: string[]) => (p: string) => paths.includes(p);
+
+  it("is on when the vault path exists and OBSIDIAN_AUTO is not 0", () => {
+    expect(autoProjectionEnabled({ OBSIDIAN_VAULT_PATH: "/v" }, exists(["/v"]))).toBe(true);
+    expect(autoProjectionEnabled({ OBSIDIAN_VAULT_PATH: "/v", OBSIDIAN_AUTO: "1" }, exists(["/v"]))).toBe(true);
+  });
+
+  it("is off when turned off, unset, or pointing at a missing path", () => {
+    expect(autoProjectionEnabled({ OBSIDIAN_VAULT_PATH: "/v", OBSIDIAN_AUTO: "0" }, exists(["/v"]))).toBe(false);
+    expect(autoProjectionEnabled({}, exists(["/v"]))).toBe(false);
+    expect(autoProjectionEnabled({ OBSIDIAN_VAULT_PATH: "" }, exists([""]))).toBe(false);
+    expect(autoProjectionEnabled({ OBSIDIAN_VAULT_PATH: "/missing" }, exists(["/v"]))).toBe(false);
   });
 });

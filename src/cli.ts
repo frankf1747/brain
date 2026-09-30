@@ -20,7 +20,12 @@ async function withCtx(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   try {
     await fn(ctx);
   } finally {
-    await ctx.sql.end();
+    // Write the Obsidian mirror for anything this command saved before the process exits.
+    try {
+      await ctx.obsidian?.close();
+    } finally {
+      await ctx.sql.end();
+    }
   }
 }
 

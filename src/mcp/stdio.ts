@@ -15,6 +15,8 @@ function shutdown(): void {
   closing = true;
   void server
     .close()
+    // Write the Obsidian mirror for recent saves, capped so shutdown can never hang on it.
+    .then(() => Promise.race([ctx.obsidian?.close(), new Promise((r) => setTimeout(r, 10_000).unref())]))
     .then(() => ctx.sql.end({ timeout: 5 }))
     .finally(() => process.exit(0));
 }
