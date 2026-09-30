@@ -99,9 +99,13 @@ Claude Desktop and ChatGPT take the same URL and header in their connector setti
 
 ## Obsidian
 
-`npm run brain -- project-obsidian` writes a read-only mirror of the graph into your vault so Obsidian's graph view can draw it. The vault and folder default to `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_FOLDER` (override with `--vault <path>` and `--folder <name>`). `--list-vaults` prints the vaults Obsidian knows about and exits.
+Every save writes twice: to the database, which is the retrieval layer, and to a read-only markdown mirror in your Obsidian vault, which is there for reading and for Obsidian's graph view. The vault and folder come from `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_FOLDER`.
 
-Re-run it after ingesting, or keep it fresh with `--watch <minutes>` (for example `--watch 30`); runs never overlap, a tick is skipped while the previous run is still going.
+Saves from a Claude chat (MCP) or the CLI refresh the mirror automatically. A document's note appears with its raw text as soon as the document is stored and chunked; its summary, entities, relationships and facts follow when enrichment finishes, usually a minute or two later. Refreshes are debounced (one run a few seconds after the last save in a burst) and never overlap. A failed refresh never fails the save; it is logged to stderr as `brain: obsidian refresh failed: ...`. CLI commands write the mirror before they exit, and the stdio MCP server does so when it shuts down.
+
+The automatic refresh is on whenever `OBSIDIAN_VAULT_PATH` names an existing directory. Turn it off with `OBSIDIAN_AUTO=0`. If the path does not exist, the server logs that once to stderr and leaves the refresh off.
+
+`npm run brain -- project-obsidian` still rebuilds the whole mirror on demand, for example after changing the folder or editing the database by hand. Override the vault and folder with `--vault <path>` and `--folder <name>`, keep it fresh on a timer with `--watch <minutes>` (runs never overlap, a tick is skipped while the previous run is still going), or print the vaults Obsidian knows about with `--list-vaults`.
 
 Layout inside the folder (`Brain` by default):
 

@@ -101,3 +101,7 @@ Raw text is included in full for text sources; for PDFs it is the extracted text
 ## 6. Out of scope
 
 Two-way sync, Dataview or Bases dashboards inside the vault (the tags and frontmatter make them possible later), Obsidian graph color configuration (Obsidian stores it per vault in `.obsidian/graph.json` and rewriting it is fragile), and the ops agent.
+
+## 7. Changes during implementation
+
+- Trigger moved from on-demand to automatic after each save (2026-09-29). Frank expects a save to write two places together: the database for retrieval and Obsidian for readability and explainability. The pipeline now reports a document changed when it reaches `chunked` (the note appears with its raw text) and again at `done` (summary, entities, relationships, facts); `ObsidianAutoProjector` (`src/obsidian/auto.ts`) debounces those into one projection, never runs two at once, and logs failures to stderr without failing the save. It is on when `OBSIDIAN_VAULT_PATH` exists, off with `OBSIDIAN_AUTO=0`. CLI commands and the stdio MCP server flush it before exiting. `project-obsidian` remains for a full rebuild.
