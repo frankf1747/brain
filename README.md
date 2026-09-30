@@ -65,6 +65,12 @@ With `BRAIN_MCP_READONLY=1` only the six read tools (the first six) are exposed.
 
 Facts written by an agent are unverified until you run `npm run brain -- verify-fact <id>`. Corrections supersede the old fact; nothing is deleted.
 
+On connect, the server sends instructions that the client places in the model's system prompt: questions about you go to `brain_orient` once, then `brain_search`, and answers cite the returned passages. Every tool call is logged to `brain.tool_calls` with its client, arguments (saved text as its length only), outcome and duration, so you can check whether a session followed that order:
+
+```bash
+psql postgresql://postgres:postgres@127.0.0.1:55322/postgres -c "select created_at, client, tool, ok, args from brain.tool_calls order by created_at desc limit 20;"
+```
+
 ### Claude Code (this Mac)
 
 Register once at user scope so every chat gets the `brain_*` tools:

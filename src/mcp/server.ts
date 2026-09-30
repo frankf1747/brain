@@ -49,7 +49,28 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
   const jobs = opts.jobs ?? new JobManager(ctx);
   const by = `agent:${opts.client}`;
 
-  server.registerTool(
+  /** Records each call in brain.tool_calls. Saved text is logged as its length only; a failed log write never fails the tool. */
+  const record = async (tool: string, args: Record<string, unknown>, started: number, res: ToolResult) => {
+    const { text: body, ...rest } = args;
+    const logged = typeof body === "string" ? { ...rest, text_chars: body.length } : args;
+    try {
+      await ctx.sql`
+        insert into brain.tool_calls (client, tool, args, ok, error, duration_ms)
+        values (${opts.client}, ${tool}, ${ctx.sql.json(logged as never)}, ${!res.isError},
+                ${res.isError ? res.content.map((c) => c.text).join("\n") : null}, ${Date.now() - started})`;
+    } catch (e) {
+      log(`brain: logging ${tool} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return res;
+  };
+  // Same signature as server.registerTool, so every registration below keeps its argument typing.
+  const register = ((name: string, config: unknown, cb: (a: Record<string, unknown>, extra: unknown) => Promise<ToolResult>) =>
+    server.registerTool(name, config as never, (async (a: Record<string, unknown>, extra: unknown) => {
+      const started = Date.now();
+      return record(name, a ?? {}, started, await cb(a, extra));
+    }) as never)) as typeof server.registerTool;
+
+  register(
     "brain_orient",
     { title: "What the knowledge base holds", description: "Call first in a session. Returns counts by kind and type, recent documents, current facts about the owner, and guidance on which tool to use.", inputSchema: {} },
     async () => {
@@ -57,7 +78,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_search",
     {
       title: "Search the knowledge base",
@@ -79,7 +100,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_get_document",
     { title: "Read a document", description: "Metadata and a slice of the raw text of one document by id. Use offset to page.", inputSchema: { document_id: z.string().describe("UUID shown as 'document <id>' in brain_search results"), offset: z.number().int().min(0).optional(), length: z.number().int().min(1).max(20000).optional() } },
     async (a) => {
@@ -90,7 +111,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_get_node",
     { title: "Inspect an entity", description: "A person, organization, place, project, concept, event or artifact by name, alias or id: relationships with evidence, facts, and where it is mentioned.", inputSchema: { name_or_id: z.string().min(1) } },
     async (a) => {
@@ -101,7 +122,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_get_facts",
     { title: "Facts about the owner", description: "Current facts about the owner with ids and verification state. all=true includes superseded and expired facts.", inputSchema: { all: z.boolean().optional() } },
     async (a) => {
@@ -109,7 +130,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_status",
     { title: "Ingestion status", description: "Pipeline stage counts, failures, and documents still processing in this server.", inputSchema: {} },
     async () => {
@@ -123,7 +144,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
 
   if (opts.readOnly) return server;
 
-  server.registerTool(
+  register(
     "brain_ingest",
     {
       title: "Save to the knowledge base",
@@ -162,7 +183,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_add_fact",
     { title: "Record a fact about the owner", description: "Only for things the owner states about themselves. Stored unverified until the owner verifies it.", inputSchema: { predicate: z.string().trim().min(1).describe("snake_case, e.g. lives_in, prefers, visa_status"), object_text: z.string().trim().min(1), valid_from: isoDate.optional().describe("ISO date the fact holds from, e.g. 2026-09-01") } },
     async (a) => {
@@ -174,7 +195,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  server.registerTool(
+  register(
     "brain_supersede_fact",
     { title: "Correct a fact", description: "Replace a fact's value. The old fact is kept as history and marked superseded.", inputSchema: { fact_id: z.string().describe("id from brain_get_facts"), object_text: z.string().trim().min(1), valid_from: isoDate.optional().describe("ISO date the new value holds from, e.g. 2026-09-01") } },
     async (a) => {

@@ -52,6 +52,23 @@ describe("brain MCP server", () => {
     await s.close();
   });
 
+  it("logs every tool call in order, with the client, outcome, and no saved text", async () => {
+    const s = await connect();
+    await s.call("brain_orient");
+    await s.call("brain_search", { query: "Acme", k: 3 });
+    await s.call("brain_get_node", { name_or_id: "nobody by this name" });
+    await s.call("brain_ingest", { text: "A private note.", source_kind: "note" });
+    await s.jobs.drain();
+    const rows = await sql<{ tool: string; client: string; ok: boolean; error: string | null; args: Record<string, unknown> }[]>`
+      select tool, client, ok, error, args from brain.tool_calls order by created_at, id`;
+    expect(rows.map((r) => r.tool)).toEqual(["brain_orient", "brain_search", "brain_get_node", "brain_ingest"]);
+    expect(rows.every((r) => r.client === "test")).toBe(true);
+    expect(rows[1].args).toEqual({ query: "Acme", k: 3 });
+    expect(rows[2]).toMatchObject({ ok: false, error: expect.stringContaining("No entity matches") });
+    expect(rows[3].args).toEqual({ source_kind: "note", text_chars: 15 });
+    await s.close();
+  });
+
   it("ingests quickly, finishes in the background, then searches and reads", async () => {
     const s = await connect();
     const ing = await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note" });
