@@ -26,8 +26,26 @@ const dateOrUndefined = (s?: string) => (s ? new Date(s) : undefined);
 const isoDate = z.string().refine((s) => !Number.isNaN(Date.parse(s)), "ISO date such as 2026-09-01");
 const log = (m: string) => process.stderr.write(m + "\n");
 
+/**
+ * Sent to every client at connect time and placed in the model's system prompt. Tool descriptions
+ * are only seen once a tool is chosen, so the routing rule has to live here. Written as steps so
+ * small models follow it.
+ */
+function instructions(readOnly: boolean): string {
+  const lines = [
+    "This server is the owner's personal knowledge base and the source of truth for anything about the owner (Frank Fu): experience, education, skills, projects, job applications, people, organizations, and anything they saved.",
+    "When a question is about the owner or something they saved, use this server before answering, even if a skill, memory file, or your own knowledge seems to cover it:",
+    "1. Call brain_orient once per session to see what is stored and which source_kinds exist.",
+    "2. Call brain_search with the user's question in plain words. Do not add names or terms the user did not mention. Narrow with source_kinds or dates when orient shows it helps.",
+    "3. For a named person, organization, or project, call brain_get_node. For the full text of a result, call brain_get_document with its document id.",
+    "4. Answer from the returned passages and cite them as [P1], [F1]. If nothing relevant comes back, say so rather than answering from elsewhere, and name any other source you use.",
+  ];
+  if (!readOnly) lines.push("To save something, call brain_ingest. Record a fact only when the owner states it about themselves, with brain_add_fact.");
+  return lines.join("\n");
+}
+
 export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
-  const server = new McpServer({ name: "brain", version: "0.1.0" });
+  const server = new McpServer({ name: "brain", version: "0.1.0" }, { instructions: instructions(Boolean(opts.readOnly)) });
   const jobs = opts.jobs ?? new JobManager(ctx);
   const by = `agent:${opts.client}`;
 

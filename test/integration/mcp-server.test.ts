@@ -44,6 +44,14 @@ describe("brain MCP server", () => {
     await b.close();
   });
 
+  it("tells clients to route questions about the owner through orient then search", async () => {
+    const s = await connect();
+    const instructions = s.client.getInstructions() ?? "";
+    expect(instructions).toContain("source of truth");
+    expect(instructions.indexOf("brain_orient")).toBeLessThan(instructions.indexOf("brain_search"));
+    await s.close();
+  });
+
   it("ingests quickly, finishes in the background, then searches and reads", async () => {
     const s = await connect();
     const ing = await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note" });
