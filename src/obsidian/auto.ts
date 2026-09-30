@@ -112,3 +112,12 @@ export function autoProjectionEnabled(env: Record<string, string | undefined>, f
   if (!vault || env.OBSIDIAN_AUTO === "0") return false;
   return fsExists(vault);
 }
+
+/** Asks the mirror to refresh after a write outside the ingest pipeline; never throws. */
+export function refreshMirror(ctx: Ctx): void {
+  try {
+    ctx.obsidian?.notify();
+  } catch (err) {
+    process.stderr.write(`brain: obsidian refresh failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+}

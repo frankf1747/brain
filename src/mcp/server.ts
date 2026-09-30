@@ -8,6 +8,7 @@ import { orient } from "../retrieve/orient.js";
 import { getDocument } from "../retrieve/documents.js";
 import { describeNode } from "../graph/inspect.js";
 import { addFact, supersedeFact, listFacts } from "../graph/facts.js";
+import { refreshMirror } from "../obsidian/auto.js";
 import { JobManager } from "./jobs.js";
 import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus } from "./render.js";
 
@@ -149,6 +150,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     async (a) => {
       try {
         const { id, predicate } = await addFact(ctx.sql, { predicate: a.predicate, objectText: a.object_text, by, validFrom: dateOrUndefined(a.valid_from) ?? null });
+        refreshMirror(ctx); // facts appear on the self note
         return text(`Recorded fact ${id}: ${predicate} = ${a.object_text} (unverified, ${by}).`);
       } catch (e) { return fail(e); }
     },
@@ -160,6 +162,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     async (a) => {
       try {
         const id = await supersedeFact(ctx.sql, a.fact_id, { objectText: a.object_text, by, validFrom: dateOrUndefined(a.valid_from) ?? null });
+        refreshMirror(ctx);
         return text(`Superseded fact ${a.fact_id} with fact ${id}: ${a.object_text} (unverified, ${by}).`);
       } catch (e) { return fail(e); }
     },

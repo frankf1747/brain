@@ -188,7 +188,12 @@ program
   .description("Mark a fact as verified by you")
   .action(async (id: string) => {
     const { verifyFact } = await import("./graph/facts.js");
-    await withCtx(async (ctx) => console.log((await verifyFact(ctx.sql, id, "frank")) ? "verified" : "no such fact"));
+    const { refreshMirror } = await import("./obsidian/auto.js");
+    await withCtx(async (ctx) => {
+      const ok = await verifyFact(ctx.sql, id, "frank");
+      if (ok) refreshMirror(ctx); // written when withCtx closes the projector
+      console.log(ok ? "verified" : "no such fact");
+    });
   });
 
 program

@@ -7,6 +7,7 @@ import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { buildServer } from "../../src/mcp/server.js";
 import { JobManager } from "../../src/mcp/jobs.js";
 import { storeDocument } from "../../src/ingest/store.js";
+import type { ObsidianAutoProjector } from "../../src/obsidian/auto.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -146,6 +147,28 @@ describe("brain MCP server", () => {
     const r = await s.call("brain_supersede_fact", { fact_id: idA, object_text: "Austin" });
     expect(r.isError).toBe(true);
     expect(r.text).toContain("New value equals the current value");
+    await s.close();
+  });
+
+  it("refreshes the Obsidian mirror after each successful fact write, and not after a failed one", async () => {
+    const s = await connect();
+    let notified = 0;
+    s.ctx.obsidian = { notify: () => void notified++ } as unknown as ObsidianAutoProjector;
+    const a = await s.call("brain_add_fact", { predicate: "lives_in", object_text: "Austin" });
+    expect(a.isError).toBe(false);
+    expect(notified).toBe(1);
+    const idA = /fact ([0-9a-f-]{36})/.exec(a.text)![1];
+    const b = await s.call("brain_supersede_fact", { fact_id: idA, object_text: "Los Angeles" });
+    expect(b.isError).toBe(false);
+    expect(notified).toBe(2);
+    const bad = await s.call("brain_supersede_fact", { fact_id: "00000000-0000-0000-0000-000000000000", object_text: "x" });
+    expect(bad.isError).toBe(true);
+    expect(notified).toBe(2);
+
+    // A broken refresher never fails the tool.
+    s.ctx.obsidian = { notify: () => { throw new Error("mirror broke"); } } as unknown as ObsidianAutoProjector;
+    const c = await s.call("brain_add_fact", { predicate: "prefers", object_text: "tea" });
+    expect(c.isError).toBe(false);
     await s.close();
   });
 });
