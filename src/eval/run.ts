@@ -9,10 +9,62 @@ import { search, type SearchOptions, type SearchResult } from "../retrieve/searc
 import { parseGolden, type Expected, type GoldenItem } from "./golden.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
 import { assertEvalConnection } from "./db.js";
+import { parseAuthor, type Author } from "../ingest/author.js";
 
 export function kindFromFilename(name: string): string {
   const i = name.indexOf("--");
   return i > 0 ? name.slice(0, i) : "note";
+}
+
+/**
+ * Optional front matter at the top of a fixture: `---`, `key: value` lines, `---`. Only `author` is read
+ * (owner, other or unknown, optionally quoted); other keys are ignored. Returns the text without the block.
+ */
+export function splitFrontMatter(text: string): { author: Author | undefined; body: string } {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!m) return { author: undefined, body: text };
+  let author: Author | undefined;
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$/.exec(line);
+    if (!kv) {
+      if (line.trim()) throw new Error(`front matter: cannot read line "${line}"`);
+      continue;
+    }
+    if (kv[1] === "author") author = parseAuthor(kv[2].replace(/^["']|["']$/g, ""));
+  }
+  return { author, body: text.slice(m[0].length) };
+}
+
+export interface AttributionLeaks {
+  /** Facts about the owner whose source chunk is in a document the owner did not write. */
+  selfFacts: number;
+  /** Edges from the owner whose evidence chunk is in a document the owner did not write. */
+  selfEdges: number;
+}
+
+/** Spec §8.4 attribution, over the whole database: must be 0. Read-only. */
+export async function attributionLeaks(sql: Db): Promise<AttributionLeaks> {
+  const [row] = await sql<{ facts: number; edges: number }[]>`
+    with self as (select id from brain.nodes where is_self)
+    select
+      (select count(*)::int
+         from brain.facts f
+         join brain.chunks c on c.id = f.source_chunk_id
+         join brain.documents d on d.id = c.document_id
+        where brain.canonical_node(f.subject_id) in (select id from self) and d.author <> 'owner') as facts,
+      (select count(*)::int
+         from brain.edges e
+         join brain.chunks c on c.id = e.evidence_chunk_id
+         join brain.documents d on d.id = c.document_id
+        where brain.canonical_node(e.from_node) in (select id from self) and d.author <> 'owner') as edges`;
+  return { selfFacts: row.facts, selfEdges: row.edges };
+}
+
+/** `eval run --gate` fails when any fact about, or edge from, the owner comes from a document the owner did not write. */
+export function attributionGate(a: AttributionLeaks): string[] {
+  return a.selfFacts + a.selfEdges === 0
+    ? []
+    : [`attribution: ${a.selfFacts} facts about the owner and ${a.selfEdges} edges from the owner come from documents the owner did not write; must be 0`];
 }
 
 /** 1-based rank of the first expected document among distinct ranked documents, or null. */
@@ -125,6 +177,8 @@ export interface EvalRun {
   results: QuestionResult[];
   report: Report;
   ranks: Record<string, number | null>;
+  /** Kept out of Report so eval/baseline.json's schema does not change. */
+  attribution: AttributionLeaks;
 }
 
 /** Runs every golden item (and its paraphrases) against the context's database, which must be the eval database. */
@@ -146,16 +200,24 @@ export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
   }
   const ranks: Record<string, number | null> = {};
   for (const r of results) if (!r.negative) ranks[r.id] = firstExpectedRank(r);
-  return { results, report: summarize(results, config.retrieval.fallbackThreshold), ranks };
+  return { results, report: summarize(results, config.retrieval.fallbackThreshold), ranks, attribution: await attributionLeaks(ctx.sql) };
 }
 
-/** Ingests every file under dir into the eval database; a file that cannot be stored is logged and skipped. Returns how many failed. */
+/**
+ * Ingests every file under dir into the eval database; a file that cannot be stored is logged and skipped.
+ * Front matter (`author: other`) is read and stripped before storing. Returns how many failed.
+ */
 export async function ingestCorpus(ctx: Ctx, dir: string): Promise<number> {
   await assertEvalConnection(ctx.sql);
   const { failed } = await ingestAll(
     ctx,
     await readInput(dir),
-    { toInput: (r) => ({ text: r.text, title: r.title, sourceKind: kindFromFilename(basename(r.origin)), origin: r.origin, mimeType: r.mimeType }) },
+    {
+      toInput: (r) => {
+        const { author, body } = splitFrontMatter(r.text);
+        return { text: body, title: r.title, sourceKind: kindFromFilename(basename(r.origin)), author, origin: r.origin, mimeType: r.mimeType };
+      },
+    },
     {
       done: (r, res) => console.log(`${res.created ? "new" : "dup"} ${res.stage.padEnd(10)} ${r.origin}${res.error ? " ERROR " + res.error : ""}`),
       skip: logSkip,

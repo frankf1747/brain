@@ -245,7 +245,7 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx } = await import("./eval/db.js");
-    const { runEval } = await import("./eval/run.js");
+    const { runEval, attributionGate } = await import("./eval/run.js");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { execSync } = await import("node:child_process");
@@ -256,6 +256,7 @@ evalCmd
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
       const failures = gateFailures(comparison, { gate: !!opts.gate, accept: !!opts.accept, baselinePath: opts.baseline });
+      if (opts.gate) failures.push(...attributionGate(run.attribution));
       if (opts.json) {
         console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
       } else {
@@ -274,6 +275,7 @@ evalCmd
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
         console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
+        console.log(`attribution  self-facts-from-others=${run.attribution.selfFacts}  self-edges-from-others=${run.attribution.selfEdges}`);
         if (comparison) {
           const d = comparison.deltas;
           console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);
