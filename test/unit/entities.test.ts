@@ -15,6 +15,9 @@ describe("candidateSpans", () => {
   it("is case-insensitive and strips possessives", () => {
     expect(candidateSpans("Who led Acme's Series B?")).toEqual(expect.arrayContaining(["Acme", "Series B", "Acme Series B", "Series", "B"]));
   });
+  it("includes spans up to six tokens, with interior stopwords", () => {
+    expect(candidateSpans("what did i learn at ucla anderson school of management")).toContain("ucla anderson school of management");
+  });
   it("returns nothing for a stopword-only query", () => {
     expect(candidateSpans("what is the")).toEqual([]);
   });

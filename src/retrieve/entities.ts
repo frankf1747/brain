@@ -8,7 +8,7 @@ const STOPWORDS = new Set([
   "what", "who", "where", "when", "why", "how", "which", "tell", "show", "list", "find", "give", "can", "know", "knows", "say", "said",
 ]);
 
-const MAX_SPAN = 3;
+const MAX_SPAN = 6;
 
 function tokens(query: string): string[] {
   return query
@@ -19,7 +19,7 @@ function tokens(query: string): string[] {
     .filter(Boolean);
 }
 
-/** Quoted strings plus every 1..3-token span whose first and last token are not stopwords. Case is kept for display; matching is canonical. */
+/** Quoted strings plus every 1..6-token span whose first and last token are not stopwords. Case is kept for display; matching is canonical. */
 export function candidateSpans(query: string): string[] {
   const spans = new Set<string>();
   for (const m of query.matchAll(/["“]([^"”]+)["”]/g)) spans.add(m[1].trim());

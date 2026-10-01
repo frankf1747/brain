@@ -18,10 +18,14 @@ const extraction = {
   relations: [{ from_key: "z", to_key: "a", type: "located_in", confidence: 0.9, valid_from: null, valid_to: null, quote: "Zorblax Industries in Austin" }],
   facts_about_self: [{ predicate: "visa_status", object_text: "F-1 OPT", object_key: null, confidence: 0.9, valid_from: null, valid_to: null, quote: "I am on F-1 OPT" }],
 };
+const longExtraction = {
+  entities: [{ key: "c", type: "project", name: "Clinical Trial Risk Intelligence Platform", aliases: [], untyped_hint: null, quote: "Clinical Trial Risk Intelligence Platform" }],
+  relations: [], facts_about_self: [],
+};
 const handler = ({ system, user }: { system: string; user: string }) =>
   system === SUMMARY_SYSTEM
     ? { title: "Untitled", summary_line: "A note.", summary: user.slice(0, 80), occurred_at: null }
-    : user.includes("Zorblax") ? extraction : { entities: [], relations: [], facts_about_self: [] };
+    : user.includes("Clinical Trial Risk") ? longExtraction : user.includes("Zorblax") ? extraction : { entities: [], relations: [], facts_about_self: [] };
 
 async function seed() {
   const ctx = fakeCtx(sql, handler);
@@ -199,6 +203,13 @@ describe("search", () => {
     const res = await search(ctx, "tell me about zorblax");
     expect(res.entities.map((e) => e.name)).toEqual(["Zorblax Industries"]);
     expect(res.entities[0].matchedSpan).toBe("zorblax");
+  });
+  it("detects a five-token node name from a lowercase query", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await ingest(ctx, { text: "I built the Clinical Trial Risk Intelligence Platform last year.", sourceKind: "note", title: "CTRIP" });
+    const res = await search(ctx, "tell me about the clinical trial risk intelligence platform");
+    expect(res.entities.map((e) => e.name)).toEqual(["Clinical Trial Risk Intelligence Platform"]);
+    expect(res.entities[0].matchedSpan).toBe("clinical trial risk intelligence platform");
   });
   it("rejects an empty query", async () => {
     const ctx = fakeCtx(sql, handler);
