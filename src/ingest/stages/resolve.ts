@@ -133,6 +133,19 @@ const SINGLE_VALUED = new Set<string>(config.singleValuedPredicates);
 
 const LEXICALLY_CHECKED_TYPES = new Set(["person", "organization"]);
 
+/**
+ * "Toronto, Canada" -> "toronto": a place named "City, Region" is also found by the city alone. Canonical, like
+ * every stored alias. Null when the name has no comma after its first character or the part before it adds
+ * nothing (empty, or canonically the whole name: no self-alias). Mirrored by brain.place_short_alias
+ * (migration 009), which backfills place nodes created before this existed.
+ */
+export function placeShortAlias(name: string): string | null {
+  const comma = name.indexOf(",");
+  if (comma <= 0) return null;
+  const head = canonicalName(name.slice(0, comma));
+  return head && head !== canonicalName(name) ? head : null;
+}
+
 async function resolveEntity(
   sql: Db,
   entity: Extraction["entities"][number],
@@ -143,13 +156,24 @@ async function resolveEntity(
   const type = knownTypes.has(entity.type) ? entity.type : "concept";
   const baseProps: Record<string, unknown> = knownTypes.has(entity.type) ? {} : { untyped_hint: entity.untyped_hint ?? entity.type };
   const canonical = canonicalName(entity.name);
+  const shortAlias = type === "place" ? placeShortAlias(entity.name) : null;
   // New aliases may match an existing canonical name only when the new name is a single token
   // ("Acme" with alias "Acme Corp"); a multi-token name's aliases are too ambiguous ("Priya").
   const aliasCanonicals =
     canonical.split(" ").length === 1 ? entity.aliases.map(canonicalName).filter((a) => a && a !== canonical) : [];
 
   const [exact] = await sql<{ id: string }[]>`select id from brain.nodes where type = ${type} and canonical_name = ${canonical}`;
-  if (exact) return canonicalId(sql, exact.id);
+  if (exact) {
+    const id = await canonicalId(sql, exact.id);
+    if (shortAlias) {
+      // On the node the name now resolves to (a merge target), never as its own canonical name.
+      await sql`
+        update brain.nodes set aliases = array_append(aliases, ${shortAlias}::text), updated_at = now()
+        where id = ${id} and type = 'place' and canonical_name <> ${shortAlias}
+          and not (${shortAlias}::text = any (aliases))`;
+    }
+    return id;
+  }
 
   // Alias path: match on the new entity's own canonical name only. Never on alias-to-alias overlap.
   const aliasRows = await sql<{ id: string }[]>`
@@ -189,7 +213,9 @@ async function resolveEntity(
   }
 
   const props = decision.possibleDuplicateOf ? { ...baseProps, possible_duplicate_of: decision.possibleDuplicateOf } : baseProps;
-  const storedAliases = entity.aliases.map(canonicalName).filter((a) => a && a !== canonical);
+  const storedAliases = [...new Set([...entity.aliases.map(canonicalName), ...(shortAlias ? [shortAlias] : [])])].filter(
+    (a) => a && a !== canonical,
+  );
   const [created] = await sql<{ id: string }[]>`
     insert into brain.nodes (type, name, canonical_name, aliases, properties, name_embedding, verified_by)
     values (${type}, ${entity.name}, ${canonical}, ${storedAliases}::text[], ${sql.json(props as postgres.JSONValue)}, ${vec}::vector, ${extractorBy(model)})

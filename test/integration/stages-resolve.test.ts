@@ -3,7 +3,8 @@ import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { storeDocument } from "../../src/ingest/store.js";
 import { runChunk } from "../../src/ingest/stages/chunk.js";
 import { runExtract } from "../../src/ingest/stages/extract.js";
-import { runResolve } from "../../src/ingest/stages/resolve.js";
+import { runResolve, placeShortAlias } from "../../src/ingest/stages/resolve.js";
+import { detectEntities } from "../../src/retrieve/entities.js";
 import { fakeExtraction } from "./fixtures.js";
 import { fakeVector } from "./helpers.js";
 import type { Embedder } from "../../src/llm/voyage.js";
@@ -336,5 +337,53 @@ describe("runResolve relation quotes", () => {
     const edges = await edgeEndpoints();
     expect(edges.find((e) => e.type === "works_at")!.properties).toEqual({ direction_unverified: true, quote: "Jane Smith works at Robert Chen." });
     expect(edges.find((e) => e.type === "related_to")!.properties).toEqual({ original_type: "funded_by", quote: "Ann Lee funded Jane Smith." });
+  });
+});
+
+describe("runResolve place aliases", () => {
+  it("gives a place named 'City, Region' the city as an alias, so a query naming only the city finds it", async () => {
+    await ingestWith({ entities: [entity("t", "place", "Toronto, Canada")], relations: [], facts_about_self: [] }, "I lived in Toronto, Canada for two years.");
+    const [node] = await sql<{ aliases: string[] }[]>`select aliases from brain.nodes where canonical_name = 'toronto canada'`;
+    expect(node.aliases).toEqual(["toronto"]);
+    const found = await detectEntities(sql, "tell me about my time in toronto");
+    expect(found.map((e) => e.name)).toContain("Toronto, Canada");
+  });
+
+  it("adds the alias once to an existing place matched by its full name", async () => {
+    await sql`insert into brain.nodes (type, name, canonical_name) values ('place', 'Toronto, Canada', 'toronto canada')`;
+    await ingestWith({ entities: [entity("t", "place", "Toronto, Canada")], relations: [], facts_about_self: [] }, "Toronto, Canada again.");
+    await ingestWith({ entities: [entity("t", "place", "Toronto, Canada")], relations: [], facts_about_self: [] }, "And Toronto, Canada once more.");
+    const [node] = await sql<{ aliases: string[] }[]>`select aliases from brain.nodes where canonical_name = 'toronto canada'`;
+    expect(node.aliases).toEqual(["toronto"]);
+  });
+
+  it("stores the alias in canonical form and gives a place without a comma no alias", async () => {
+    await ingestWith(
+      { entities: [entity("j", "place", "St. John's, Newfoundland"), entity("t", "place", "Toronto")], relations: [], facts_about_self: [] },
+      "From St. John's, Newfoundland to Toronto.",
+    );
+    const rows = await sql<{ canonical_name: string; aliases: string[] }[]>`
+      select canonical_name, aliases from brain.nodes where type = 'place' order by canonical_name`;
+    expect(rows).toEqual([
+      { canonical_name: "st johns newfoundland", aliases: ["st johns"] },
+      { canonical_name: "toronto", aliases: [] },
+    ]);
+  });
+
+  it("does not add the alias to other node types", async () => {
+    await ingestWith({ entities: [entity("o", "organization", "Acme, Inc.")], relations: [], facts_about_self: [] }, "Acme, Inc. is a company.");
+    const [node] = await sql<{ aliases: string[] }[]>`select aliases from brain.nodes where canonical_name = 'acme inc'`;
+    expect(node.aliases).toEqual([]);
+  });
+
+  it("agrees with brain.place_short_alias, which backfills existing place nodes", async () => {
+    const names = ["Toronto, Canada", "Austin, TX", "Washington, D.C., USA", "St. John's, Newfoundland", "Paris", ", France", "Toronto,", "TORONTO , toronto"];
+    for (const name of names) {
+      const [row] = await sql<{ a: string | null }[]>`select brain.place_short_alias(${name}) as a`;
+      expect([name, row.a]).toEqual([name, placeShortAlias(name)]);
+    }
+    expect(placeShortAlias("Toronto, Canada")).toBe("toronto");
+    expect(placeShortAlias("Paris")).toBeNull();
+    expect(placeShortAlias("Toronto,")).toBeNull();
   });
 });

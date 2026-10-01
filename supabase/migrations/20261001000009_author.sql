@@ -123,4 +123,28 @@ language sql stable as $$
     limit 1), false);
 $$;
 
+-- (Task 8) A place named "City, Region" also answers to the city alone ("Toronto, Canada" -> "toronto"), so a
+-- query that names only the city resolves it (entity detection matches canonical aliases). Null when the name
+-- has no comma after its first character, or the part before it is empty or canonically the whole name (no
+-- self-alias). KEEP IN SYNC with placeShortAlias in src/ingest/stages/resolve.ts;
+-- test/integration/stages-resolve.test.ts compares them.
+create or replace function brain.place_short_alias(name text) returns text
+language sql immutable as $$
+  select case
+    when position(',' in name) > 1
+     and brain.canonical_text(split_part(name, ',', 1)) <> ''
+     and brain.canonical_text(split_part(name, ',', 1)) <> brain.canonical_text(name)
+    then brain.canonical_text(split_part(name, ',', 1))
+  end;
+$$;
+
+-- (Task 8) Backfill place nodes created before resolve added the alias. Idempotent: skips a node that already
+-- lists it, and never aliases a node to its own canonical name.
+update brain.nodes
+set aliases = array_append(aliases, brain.place_short_alias(name)), updated_at = now()
+where type = 'place'
+  and brain.place_short_alias(name) is not null
+  and brain.place_short_alias(name) <> canonical_name
+  and not (brain.place_short_alias(name) = any (aliases));
+
 commit;
