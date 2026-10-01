@@ -114,8 +114,8 @@ describe("canonical_text", () => {
     expect(r.t).toBe("acmes corp inc");
   });
   it("agrees with canonicalName on tricky strings", async () => {
-    // Known divergence, deliberately not asserted: JS \p{N} keeps "other numbers" (x², ½, ①) that
-    // Postgres [[:alnum:]] treats as punctuation. Only aliases containing such characters are affected.
+    // Known divergence, deliberately not asserted: JS \p{N} keeps every non-decimal number (No and Nl:
+    // x², ½, ①, Ⅻ) that Postgres [[:alnum:]] treats as punctuation. Only names containing them differ.
     const samples = [
       "O'Brien's", "Acme’s  Corp., Inc!", "café", "CAFÉ au lait", "東京 Tower", "東京タワー", "ZX-9000", "$115k", "rerank-2.5",
       "a...b///c", "  --  ", "naïve résumé", "Straße", "İstanbul", "ǅ", "٣٤٥", "e\u0301cole", "under_score", "tab\tsep\nnl", "emoji 🙂 ok", "ÀÉÎ", "ß", "ﬁsh",

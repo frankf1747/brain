@@ -105,4 +105,25 @@ describe("search SQL uses its indexes", () => {
     expect(p).not.toContain("CTE Scan");
     expect(p).toMatch(/Bitmap Index Scan on documents_summary_tsv_idx\n\s+Index Cond: \(summary_tsv @@ /);
   });
+  it("entity detection reads nodes through the canonical_name and aliases indexes", async () => {
+    await sql`
+      insert into brain.nodes (type, name, canonical_name, aliases)
+      select 'concept', 'Node ' || g, 'node ' || g, array['alias ' || g]
+      from generate_series(1, 2000) g`;
+    await sql`analyze brain.nodes`;
+    const p = await plan(
+      `select distinct x.id, x.type, x.name, k.key as "matchedSpan"
+       from brain.nodes n
+       cross join lateral unnest(array['node 5','alias 7']::text[]) k(key)
+       join brain.nodes x on x.id = brain.canonical_node(n.id)
+       where (n.canonical_name = any(array['node 5','alias 7']::text[]) or n.aliases && array['node 5','alias 7']::text[])
+         and (n.canonical_name = k.key or k.key = any(n.aliases))
+       order by x.name`,
+      KEYWORD,
+    );
+    expect(p).toContain("BitmapOr");
+    expect(p).toContain("nodes_canonical_name_idx");
+    expect(p).toContain("nodes_aliases_idx");
+    expect(p).not.toMatch(/Seq Scan on nodes n\b/);
+  });
 });
