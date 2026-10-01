@@ -21,5 +21,6 @@ export const config = {
   embeddingDimensions: 1024,
   chunking: { sectionTokens: 1500, passageTokens: 400, overlapRatio: 0.15 },
   resolution: { matchThreshold: 0.92, flagThreshold: 0.85, lexicalThreshold: 0.6 },
-  retrieval: { candidateK: 40, defaultK: 10, fallbackThreshold: 0.3 },
+  retrieval: { candidateK: 60, defaultK: 10, fallbackThreshold: 0.3, efSearch: 200 },
+  graph: { maxNeighbors: 20, maxPassagesPerEntity: 5, maxFacts: 10 },
 } as const;

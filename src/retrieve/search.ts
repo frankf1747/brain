@@ -142,15 +142,21 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
     process.stderr.write(`brain: query embedding failed, keyword search only: ${err instanceof Error ? err.message : String(err)}\n`);
   }
 
-  const [chunkCands, docCands, entityRefs] = await Promise.all([
-    sql<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
-      select chunk_id, vector_rank, keyword_rank
-      from brain.hybrid_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
-    sql<{ document_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
-      select document_id, vector_rank, keyword_rank
-      from brain.summary_search(${query}, ${qvec}::vector, ${k}, ${kinds}::text[], ${since}, ${until})`,
-    detectEntities(sql, query),
-  ]);
+  // pgvector 0.8: with iterative scans the HNSW index keeps going until `limit k` rows satisfy the
+  // source_kind/date filters; ef_search bounds the first pass. SET LOCAL needs a transaction.
+  const [chunkCands, docCands] = await sql.begin(async (tx) => {
+    await tx.unsafe("set local hnsw.iterative_scan = 'relaxed_order'");
+    await tx.unsafe(`set local hnsw.ef_search = ${config.retrieval.efSearch}`);
+    return Promise.all([
+      tx<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+        select chunk_id, vector_rank, keyword_rank
+        from brain.hybrid_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
+      tx<{ document_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+        select document_id, vector_rank, keyword_rank
+        from brain.summary_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
+    ]);
+  });
+  const entityRefs = await detectEntities(sql, query);
 
   // Layer 2: fused candidates, reranked.
   const fused = reciprocalRankFusion(chunkCands.map((c) => ({ id: c.chunk_id, vectorRank: c.vector_rank, keywordRank: c.keyword_rank })));
@@ -179,7 +185,10 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   const seen = new Set(passages.map((p) => p.chunkId));
 
   // Layer 3: document summaries.
-  const docFused = reciprocalRankFusion(docCands.map((d) => ({ id: d.document_id, vectorRank: d.vector_rank, keywordRank: d.keyword_rank })));
+  // The summary pool is candidateK per branch; fusion orders it and the caller sees the top k.
+  const docFused = reciprocalRankFusion(
+    docCands.map((d) => ({ id: d.document_id, vectorRank: d.vector_rank, keywordRank: d.keyword_rank })),
+  ).slice(0, k);
   const docRows = docFused.length
     ? await sql<{ id: string; title: string | null; source_kind: string; summary: string | null }[]>`
         select id, title, source_kind, summary from brain.documents where id = any(${docFused.map((d) => d.id)}::uuid[])`
