@@ -7,6 +7,20 @@ const sql = testDb();
 afterAll(() => sql.end());
 beforeEach(() => wipe(sql));
 
+/** One document with one level-1 passage, written directly so the tsvector holds exactly this text. */
+async function passage(title: string, content: string, headingPath: string[] = []): Promise<string> {
+  const [d] = await sql<{ id: string }[]>`
+    insert into brain.documents (content_hash, source_kind, title, raw_content)
+    values (${"h-" + title}, 'note', ${title}, ${content}) returning id`;
+  const [c] = await sql<{ id: string }[]>`
+    insert into brain.chunks (document_id, level, ordinal, content, heading_path, token_count, char_start, char_end)
+    values (${d.id}, 1, 0, ${content}, ${headingPath}, 5, 0, ${content.length}) returning id`;
+  return c.id;
+}
+
+const units = async (q: string) =>
+  (await sql<{ u: string[] }[]>`select array(select x::text from unnest(brain.query_units(${q})) x) as u`)[0].u;
+
 const tsq = async (q: string) => (await sql<{ t: string | null }[]>`select brain.query_to_tsquery(${q})::text as t`)[0].t;
 
 describe("query_to_tsquery", () => {
@@ -28,10 +42,25 @@ describe("query_to_tsquery", () => {
     expect(await tsq("alpha & beta | gamma ! delta : eps ( zeta")).toBe("'alpha' | 'beta' | 'gamma' | 'delta' | 'ep' | 'zeta'");
     expect(await tsq("O'Neil's drill")).toBe("'neil' | 'drill'");
   });
+  it("skips an empty quoted string without losing a later phrase", async () => {
+    expect(await tsq('"" drill "zorblax industries"')).toBe("'zorblax' <-> 'industri' | 'drill'");
+  });
   it("drops unquoted one-character lexemes but keeps longer ones and quoted phrases", async () => {
     expect(await tsq("X-90 drill")).toBe("'-90' | 'drill'");
     expect(await tsq("a b c")).toBeNull();
     expect(await tsq('"X-90" drill')).toBe("'x' <-> '-90' | 'drill'");
+  });
+});
+
+describe("query_units", () => {
+  it("returns one unit per phrase and per distinct stem, phrases first", async () => {
+    expect(await units('"Zorblax Industries" drill drills Drill')).toEqual(["'zorblax' <-> 'industri'", "'drill'"]);
+  });
+  it("deduplicates a quoted single word against the same unquoted word", async () => {
+    expect(await units('"drill" drill')).toEqual(["'drill'"]);
+  });
+  it("returns an empty array when nothing is left", async () => {
+    expect(await units("what is the")).toEqual([]);
   });
 });
 
@@ -48,15 +77,22 @@ describe("weighted tsvector", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].keyword_rank).toBe(1);
   });
-  it("ranks a passage matching more of the question's terms above one matching fewer", async () => {
-    const ctx = fakeCtx(sql);
-    await ingest(ctx, { text: "Zorblax Industries released the ZX-9000 drill in Austin.", sourceKind: "news", title: "A" });
-    await ingest(ctx, { text: "A drill is a tool.", sourceKind: "note", title: "B" });
-    const rows = await sql<{ document_id: string; keyword_rank: number | null }[]>`
-      select document_id, keyword_rank from brain.hybrid_search('What did Zorblax release in Austin?', null::vector, 60, null::text[], null, null) order by keyword_rank`;
-    const [first] = await sql<{ id: string }[]>`select id from brain.documents where title = 'A'`;
-    expect(rows[0].document_id).toBe(first.id);
-    expect(rows.length).toBe(1); // "A drill is a tool" shares no stem with the question
+  it("ranks coverage of distinct question terms above repetition of one term", async () => {
+    const p1 = await passage("One", "Zorblax released the drill in Austin");
+    const p2 = await passage("Two", "Drill drill drill drill drill drill");
+    const p3 = await passage("Three", "A drill.");
+    const rows = await sql<{ chunk_id: string; keyword_rank: number }[]>`
+      select chunk_id, keyword_rank from brain.hybrid_search('What did Zorblax release in Austin with a drill?', null::vector, 60, null::text[], null, null)`;
+    const rank = new Map(rows.map((r) => [r.chunk_id, r.keyword_rank]));
+    expect(rank.get(p1)).toBe(1);
+    expect(rank.get(p2)).toBeLessThan(rank.get(p3)!);
+  });
+  it("finds a passage by a word that appears only in its heading path", async () => {
+    const id = await passage("Garden", "Tomatoes need full sun.", ["Irrigation schedule"]);
+    await passage("Other", "Tomatoes are red.");
+    const rows = await sql<{ chunk_id: string }[]>`
+      select chunk_id from brain.hybrid_search('irrigation', null::vector, 60, null::text[], null, null)`;
+    expect(rows.map((r) => r.chunk_id)).toEqual([id]);
   });
   it("summary_search finds a document by its title", async () => {
     const ctx = fakeCtx(sql, ({ system }) =>

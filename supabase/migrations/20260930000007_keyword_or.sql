@@ -1,22 +1,35 @@
--- Keyword recall. websearch_to_tsquery ANDs every term, so a question had to match every stem inside
--- one ~400-token passage. query_to_tsquery ORs the stems (ts_rank_cd still ranks passages that match
--- more of them higher) and keeps quoted strings as phrase matches. The chunk tsvector gains the
--- context prefix (title, summary line, heading path) at weight A and the heading path at B, so a
--- word that only appears in the title still finds every passage of that document.
+-- Keyword recall and ranking. websearch_to_tsquery ANDs every term, so a question had to match every
+-- stem inside one ~400-token passage. The question is now split into units (brain.query_units): one
+-- per quoted phrase and one per distinct unquoted stem of two or more characters. A passage matches
+-- when it matches any unit (brain.query_to_tsquery is their OR, which the GIN index serves). Matches
+-- are ranked by coverage, the number of distinct units the passage matches, so a passage that answers
+-- more of the question beats one that repeats a single word; ties go to ts_rank_cd with normalisation 1
+-- (divided by 1 + log(length), so long passages are not favoured), then to id.
+-- The chunk tsvector is weighted content A, heading path B, context prefix C (title, summary line and
+-- heading path, written by the embed stage). A word that appears only in the title or a heading still
+-- finds the passage, while the passage's own text counts most in ts_rank_cd; the model-written summary
+-- line, shared by every passage of a document, no longer ties them all at weight A.
+--
+-- One transaction: a failure between dropping the tsv columns and replacing the search functions
+-- must not leave search broken.
 
-create or replace function brain.query_to_tsquery(q text) returns tsquery
-language plpgsql immutable as $$
+begin;
+
+create or replace function brain.query_units(q text) returns tsquery[]
+language plpgsql immutable parallel safe as $$
 declare
-  parts text[] := '{}';
+  units tsquery[] := '{}';
   m text[];
-  phrase tsquery;
+  u tsquery;
   lex text;
 begin
-  -- Quoted strings become phrase matches. A phrase of stopwords only is dropped (numnode = 0).
-  for m in select regexp_matches(q, '"([^"]+)"', 'g') loop
-    phrase := phraseto_tsquery('english', m[1]);
-    if numnode(phrase) > 0 then
-      parts := parts || ('( ' || phrase::text || ' )');
+  -- Quoted strings become phrase matches. An empty or stopword-only phrase is dropped (numnode = 0).
+  -- The extraction pattern accepts empty quotes exactly like the strip pattern below, so "" cannot
+  -- shift which quote pairs are read as phrases.
+  for m in select regexp_matches(q, '"([^"]*)"', 'g') loop
+    u := phraseto_tsquery('english', m[1]);
+    if numnode(u) > 0 and not (u = any (units)) then
+      units := units || u;
     end if;
   end loop;
   -- Every other stem of two or more characters, in query order. One-character lexemes (the "x" of
@@ -29,12 +42,25 @@ begin
     where char_length(t.lexeme) >= 2
     order by t.positions[1]
   loop
-    parts := parts || ('''' || replace(replace(lex, '\', '\\'), '''', '''''') || '''');
+    u := ('''' || replace(replace(lex, '\', '\\'), '''', '''''') || '''')::tsquery;
+    if not (u = any (units)) then
+      units := units || u;
+    end if;
   end loop;
-  if array_length(parts, 1) is null then
-    return null;
-  end if;
-  return array_to_string(parts, ' | ')::tsquery;
+  return units;
+end $$;
+
+-- The OR of the units; null when there are none.
+create or replace function brain.query_to_tsquery(q text) returns tsquery
+language plpgsql immutable parallel safe as $$
+declare
+  result tsquery;
+  u tsquery;
+begin
+  foreach u in array brain.query_units(q) loop
+    result := case when result is null then u else result || u end;
+  end loop;
+  return result;
 end $$;
 
 -- Weighted chunk tsvector. A generated column may only reference its own row, and context_prefix
@@ -49,9 +75,9 @@ language sql immutable parallel safe as $$ select array_to_string(path, ' ') $$;
 drop index if exists brain.chunks_tsv_idx;
 alter table brain.chunks drop column tsv;
 alter table brain.chunks add column tsv tsvector generated always as (
-  setweight(to_tsvector('english', coalesce(context_prefix, '')), 'A') ||
+  setweight(to_tsvector('english', content), 'A') ||
   setweight(to_tsvector('english', brain.heading_text(heading_path)), 'B') ||
-  setweight(to_tsvector('english', content), 'C')
+  setweight(to_tsvector('english', coalesce(context_prefix, '')), 'C')
 ) stored;
 create index chunks_tsv_idx on brain.chunks using gin (tsv);
 
@@ -65,7 +91,9 @@ create index documents_summary_tsv_idx on brain.documents using gin (summary_tsv
 
 -- The functions below are migration 006's, unchanged except in the keyword (kw) branches:
 -- brain.query_to_tsquery replaces websearch_to_tsquery, a null query (stopwords only) matches nothing,
--- and ts_rank_cd uses normalisation 32 (rank / (rank + 1)).
+-- and rows are ordered by coverage (distinct query units matched), then ts_rank_cd normalisation 1,
+-- then id. Coverage is computed only for rows that already match the OR query, so its cost is bounded
+-- by the GIN matches.
 
 create or replace function brain.hybrid_search(
   query_text text,
@@ -112,17 +140,18 @@ create or replace function brain.hybrid_search(
   ),
   kw as (
     select c.id, c.document_id,
-           row_number() over (order by ts_rank_cd(c.tsv, q.q, 32) desc) as r
+           row_number() over (order by cov.n desc, ts_rank_cd(c.tsv, q.q, 1) desc, c.id) as r
     from brain.chunks c
     join brain.documents d on d.id = c.document_id
-    cross join (select brain.query_to_tsquery(query_text) as q) q
+    cross join (select brain.query_to_tsquery(query_text) as q, brain.query_units(query_text) as units) q
+    cross join lateral (select count(*) as n from unnest(q.units) u where c.tsv @@ u) cov
     where c.level = 1
       and q.q is not null
       and c.tsv @@ q.q
       and (source_kinds is null or d.source_kind = any (source_kinds))
       and (since is null or coalesce(d.occurred_at, d.ingested_at) >= since)
       and (until is null or coalesce(d.occurred_at, d.ingested_at) <= until)
-    order by ts_rank_cd(c.tsv, q.q, 32) desc
+    order by cov.n desc, ts_rank_cd(c.tsv, q.q, 1) desc, c.id
     limit k
   )
   select coalesce(vec.id, kw.id),
@@ -167,17 +196,20 @@ create or replace function brain.summary_search(
   ),
   kw as (
     select d.id,
-           row_number() over (order by ts_rank_cd(d.summary_tsv, q.q, 32) desc) as r
+           row_number() over (order by cov.n desc, ts_rank_cd(d.summary_tsv, q.q, 1) desc, d.id) as r
     from brain.documents d
-    cross join (select brain.query_to_tsquery(query_text) as q) q
+    cross join (select brain.query_to_tsquery(query_text) as q, brain.query_units(query_text) as units) q
+    cross join lateral (select count(*) as n from unnest(q.units) u where d.summary_tsv @@ u) cov
     where q.q is not null
       and d.summary_tsv @@ q.q
       and (source_kinds is null or d.source_kind = any (source_kinds))
       and (since is null or coalesce(d.occurred_at, d.ingested_at) >= since)
       and (until is null or coalesce(d.occurred_at, d.ingested_at) <= until)
-    order by ts_rank_cd(d.summary_tsv, q.q, 32) desc
+    order by cov.n desc, ts_rank_cd(d.summary_tsv, q.q, 1) desc, d.id
     limit k
   )
   select coalesce(vec.id, kw.id), vec.r::int, kw.r::int, vec.score::real
   from vec full outer join kw on vec.id = kw.id;
 $$;
+
+commit;
