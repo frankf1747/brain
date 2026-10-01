@@ -10,7 +10,7 @@ beforeEach(() => wipe(sql));
 
 describe("ask", () => {
   it("passes numbered passages and facts to the model and returns its answer", async () => {
-    const ctx = fakeCtx(sql, ({ system, user }) => {
+    const ctx = fakeCtx(sql, ({ system }) => {
       if (system === SUMMARY_SYSTEM) return { title: "T", summary_line: "L", summary: "S", occurred_at: null };
       if (system === ASK_SYSTEM) return "The answer [P1].";
       return { entities: [], relations: [], facts_about_self: [{ predicate: "visa_status", object_text: "F-1 OPT", object_key: null, confidence: 1, valid_from: null, valid_to: null, quote: "F-1 OPT" }] };

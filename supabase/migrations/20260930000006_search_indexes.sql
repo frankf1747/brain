@@ -1,3 +1,5 @@
+-- Superseded in part by 007 (keyword branch); apply 006, 007 and 008 in order and never re-run 006 alone,
+-- or the keyword branch reverts to websearch_to_tsquery (AND of every term).
 -- The shared "filtered" CTE was materialised, so neither the HNSW nor the GIN index could be used:
 -- every search computed a distance for every passage. Each branch now reads the base table directly
 -- with the filters inlined; the chunk vector branch reads chunks alone and checks the document filters

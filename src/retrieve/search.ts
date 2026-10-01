@@ -139,7 +139,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   }
 
   // pgvector 0.8: with iterative scans the HNSW index keeps going until `limit k` rows satisfy the
-  // source_kind/date filters; ef_search = greatest(4 * k, 100) bounds the first pass (spec §3.1).
+  // source_kind/date filters; ef_search = greatest(4 * candidateK, 100) bounds the first pass (spec §3.1).
   // SET LOCAL needs a transaction; the two searches share its connection and run one after the other.
   const efSearch = Math.max(4 * config.retrieval.candidateK, 100);
   const [[chunkCands, docCands], entityRefs] = await Promise.all([
