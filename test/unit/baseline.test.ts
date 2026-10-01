@@ -8,7 +8,7 @@ function report(overrides: Partial<Report["overall"]> = {}, extra: Partial<Repor
     overall: { n: 3, recallAt1: 0.5, recallAt5: 0.8, recallAt10: 1, mrr: 0.9, ndcgAt10: null, ...overrides },
     byKind: {},
     negatives: { n: 0, abstentionRate: 0, falseAnswerRate: 0 },
-    paraphrase: { n: 0, consistency: 0 },
+    paraphrase: { n: 0, consistency: 0, meanRecallDelta: 0 },
     degradedFraction: 0,
     latencyMs: { p50: 10, p95: 20 },
     ...extra,

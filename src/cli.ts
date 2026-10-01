@@ -226,6 +226,7 @@ evalCmd
     const { makeEvalCtx } = await import("./eval/db.js");
     const { runEval } = await import("./eval/run.js");
     const { compare, gate, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
+    const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { execSync } = await import("node:child_process");
     const ctx = makeEvalCtx();
     try {
@@ -238,7 +239,10 @@ evalCmd
       } else {
         for (const r of run.results) {
           const rank = run.ranks[r.id];
-          const tag = r.negative ? (r.topScore !== null && r.topScore >= config.retrieval.fallbackThreshold ? "FALSE" : "abst.") : rank === null ? "MISS" : `#${String(rank).padStart(2)}`;
+          const threshold = config.retrieval.fallbackThreshold;
+          // A negative below threshold that still got a graph passage is neither abstained nor a false answer.
+          const negTag = falseAnswer(r, threshold) ? "FALSE" : abstained(r, threshold) ? "abst." : "GRAPH";
+          const tag = r.negative ? negTag : rank === null ? "MISS" : `#${String(rank).padStart(2)}`;
           console.log(`${tag.padEnd(5)} ${r.kind.padEnd(11)} ${r.degraded ? "DEGRADED " : ""}${r.id}  ${r.ranked.length ? "" : "(no passages) "}${r.totalMs}ms`);
         }
         const o = run.report.overall;
@@ -246,7 +250,7 @@ evalCmd
         for (const [kind, m] of Object.entries(run.report.byKind)) console.log(`${kind.padEnd(11)} n=${m.n}  recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}`);
         const ng = run.report.negatives;
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
-        if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}`);
+        if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
         console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
         if (comparison) {
           const d = comparison.deltas;
