@@ -89,7 +89,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         source_kinds: z.array(z.string()).optional().describe("Only these kinds (kinds listed by brain_orient), e.g. [\"news\",\"conversation\"]"),
         since: isoDate.optional().describe("ISO date lower bound, e.g. 2026-09-01"),
         until: isoDate.optional().describe("ISO date upper bound, e.g. 2026-09-30"),
-        verified_only: z.boolean().optional(),
+        verified_only: z.boolean().optional().describe("Only return facts and neighbour nodes marked verified. Passages are never filtered: documents have no verification state."),
       },
     },
     async (a) => {

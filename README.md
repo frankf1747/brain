@@ -51,6 +51,7 @@ The server exposes the knowledge base as nine tools:
 
 - `brain_orient`: what the base holds (counts, recent documents, facts about you) and which tool to use; call first.
 - `brain_search`: hybrid keyword, vector and graph search.
+  Search runs five layers. Hybrid: vector search plus keyword search that ORs the query's stems over passage content, headings and title, ranked by how many distinct query terms a passage matches; the two lists are fused with RRF and reranked. Document summaries, fused the same way. Graph expansion from entities named in the query (any case, names up to six words, at most 5 entities; up to 20 neighbours and 5 passages each, including mentions on merged nodes). Facts that share a term with the query or point at a named entity (at most 10, entity-linked first). A literal scan for exact-string terms such as `X-90` or `$115k` when the best hit is weak or the search ran degraded. Vector and keyword search use the HNSW and GIN indexes; `test/integration/search-plan.test.ts` fails if a query plan stops using them. `verified_only` filters facts and neighbours only.
 - `brain_get_document`: fetch one document.
 - `brain_get_node`: fetch an entity and its neighbours.
 - `brain_get_facts`: list current facts.
