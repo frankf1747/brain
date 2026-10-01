@@ -28,6 +28,18 @@ describe("getDocument", () => {
 });
 
 describe("describeNode", () => {
+  it("counts mentions recorded on nodes merged into this one", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id: docId } = await ingest(ctx, { text: "I applied to Acme Corp in September. I am on F-1 OPT." });
+    const acme = (await findNode(sql, "acme"))!;
+    const [a] = await sql<{ id: string }[]>`
+      insert into brain.nodes (type, name, canonical_name) values ('organization', 'Acme Holdings', 'acme holdings') returning id`;
+    await sql`update brain.nodes set merged_into = ${a.id} where id = ${acme.id}`;
+    const report = (await describeNode(sql, a.id))!;
+    expect(report.mentionedIn.map((m) => m.documentId)).toEqual([docId]);
+    expect(report.mentionCount).toBeGreaterThan(0);
+  });
+
   it("finds by name, alias or id and reports edges with evidence, facts and mentions", async () => {
     const ctx = fakeCtx(sql, handler);
     await ingest(ctx, { text: "I applied to Acme Corp in September. I am on F-1 OPT." });

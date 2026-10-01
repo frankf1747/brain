@@ -62,8 +62,10 @@ export async function describeNode(sql: Db, nameOrId: string): Promise<NodeRepor
   const mentionedIn = await sql<{ documentId: string; title: string | null; sourceKind: string }[]>`
     select distinct d.id as "documentId", d.title, d.source_kind as "sourceKind"
     from brain.mentions m join brain.chunks c on c.id = m.chunk_id join brain.documents d on d.id = c.document_id
-    where m.node_id = ${ref.id} order by d.title`;
-  const [{ n }] = await sql<{ n: string }[]>`select count(*)::text as n from brain.mentions where node_id = ${ref.id}`;
+    where m.node_id = any(brain.node_members(${ref.id})) order by d.title`;
+  // Merges do not re-point mentions, so count those recorded on merged members too, as search does.
+  const [{ n }] = await sql<{ n: string }[]>`
+    select count(*)::text as n from brain.mentions where node_id = any(brain.node_members(${ref.id}))`;
   return {
     ...ref,
     aliases: node.aliases,

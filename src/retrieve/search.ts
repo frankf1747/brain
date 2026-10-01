@@ -218,7 +218,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
         select distinct case when c0.level = 1 then c0.id
                              else (select p.id from brain.chunks p where p.parent_id = c0.id order by p.ordinal limit 1) end as id
         from brain.mentions m join brain.chunks c0 on c0.id = m.chunk_id
-        where m.node_id = ${ref.id}
+        where m.node_id = any(brain.node_members(${ref.id}))
       ) pm
       join brain.chunks c on c.id = pm.id
       join brain.documents d on d.id = c.document_id
@@ -237,17 +237,19 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   }
 
   // Layer 5: facts whose predicate or value shares a stem with the query, or whose object node is a
-  // detected entity, capped. brain_orient and brain_get_facts still list every current fact.
+  // detected entity, capped. Entity-linked facts rank first so the cap never drops them (spec §3.5).
+  // brain_orient and brain_get_facts still list every current fact.
   let facts: FactRow[] = [];
   if (opts.includeFacts !== false) {
+    const entityIds = entityRefs.map((e) => e.id);
     const rowsF = await sql<{ id: string; predicate: string; object_text: string; confidence: number | null; verified: boolean; source_chunk_id: string | null }[]>`
       select f.id, f.predicate, f.object_text, f.confidence, f.verified, f.source_chunk_id
       from brain.current_facts(null) f
       cross join (select brain.query_to_tsquery(${query}) as q) q
       where ((q.q is not null and to_tsvector('english', replace(f.predicate, '_', ' ') || ' ' || f.object_text) @@ q.q)
-             or f.object_node_id = any(${entityRefs.map((e) => e.id)}::uuid[]))
+             or brain.canonical_node(f.object_node_id) = any(${entityIds}::uuid[]))
         and ${opts.verifiedOnly ? sql`f.verified` : sql`true`}
-      order by f.verified desc, f.confidence desc nulls last, f.created_at desc, f.id
+      order by coalesce(brain.canonical_node(f.object_node_id) = any(${entityIds}::uuid[]), false) desc, f.verified desc, f.confidence desc nulls last, f.created_at desc, f.id
       limit ${config.graph.maxFacts}`;
     facts = rowsF.map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, confidence: f.confidence, verified: f.verified, sourceChunkId: f.source_chunk_id }));
   }

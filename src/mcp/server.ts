@@ -82,7 +82,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     "brain_search",
     {
       title: "Search the knowledge base",
-      description: "Hybrid keyword and semantic search over everything the owner has saved, with entity expansion and the owner's facts. Returns numbered passages with document and chunk ids.",
+      description: "Hybrid keyword and semantic search over everything the owner has saved. Expands entities named in the query (neighbours and up to 5 passages that mention each), and returns up to 10 of the owner's facts that share a term with the query or point at a named entity; use brain_get_facts or brain_orient for the full fact list. Returns numbered passages and facts with document and chunk ids.",
       inputSchema: {
         query: z.string().min(1),
         k: z.number().int().min(1).max(30).optional().describe("Number of passages, default 10"),

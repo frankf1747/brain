@@ -325,7 +325,58 @@ describe("search", () => {
     const res = await search(ctx, "where do I live");
     expect(res.facts.map((f) => f.predicate)).toEqual(["lives_in"]);
     const all = await search(ctx, "skill");
-    expect(all.facts.length).toBeLessThanOrEqual(config.graph.maxFacts);
+    expect(all.facts.length).toBe(config.graph.maxFacts);
+  });
+
+  it("finds graph passages through mentions recorded on a node merged into the named one", async () => {
+    const ctx = fakeCtx(sql, ({ system }) =>
+      system === SUMMARY_SYSTEM
+        ? { title: "Beta", summary_line: "Beta.", summary: "Beta.", occurred_at: null }
+        : { entities: [{ key: "b", type: "organization", name: "Betacorp", aliases: [], untyped_hint: null, quote: "Betacorp" }],
+            relations: [], facts_about_self: [] });
+    await ingest(ctx, { text: "Betacorp opened a lab.", sourceKind: "note", title: "Beta doc" });
+    const [a] = await sql<{ id: string }[]>`
+      insert into brain.nodes (type, name, canonical_name) values ('organization', 'Alphagroup', 'alphagroup') returning id`;
+    await sql`update brain.nodes set merged_into = ${a.id} where canonical_name = 'betacorp'`;
+    ctx.reranker = { rerank: async () => [] };
+    const res = await search(ctx, "Alphagroup", { includeFacts: false });
+    expect(res.entities.map((e) => e.id)).toEqual([a.id]);
+    expect(res.passages.filter((p) => p.group === "graph").map((p) => p.documentTitle)).toEqual(["Beta doc"]);
+  });
+
+  it("returns a fact pointing at a detected entity ahead of term-only matches, also through a merge", async () => {
+    const ctx = fakeCtx(sql, ({ system }) =>
+      system === SUMMARY_SYSTEM
+        ? { title: "Me", summary_line: "About me.", summary: "About me.", occurred_at: null }
+        : { entities: [{ key: "q", type: "organization", name: "Quuxcorp", aliases: [], untyped_hint: null, quote: "Quuxcorp" }],
+            relations: [],
+            facts_about_self: [
+              { predicate: "works_at", object_text: "my employer", object_key: "q", confidence: 0.5, valid_from: null, valid_to: null, quote: "Quuxcorp" },
+              ...Array.from({ length: 12 }, (_, i) => ({ predicate: `skill_${i}`, object_text: `thing ${i}`, object_key: null, confidence: 0.9, valid_from: null, valid_to: null, quote: "I" })),
+            ] });
+    await ingest(ctx, { text: "I work at Quuxcorp. I have many skills.", sourceKind: "note", title: "Me" });
+    const res = await search(ctx, "Quuxcorp skill");
+    expect(res.facts.length).toBe(config.graph.maxFacts);
+    expect(res.facts[0].predicate).toBe("works_at");
+    // The fact's object node is merged into another node; naming the canonical node still finds it.
+    const [z] = await sql<{ id: string }[]>`
+      insert into brain.nodes (type, name, canonical_name) values ('organization', 'Zentrix Holdings', 'zentrix holdings') returning id`;
+    await sql`update brain.nodes set merged_into = ${z.id} where canonical_name = 'quuxcorp'`;
+    const merged = await search(ctx, "Zentrix Holdings skill");
+    expect(merged.facts[0].predicate).toBe("works_at");
+  });
+
+  it("verifiedOnly keeps only verified facts", async () => {
+    const ctx = fakeCtx(sql, ({ system }) =>
+      system === SUMMARY_SYSTEM
+        ? { title: "Me", summary_line: "About me.", summary: "About me.", occurred_at: null }
+        : { entities: [], relations: [],
+            facts_about_self: Array.from({ length: 3 }, (_, i) => ({ predicate: `skill_${i}`, object_text: `thing ${i}`, object_key: null, confidence: 0.9, valid_from: null, valid_to: null, quote: "I" })) });
+    await ingest(ctx, { text: "I have skills.", sourceKind: "note", title: "Me" });
+    await sql`update brain.facts set verified = true where predicate = 'skill_1'`;
+    expect((await search(ctx, "skill")).facts.length).toBe(3);
+    const res = await search(ctx, "skill", { verifiedOnly: true });
+    expect(res.facts.map((f) => f.predicate)).toEqual(["skill_1"]);
   });
 
   it("rejects an empty query", async () => {
