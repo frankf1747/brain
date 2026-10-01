@@ -27,6 +27,28 @@ describe("parseGolden", () => {
     const bad = JSON.stringify({ id: "q05", question: "x", kind: "negative", expected: [{ origin: "a.md" }], negative: true, source: "fixture", approved_at: "2026-09-30" });
     expect(() => parseGolden(bad)).toThrow(/q05.*negative/);
   });
+  it("includes the line number in the negative and expected errors", () => {
+    const empty = JSON.stringify({ id: "q03", question: "x", kind: "semantic", expected: [], source: "fixture", approved_at: "2026-09-30" });
+    expect(() => parseGolden(`${ok}\n${empty}`)).toThrow(/line 2.*q03.*expected/);
+    const bad = JSON.stringify({ id: "q05", question: "x", kind: "negative", expected: [{ origin: "a.md" }], negative: true, source: "fixture", approved_at: "2026-09-30" });
+    expect(() => parseGolden(`${ok}\n\n${bad}`)).toThrow(/line 3.*q05.*negative/);
+  });
+  it("requires kind negative exactly when negative is true", () => {
+    const kindOnly = JSON.stringify({ id: "q06", question: "x", kind: "negative", expected: [{ origin: "a.md" }], source: "fixture", approved_at: "2026-09-30" });
+    expect(() => parseGolden(kindOnly)).toThrow(/line 1.*q06.*kind/);
+    const flagOnly = JSON.stringify({ id: "q07", question: "x", kind: "semantic", expected: [], negative: true, source: "fixture", approved_at: "2026-09-30" });
+    expect(() => parseGolden(flagOnly)).toThrow(/line 1.*q07.*kind/);
+  });
+  it("rejects unknown keys on the item and on expected entries", () => {
+    const extra = JSON.stringify({ ...JSON.parse(ok), expect: [] });
+    expect(() => parseGolden(extra)).toThrow(/line 1.*expect/);
+    const typo = JSON.stringify({ ...JSON.parse(ok), expected: [{ origin: "a.md", qoute: "x" }] });
+    expect(() => parseGolden(typo)).toThrow(/line 1: expected\.0: .*qoute/);
+  });
+  it("names the field path in schema errors", () => {
+    const bad = JSON.stringify({ ...JSON.parse(ok), kind: "bogus" });
+    expect(() => parseGolden(bad)).toThrow(/line 1: kind: /);
+  });
   it("reports the line number of invalid JSON", () => {
     expect(() => parseGolden(`${ok}\n{not json`)).toThrow(/line 2/);
   });
