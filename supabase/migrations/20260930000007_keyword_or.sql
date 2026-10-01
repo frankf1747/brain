@@ -19,11 +19,14 @@ begin
       parts := parts || ('( ' || phrase::text || ' )');
     end if;
   end loop;
-  -- Every other stem, in query order. Each lexeme is written as a quoted tsquery literal (backslash
-  -- and quote escaped), so operator characters in the question never reach the tsquery parser.
+  -- Every other stem of two or more characters, in query order. One-character lexemes (the "x" of
+  -- X-90, the "o" of O'Neil) match far too much; exact strings like X-90 are the fallback scan's job.
+  -- Each lexeme is written as a quoted tsquery literal (backslash and quote escaped), so operator
+  -- characters in the question never reach the tsquery parser.
   for lex in
     select t.lexeme
     from unnest(to_tsvector('english', regexp_replace(q, '"[^"]*"', ' ', 'g'))) t
+    where char_length(t.lexeme) >= 2
     order by t.positions[1]
   loop
     parts := parts || ('''' || replace(replace(lex, '\', '\\'), '''', '''''') || '''');

@@ -25,8 +25,13 @@ describe("query_to_tsquery", () => {
     expect(await tsq('"unclosed drill')).toBe("'unclos' | 'drill'");
   });
   it("quotes lexemes so tsquery operators and apostrophes in the question are inert", async () => {
-    expect(await tsq("a & b | c ! d : e ( f")).toBe("'b' | 'c' | 'd' | 'e' | 'f'");
-    expect(await tsq("O'Neil's drill")).toBe("'o' | 'neil' | 'drill'");
+    expect(await tsq("alpha & beta | gamma ! delta : eps ( zeta")).toBe("'alpha' | 'beta' | 'gamma' | 'delta' | 'ep' | 'zeta'");
+    expect(await tsq("O'Neil's drill")).toBe("'neil' | 'drill'");
+  });
+  it("drops unquoted one-character lexemes but keeps longer ones and quoted phrases", async () => {
+    expect(await tsq("X-90 drill")).toBe("'-90' | 'drill'");
+    expect(await tsq("a b c")).toBeNull();
+    expect(await tsq('"X-90" drill')).toBe("'x' <-> '-90' | 'drill'");
   });
 });
 
