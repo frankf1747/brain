@@ -141,6 +141,28 @@ describe("supersession by the extractor", () => {
     expect(rows.map((r) => [r.object_text, r.superseded_by])).toEqual([["Austin", null], ["Denver", austin.id]]);
   });
 
+  it("two notes resolved at the same time with the same date leave exactly one current value and no cycle", async () => {
+    for (let round = 0; round < 5; round++) {
+      await wipe(sql);
+      const austinDoc = (await ingest(ctx, { text: "I live in Austin.", sourceKind: "note", occurredAt: new Date("2026-09-26T12:00:00Z") }, { until: "extracted" })).id;
+      const denverDoc = (await ingest(ctx, { text: "I moved to Denver.", sourceKind: "note", occurredAt: new Date("2026-09-26T12:00:00Z") }, { until: "extracted" })).id;
+      await Promise.all([runResolve(ctx, austinDoc), runResolve(ctx, denverDoc)]);
+      const rows = await factsFor("lives_in");
+      // Same effective time: the later-ingested note wins the tie.
+      expect(current(rows)).toEqual(["Denver"]);
+      const denver = rows.find((r) => r.object_text === "Denver")!;
+      expect(rows.find((r) => r.object_text === "Austin")!.superseded_by).toBe(denver.id);
+    }
+  });
+
+  it("re-resolving the earlier of two notes from the same day does not flip the current value", async () => {
+    const austinDoc = await ownerNote("I live in Austin.", "2026-09-26T09:00:00Z");
+    await ownerNote("I moved to Denver.", "2026-09-26T18:00:00Z");
+    expect(current(await factsFor("lives_in"))).toEqual(["Denver"]);
+    await runResolve(ctx, austinDoc);
+    expect(current(await factsFor("lives_in"))).toEqual(["Denver"]);
+  });
+
   it("re-resolving either note, in any order, keeps exactly one current value", async () => {
     const austinDoc = await ownerNote("I live in Austin.", "2026-06-01T12:00:00Z");
     const denverDoc = await ownerNote("I moved to Denver.", "2026-09-26T12:00:00Z");

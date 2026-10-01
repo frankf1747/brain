@@ -161,7 +161,7 @@ describe("undoResolution with supersession chains", () => {
     expect(afterA.superseded_by).toBe(f3);
     const [repoint] = await sql<{ by: string; document_id: string; detail: unknown }[]>`
       select by, document_id, detail from brain.fact_events where fact_id = ${f1} and event = 'superseded' order by id desc limit 1`;
-    expect(repoint).toEqual({ by: "resolve", document_id: a, detail: { superseded_by: f3, previous_valid_to: "2027-01-31" } });
+    expect(repoint).toEqual({ by: "resolve", document_id: a, detail: { superseded_by: f3, previous_valid_to: "2027-01-31", link_by: "unrecorded" } });
 
     const report = await undoResolution(sql, b);
     expect(report.restored).toEqual([f1]);
@@ -197,14 +197,57 @@ describe("undoResolution with supersession chains", () => {
     expect(rows).toEqual([{ id: extracted, superseded_by: corrected }]);
   });
 
-  it("another document can still state a value the owner corrected in this one", async () => {
+  it("no document brings back a value the owner corrected away from", async () => {
     const ctx = fakeCtx(sql, handler);
     const { id } = await ingest(ctx, { text, sourceKind: "note" });
     await supersedeFact(sql, await factOf(id), { objectText: "H-1B", by: "frank" });
     const { id: other } = await ingest(ctx, { text: text2, sourceKind: "note" });
-    const [row] = await sql<{ object_text: string }[]>`
+    const rows = await sql<{ object_text: string }[]>`
       select f.object_text from brain.facts f join brain.chunks c on c.id = f.source_chunk_id where c.document_id = ${other}`;
-    expect(row).toEqual({ object_text: "F-1 OPT" });
+    expect(rows).toEqual([]);
+    expect(await currentValues("visa_status")).toEqual(["H-1B"]);
+  });
+
+  it("a value the owner added by hand is not duplicated by extraction", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await addFact(sql, { predicate: "visa_status", objectText: "F-1 OPT", by: "frank" });
+    await ingest(ctx, { text, sourceKind: "note" });
+    const [n] = await sql<{ n: number }[]>`select count(*)::int as n from brain.facts where object_text = 'F-1 OPT'`;
+    expect(n.n).toBe(1);
+  });
+
+  it("restores a referrer whose chain through removed facts leads back to itself, instead of linking it to itself", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text, sourceKind: "note" });
+    const removed = await factOf(id);
+    const { id: other } = await ingest(ctx, { text: text2, sourceKind: "note" });
+    const survivor = await factOf(other);
+    await sql`update brain.facts set superseded_by = ${removed}, valid_to = '2026-09-01' where id = ${survivor}`;
+    await sql`update brain.facts set superseded_by = ${survivor} where id = ${removed}`;
+    const report = await undoResolution(sql, id);
+    expect(report.facts.map((f) => f.id)).toEqual([removed]);
+    expect(report.restored).toEqual([survivor]);
+    const [row] = await sql<{ superseded_by: string | null; valid_to: string | null }[]>`
+      select superseded_by, valid_to::text as valid_to from brain.facts where id = ${survivor}`;
+    expect(row).toEqual({ superseded_by: null, valid_to: null });
+  });
+
+  it("a re-pointed fact ends when its new superseder starts, and the event names the link's author", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text, sourceKind: "note" });
+    const removed = await factOf(id);
+    const { id: older } = await addFact(sql, { predicate: "visa_status", objectText: "J-1", by: "frank" });
+    const { id: other } = await ingest(ctx, { text: text2, sourceKind: "note", occurredAt: new Date("2026-09-20T12:00:00Z") });
+    const newest = await factOf(other);
+    await sql`update brain.facts set superseded_by = ${removed}, valid_to = '2026-09-01' where id = ${older}`;
+    await sql`update brain.facts set superseded_by = ${newest} where id = ${removed}`;
+    await undoResolution(sql, id, { by: "test-undo" });
+    const [row] = await sql<{ superseded_by: string | null; valid_to: string | null }[]>`
+      select superseded_by, valid_to::text as valid_to from brain.facts where id = ${older}`;
+    expect(row).toEqual({ superseded_by: newest, valid_to: "2026-09-20" });
+    const [ev] = await sql<{ by: string; link_by: string | null }[]>`
+      select by, detail->>'link_by' as link_by from brain.fact_events where fact_id = ${older} and event = 'superseded'`;
+    expect(ev).toEqual({ by: "test-undo", link_by: "unrecorded" });
   });
 
   it("does not insert a second current copy of a verified fact after re-chunking", async () => {

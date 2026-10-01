@@ -2,7 +2,7 @@ import type postgres from "postgres";
 import type { Db } from "../db.js";
 import { normalizePredicate } from "../ingest/stages/resolve.js";
 import { UUID } from "../retrieve/documents.js";
-import { linkSupersession } from "./supersede.js";
+import { linkSupersession, lockPredicate } from "./supersede.js";
 
 export interface FactDetail {
   id: string;
@@ -64,6 +64,10 @@ export async function supersedeFact(sql: Db, factId: string, input: { objectText
   if (!old) throw new Error(`Fact ${factId} not found`);
   if (old.superseded_by) throw new Error(`Fact ${factId} is already superseded by ${old.superseded_by}`);
   return sql.begin(async (tx) => {
+    await lockPredicate(tx, old.subject_id, old.predicate);
+    const [still] = await tx<{ superseded_by: string | null }[]>`select superseded_by from brain.facts where id = ${factId} for update`;
+    if (!still) throw new Error(`Fact ${factId} not found`);
+    if (still.superseded_by) throw new Error(`Fact ${factId} is already superseded by ${still.superseded_by}`);
     const [row] = await tx<{ id: string; superseded_by: string | null }[]>`
       insert into brain.facts (subject_id, predicate, object_text, confidence, verified, verified_by, valid_from)
       values (${old.subject_id}, ${old.predicate}, ${objectText}, 1, false, ${input.by}, ${input.validFrom ?? null})

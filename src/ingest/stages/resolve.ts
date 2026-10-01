@@ -4,7 +4,7 @@ import type { Ctx } from "../../ctx.js";
 import { toVector, type Db } from "../../db.js";
 import { canonicalName } from "../../text/normalize.js";
 import { ExtractionSchema, type Extraction } from "./extract.js";
-import { supersedeByExtraction } from "../../graph/supersede.js";
+import { extractorBy, insertSingleValued, lockPredicate } from "../../graph/supersede.js";
 
 export type Decision = { action: "match"; nodeId: string } | { action: "create"; possibleDuplicateOf: string | null };
 
@@ -192,7 +192,7 @@ async function resolveEntity(
   const storedAliases = entity.aliases.map(canonicalName).filter((a) => a && a !== canonical);
   const [created] = await sql<{ id: string }[]>`
     insert into brain.nodes (type, name, canonical_name, aliases, properties, name_embedding, verified_by)
-    values (${type}, ${entity.name}, ${canonical}, ${storedAliases}::text[], ${sql.json(props as postgres.JSONValue)}, ${vec}::vector, ${"extractor:" + model})
+    values (${type}, ${entity.name}, ${canonical}, ${storedAliases}::text[], ${sql.json(props as postgres.JSONValue)}, ${vec}::vector, ${extractorBy(model)})
     on conflict (type, canonical_name) do update set updated_at = now()
     returning id`;
   // A concurrent or earlier insert may own this canonical name, and it may since have been merged.
@@ -202,7 +202,7 @@ async function resolveEntity(
 export interface UndoReport {
   /** Facts deleted (unverified facts whose source chunk is in the document). */
   facts: { id: string; predicate: string; objectText: string }[];
-  /** Facts from the document the owner verified; never deleted. */
+  /** Facts from the document the owner holds (brain.fact_owner_held; in practice, verified); never deleted. */
   keptVerified: { id: string; predicate: string; objectText: string }[];
   /**
    * Unverified facts from the document that the owner replaced (their supersession chain ends at a fact the
@@ -259,19 +259,32 @@ export async function undoResolution(sql: Db, documentId: string, opts: { by?: s
     const chunkIds = (await tx<{ id: string }[]>`select id from brain.chunks where document_id = ${documentId}`).map((r) => r.id);
     if (chunkIds.length === 0) return report;
 
-    type Row = { id: string; predicate: string; object_text: string; verified: boolean; superseded_by: string | null };
+    // Take the predicate locks (lockPredicate) before any row lock, in a fixed order, so this never deadlocks
+    // with a resolve that holds one predicate lock and then locks that predicate's facts.
+    const keys = await tx<{ subject_id: string; predicate: string }[]>`
+      select distinct subject_id, predicate from brain.facts
+      where source_chunk_id = any(${chunkIds}::uuid[])
+      order by subject_id, predicate`;
+    for (const k of keys) await lockPredicate(tx, k.subject_id, k.predicate);
+
+    type Row = { id: string; predicate: string; object_text: string; owner_held: boolean; superseded_by: string | null };
     const produced = await tx<Row[]>`
-      select id, predicate, object_text, verified, superseded_by from brain.facts
+      select id, predicate, object_text, brain.fact_owner_held(verified, verified_by) as owner_held, superseded_by from brain.facts
       where source_chunk_id = any(${chunkIds}::uuid[])
       order by created_at, id
       for update`;
     const view = (f: Row) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text });
-    report.keptVerified = produced.filter((f) => f.verified).map(view);
+    // A document's facts are written by the extractor, so for them owner-held means verified; the shared
+    // definition is used anyway so the keep rule cannot drift from the guard's.
+    report.keptVerified = produced.filter((f) => f.owner_held).map(view);
 
     // An unverified fact whose chain (through the document's other unverified facts) ends at a fact the owner
     // holds (brain.fact_owner_held), by a link the owner made (brain.fact_link_is_correction), is the record of
-    // an owner correction: keep it. A fact extraction parked behind the owner's value is not.
-    const unverified = produced.filter((f) => !f.verified);
+    // an owner correction: keep it. A fact extraction parked behind the owner's value is not. Unlike the
+    // resolve guard (brain.fact_corrected_by_owner, which follows the whole chain), this asks only about the
+    // first fact outside the document: when another document's extraction superseded this fact, it is that
+    // document's history, and it goes with this document.
+    const unverified = produced.filter((f) => !f.owner_held);
     const candidates = new Set(unverified.map((f) => f.id));
     const next = new Map(produced.map((f) => [f.id, f.superseded_by]));
     const links = new Map(unverified.map((f) => [f.id, chainEnd(f.id, f.superseded_by, candidates, next)]));
@@ -300,14 +313,18 @@ export async function undoResolution(sql: Db, documentId: string, opts: { by?: s
       for (const r of referrers) {
         const { last, end: target } = chainEnd(r.id, r.superseded_by, doomedSet, next);
         const previous = await previousValidTo(tx, r.id, r.superseded_by);
-        if (target !== null) {
+        // A chain through removed facts that leads back to the referrer itself is restored, never self-linked.
+        if (target !== null && target !== r.id) {
           // The new link inherits the author of the link it replaces (last -> target), so a fact extraction
-          // parked behind the owner's value never turns into an owner correction by being re-pointed.
+          // parked behind the owner's value never turns into an owner correction by being re-pointed. An
+          // unrecorded original link is written as such ('unrecorded', which counts as the owner's).
           const [inherited] = await tx<{ link_by: string | null }[]>`select brain.fact_link_by(${last}, ${target}) as link_by`;
-          await tx`update brain.facts set superseded_by = ${target} where id = ${r.id}`;
+          // Like a fresh link: the fact ends when its new superseder starts, unless it had its own end.
+          await tx`
+            update brain.facts set superseded_by = ${target}, valid_to = coalesce(${previous}::date, brain.fact_effective_from(${target}))
+            where id = ${r.id}`;
           // A later undo that removes `target` restores this fact from this row.
-          const detail: Record<string, string | null> = { superseded_by: target, previous_valid_to: previous };
-          if (inherited?.link_by) detail.link_by = inherited.link_by;
+          const detail = { superseded_by: target, previous_valid_to: previous, link_by: inherited?.link_by ?? "unrecorded" };
           await tx`
             insert into brain.fact_events (fact_id, event, by, document_id, detail)
             values (${r.id}, 'superseded', ${by}, ${documentId}, ${tx.json(detail as postgres.JSONValue)})`;
@@ -448,32 +465,33 @@ export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: stri
       const loc = evidenceFor(f.quote);
       const objectNode = f.object_key ? keyToNode.get(f.object_key) ?? null : null;
       const predicate = normalizePredicate(f.predicate);
-      // Not stated again (re-chunking sets source_chunk_id to null on what undo kept, so the dedupe index
-      // alone would let a copy in as current): a value the owner verified and holds as current, and a value
-      // this document produced that the owner since corrected (undo's keptCorrected; its chain reaches a
-      // fact the owner holds, brain.fact_corrected_by_owner).
-      const [inserted] = await sql<{ id: string }[]>`
-        insert into brain.facts (subject_id, predicate, object_text, object_node_id, confidence, source_chunk_id, verified_by, valid_from, valid_to)
-        select ${self.id}::uuid, ${predicate}::text, ${f.object_text}::text, ${objectNode}::uuid, ${f.confidence}::real,
-               ${loc?.chunkId ?? ex.section_chunk_id}::uuid, ${"extractor:" + ctx.llm.model}::text,
-               ${dateOrNull(f.valid_from)}::date, ${dateOrNull(f.valid_to)}::date
-        where not exists (
-          select 1 from brain.facts v
-          where v.subject_id = ${self.id} and v.predicate = ${predicate} and v.object_text = ${f.object_text}
-            and (
-              (v.verified and v.superseded_by is null)
-              or (not brain.fact_owner_held(v.verified, v.verified_by)
-                  and (v.source_chunk_id is null
-                       or exists (select 1 from brain.chunks c where c.id = v.source_chunk_id and c.document_id = ${documentId}))
-                  and brain.fact_corrected_by_owner(v.id))))
-        on conflict do nothing
-        returning id`;
-      // A single-valued predicate holds one current value: the newer statement supersedes the older (spec §4.4).
-      if (inserted && SINGLE_VALUED.has(predicate)) {
-        await supersedeByExtraction(sql, {
-          factId: inserted.id, subjectId: self.id, predicate, objectText: f.object_text,
-          by: "extractor:" + ctx.llm.model, documentId,
-        });
+      // Not stated again: a value the owner holds as current (verified, or set by hand), and a value the owner
+      // corrected away from, from whichever document (an extractor fact whose chain reaches an owner-held fact
+      // through a correction link, brain.fact_corrected_by_owner). The dedupe index alone is not enough:
+      // re-chunking sets source_chunk_id to null on what undo kept.
+      const by = extractorBy(ctx.llm.model);
+      const insert = async (tx: postgres.TransactionSql): Promise<string | null> => {
+        const [row] = await tx<{ id: string }[]>`
+          insert into brain.facts (subject_id, predicate, object_text, object_node_id, confidence, source_chunk_id, verified_by, valid_from, valid_to)
+          select ${self.id}::uuid, ${predicate}::text, ${f.object_text}::text, ${objectNode}::uuid, ${f.confidence}::real,
+                 ${loc?.chunkId ?? ex.section_chunk_id}::uuid, ${by}::text,
+                 ${dateOrNull(f.valid_from)}::date, ${dateOrNull(f.valid_to)}::date
+          where not exists (
+            select 1 from brain.facts v
+            where v.subject_id = ${self.id} and v.predicate = ${predicate} and v.object_text = ${f.object_text}
+              and (
+                (brain.fact_owner_held(v.verified, v.verified_by) and v.superseded_by is null)
+                or (not brain.fact_owner_held(v.verified, v.verified_by) and brain.fact_corrected_by_owner(v.id))))
+          on conflict do nothing
+          returning id`;
+        return row?.id ?? null;
+      };
+      // A single-valued predicate holds one current value: the insert and the supersession it causes share a
+      // transaction under the predicate's lock (spec §4.4).
+      if (SINGLE_VALUED.has(predicate)) {
+        await insertSingleValued(sql, { subjectId: self.id, predicate, objectText: f.object_text, by, documentId }, insert);
+      } else {
+        await sql.begin(insert);
       }
     }
   }

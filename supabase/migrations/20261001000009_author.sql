@@ -54,20 +54,28 @@ alter table brain.fact_events enable row level security;
 create index if not exists facts_source_chunk_idx on brain.facts (source_chunk_id);
 create index if not exists edges_evidence_chunk_idx on brain.edges (evidence_chunk_id);
 
--- (Task 7) The date a fact holds from, for deciding which of two single-valued facts is newer: its valid_from,
--- else its source document's occurred_at, else when that document was ingested, else (facts added by hand,
--- which have no source document) when the fact was recorded.
-create or replace function brain.fact_effective_from(p_fact uuid) returns date
+-- (Task 7) When a fact holds from, for deciding which of two single-valued facts is newer. effective_at: its
+-- valid_from, else its source document's occurred_at, else when that document was ingested, else (facts added
+-- by hand, which have no source document) when the fact was recorded. tie_at breaks equal effective_at: the
+-- source document's ingested_at, else the fact's created_at (callers break a remaining tie by fact id).
+create or replace function brain.fact_recency(p_fact uuid) returns table (effective_at timestamptz, tie_at timestamptz)
 language sql stable as $$
-  select coalesce(f.valid_from, d.occurred_at::date, d.ingested_at::date, f.created_at::date)
+  select coalesce(f.valid_from::timestamptz, d.occurred_at, d.ingested_at, f.created_at),
+         coalesce(d.ingested_at, f.created_at)
   from brain.facts f
   left join brain.chunks c on c.id = f.source_chunk_id
   left join brain.documents d on d.id = c.document_id
   where f.id = p_fact;
 $$;
 
+-- (Task 7) The date of fact_recency's effective_at: the valid_to an older fact gets when this one supersedes it.
+create or replace function brain.fact_effective_from(p_fact uuid) returns date
+language sql stable as $$
+  select (r.effective_at)::date from brain.fact_recency(p_fact) r;
+$$;
+
 -- (Task 7) A fact the owner stands behind: verified, or written by someone other than the extractor. The one
--- definition undoResolution (keptCorrected) and resolve's insert guard share.
+-- definition undoResolution, resolve's insert guard and supersedeByExtraction share.
 create or replace function brain.fact_owner_held(p_verified boolean, p_verified_by text) returns boolean
 language sql immutable as $$
   select p_verified or coalesce(p_verified_by, '') not like 'extractor:%';
@@ -93,7 +101,11 @@ language sql stable as $$
 $$;
 
 -- (Task 7) True when the first owner-held fact reached by following superseded_by from the fact was linked
--- by an owner correction: the fact is the record of that correction.
+-- by an owner correction: the fact is the record of that correction, and resolve never states its value
+-- again. It follows the whole chain, whichever documents the facts in it came from. undoResolution's keep
+-- rule (chainEnd in resolve.ts) instead follows only the document's own facts and asks about the first fact
+-- outside them: a fact superseded by another document's extraction is that document's history, not a
+-- record of the owner correcting this one.
 create or replace function brain.fact_corrected_by_owner(p_fact uuid) returns boolean
 language sql stable as $$
   with recursive chain(from_id, to_id, depth) as (
