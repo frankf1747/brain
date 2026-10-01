@@ -126,4 +126,20 @@ describe("search SQL uses its indexes", () => {
     expect(p).toContain("nodes_aliases_idx");
     expect(p).not.toMatch(/Seq Scan on nodes n\b/);
   });
+  it("neighbors() reaches edges through edges_from_idx and edges_to_idx", async () => {
+    const ctx = fakeCtx(sql, ({ system }) =>
+      system.includes("summar")
+        ? { title: "Z", summary_line: "Z.", summary: "Z.", occurred_at: null }
+        : { entities: [{ key: "z", type: "organization", name: "Zorblax Industries", aliases: [], untyped_hint: null, quote: "Zorblax" },
+                        { key: "a", type: "place", name: "Austin", aliases: [], untyped_hint: null, quote: "Austin" }],
+            relations: [{ from_key: "z", to_key: "a", type: "located_in", confidence: 0.9, valid_from: null, valid_to: null, quote: "Zorblax in Austin" }],
+            facts_about_self: [] });
+    await ingest(ctx, { text: "Zorblax in Austin.", sourceKind: "news", title: "Z" });
+    const [z] = await sql<{ id: string }[]>`select id from brain.nodes where canonical_name = 'zorblax industries'`;
+    const p = await plan(`select * from brain.neighbors('${z.id}'::uuid, 1, null)`, KEYWORD);
+    // Both directions of the walk must be able to use an index on the raw column.
+    expect(p).toContain("edges_from_idx");
+    expect(p).toContain("edges_to_idx");
+    expect(p).not.toMatch(/Seq Scan on edges\b/);
+  });
 });

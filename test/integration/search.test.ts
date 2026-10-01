@@ -49,11 +49,14 @@ describe("search", () => {
     expect(res.passages[0].documentTitle).toBe("Zorblax news");
     expect(res.entities.map((e) => e.name)).toContain("Zorblax Industries");
     expect(res.entities[0].neighbors.map((n) => n.name)).toContain("Austin");
-    expect(res.facts.map((f) => f.predicate)).toContain("visa_status");
+    // visa_status shares no term with the query and has no object node, so it is not returned here.
+    expect(res.facts).toEqual([]);
     expect(res.usedFallback).toBe(false);
     const [log] = await sql<{ query: string; used_fallback: boolean; node_ids: string[] }[]>`select query, used_fallback, node_ids from brain.retrieval_log`;
     expect(log.query).toContain("Zorblax");
     expect(log.node_ids.length).toBe(1);
+    const visa = await search(ctx, "visa status");
+    expect(visa.facts.map((f) => f.predicate)).toContain("visa_status");
   });
 
   it("applies the source_kind filter inside retrieval", async () => {
@@ -268,6 +271,62 @@ describe("search", () => {
     expect(res.entities.map((e) => e.name)).toEqual(["Clinical Trial Risk Intelligence Platform"]);
     expect(res.entities[0].matchedSpan).toBe("clinical trial risk intelligence platform");
   });
+  it("caps neighbours and graph passages per entity and orders graph passages by document date", async () => {
+    const ctx = fakeCtx(sql, ({ system, user }) => {
+      if (system === SUMMARY_SYSTEM) return { title: "Untitled", summary_line: "A note.", summary: user.slice(0, 80), occurred_at: null };
+      const m = /Zorblax mention (\d+)/.exec(user);
+      return m
+        ? { entities: [{ key: "z", type: "organization", name: "Zorblax Industries", aliases: [], untyped_hint: null, quote: "Zorblax" },
+                        { key: "p", type: "place", name: `Place ${m[1]}`, aliases: [], untyped_hint: null, quote: `Place ${m[1]}` }],
+            relations: [{ from_key: "z", to_key: "p", type: "located_in", confidence: Number(m[1]) / 100, valid_from: null, valid_to: null, quote: "Zorblax" }],
+            facts_about_self: [] }
+        : { entities: [], relations: [], facts_about_self: [] };
+    });
+    for (let i = 1; i <= 25; i++) {
+      await ingest(ctx, { text: `Zorblax mention ${i} in Place ${i}.`, sourceKind: "note", title: `M${i}`, occurredAt: new Date(Date.UTC(2026, 0, i)) });
+    }
+    // No hybrid passages, so none of the graph passages is dropped as a duplicate of a hybrid hit.
+    ctx.reranker = { rerank: async () => [] };
+    const res = await search(ctx, "Zorblax Industries", { includeFacts: false });
+    const z = res.entities.find((e) => e.name === "Zorblax Industries")!;
+    expect(z.neighbors.length).toBe(config.graph.maxNeighbors);
+    expect(z.neighbors[0].name).toBe("Place 25"); // highest edge confidence first
+    const graph = res.passages.filter((p) => p.group === "graph");
+    expect(graph.length).toBe(config.graph.maxPassagesPerEntity);
+    expect(graph.map((p) => p.documentTitle)).toEqual(["M25", "M24", "M23", "M22", "M21"]); // newest documents first
+  });
+
+  it("maps a mention stored on a level-0 section to that section's first passage", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const [doc] = await sql<{ id: string }[]>`
+      insert into brain.documents (content_hash, title, raw_content, source_kind) values ('q', 'Quuxcorp memo', 'Quuxcorp memo.', 'note') returning id`;
+    const [sec] = await sql<{ id: string }[]>`
+      insert into brain.chunks (document_id, level, ordinal, content, token_count, char_start, char_end)
+      values (${doc.id}, 0, 0, 'Quuxcorp memo.', 3, 0, 14) returning id`;
+    const [first] = await sql<{ id: string }[]>`
+      insert into brain.chunks (document_id, parent_id, level, ordinal, content, token_count, char_start, char_end)
+      values (${doc.id}, ${sec.id}, 1, 0, 'Quuxcorp', 1, 0, 8), (${doc.id}, ${sec.id}, 1, 1, 'memo.', 1, 9, 14) returning id`;
+    const [node] = await sql<{ id: string }[]>`
+      insert into brain.nodes (type, name, canonical_name) values ('organization', 'Quuxcorp', 'quuxcorp') returning id`;
+    await sql`insert into brain.mentions (chunk_id, node_id) values (${sec.id}, ${node.id})`;
+    ctx.reranker = { rerank: async () => [] };
+    const res = await search(ctx, "Quuxcorp", { includeFacts: false });
+    expect(res.passages.filter((p) => p.group === "graph").map((p) => p.chunkId)).toEqual([first.id]);
+  });
+
+  it("returns only facts that overlap the query or its detected entities, capped", async () => {
+    const ctx = fakeCtx(sql, ({ system }) =>
+      system === SUMMARY_SYSTEM
+        ? { title: "Me", summary_line: "About me.", summary: "About me.", occurred_at: null }
+        : { entities: [], relations: [],
+            facts_about_self: Array.from({ length: 15 }, (_, i) => ({ predicate: i === 0 ? "lives_in" : `skill_${i}`, object_text: i === 0 ? "Austin" : `thing ${i}`, object_key: null, confidence: 0.9, valid_from: null, valid_to: null, quote: "I" })) });
+    await ingest(ctx, { text: "I live in Austin. I know many things.", sourceKind: "note", title: "Me" });
+    const res = await search(ctx, "where do I live");
+    expect(res.facts.map((f) => f.predicate)).toEqual(["lives_in"]);
+    const all = await search(ctx, "skill");
+    expect(all.facts.length).toBeLessThanOrEqual(config.graph.maxFacts);
+  });
+
   it("rejects an empty query", async () => {
     const ctx = fakeCtx(sql, handler);
     await expect(search(ctx, "   ")).rejects.toThrow("Search query is empty");

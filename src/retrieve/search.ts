@@ -199,24 +199,33 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
     })
     .filter((d): d is DocHit => d !== null);
 
-  // Layer 4: graph expansion from entities named in the query.
+  // Layer 4: graph expansion from entities named in the query, with budgets (spec §3.5).
   const entities: EntityHit[] = [];
   for (const ref of entityRefs) {
     const neighbors = await sql<Neighbor[]>`
       select nb.node_id as id, x.type, x.name, nb.depth
       from brain.neighbors(${ref.id}, 1, null) nb
       join brain.nodes x on x.id = nb.node_id
+      left join brain.edges e on e.id = nb.via_edge
       where nb.depth > 0 and ${opts.verifiedOnly ? sql`x.verified` : sql`true`}
-      order by nb.depth, x.name`;
+      order by nb.depth, e.confidence desc nulls last, x.name
+      limit ${config.graph.maxNeighbors}`;
     entities.push({ ...ref, neighbors });
+    // A mention stored on a level-0 section (quote not located) maps to that section's first passage.
     const mentioned = await sql<{ id: string }[]>`
-      select c.id from brain.mentions m
-      join brain.chunks c on c.id = m.chunk_id
+      select c.id
+      from (
+        select distinct case when c0.level = 1 then c0.id
+                             else (select p.id from brain.chunks p where p.parent_id = c0.id order by p.ordinal limit 1) end as id
+        from brain.mentions m join brain.chunks c0 on c0.id = m.chunk_id
+        where m.node_id = ${ref.id}
+      ) pm
+      join brain.chunks c on c.id = pm.id
       join brain.documents d on d.id = c.document_id
-      where m.node_id = ${ref.id} and c.level = 1
-        and (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
+      where (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
         and ${inDateRange(sql, "d", since, until)}
-      order by m.confidence desc nulls last, c.id limit 5`;
+      order by coalesce(d.occurred_at, d.ingested_at) desc, c.ordinal, c.id
+      limit ${config.graph.maxPassagesPerEntity}`;
     const newIds = mentioned.map((m) => m.id).filter((id) => !seen.has(id));
     const extra = await loadChunks(sql, newIds);
     for (const id of newIds) {
@@ -227,14 +236,20 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
     }
   }
 
-  // Layer 5: facts, always loaded unless turned off.
+  // Layer 5: facts whose predicate or value shares a stem with the query, or whose object node is a
+  // detected entity, capped. brain_orient and brain_get_facts still list every current fact.
   let facts: FactRow[] = [];
   if (opts.includeFacts !== false) {
     const rowsF = await sql<{ id: string; predicate: string; object_text: string; confidence: number | null; verified: boolean; source_chunk_id: string | null }[]>`
-      select id, predicate, object_text, confidence, verified, source_chunk_id from brain.current_facts(null)`;
-    facts = rowsF
-      .filter((f) => !opts.verifiedOnly || f.verified)
-      .map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, confidence: f.confidence, verified: f.verified, sourceChunkId: f.source_chunk_id }));
+      select f.id, f.predicate, f.object_text, f.confidence, f.verified, f.source_chunk_id
+      from brain.current_facts(null) f
+      cross join (select brain.query_to_tsquery(${query}) as q) q
+      where ((q.q is not null and to_tsvector('english', replace(f.predicate, '_', ' ') || ' ' || f.object_text) @@ q.q)
+             or f.object_node_id = any(${entityRefs.map((e) => e.id)}::uuid[]))
+        and ${opts.verifiedOnly ? sql`f.verified` : sql`true`}
+      order by f.verified desc, f.confidence desc nulls last, f.created_at desc, f.id
+      limit ${config.graph.maxFacts}`;
+    facts = rowsF.map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, confidence: f.confidence, verified: f.verified, sourceChunkId: f.source_chunk_id }));
   }
 
   // Fallback: literal substring scan for exact-string terms (codes, figures, versions), when the search

@@ -81,11 +81,11 @@ describe("brain MCP server", () => {
     const [job] = await sql<{ stage: string }[]>`select stage from brain.ingest_jobs where document_id = ${id}`;
     expect(job.stage).toBe("done");
 
-    const search = await s.call("brain_search", { query: "Acme Corp", k: 5 });
+    const search = await s.call("brain_search", { query: "Acme Corp visa", k: 5 });
     expect(search.text).toContain("[P1]");
     expect(search.text).toContain(`document ${id}`);
     expect(search.text).toContain("Entity organization: Acme Corp");
-    expect(search.text).toContain("visa_status: F-1 OPT");
+    expect(search.text).toContain("visa_status: F-1 OPT"); // facts come back only when they share a term with the query
 
     const doc = await s.call("brain_get_document", { document_id: id, offset: 0, length: 20 });
     expect(doc.text).toContain("I applied to Acme Co");

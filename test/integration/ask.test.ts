@@ -16,7 +16,7 @@ describe("ask", () => {
       return { entities: [], relations: [], facts_about_self: [{ predicate: "visa_status", object_text: "F-1 OPT", object_key: null, confidence: 1, valid_from: null, valid_to: null, quote: "F-1 OPT" }] };
     });
     await ingest(ctx, { text: "Zorblax released the ZX-9000. I am on F-1 OPT." });
-    const { answer, result } = await ask(ctx, "What did Zorblax release?");
+    const { answer, result } = await ask(ctx, "What did Zorblax release, and what is my visa?");
     expect(answer).toBe("The answer [P1].");
     const call = ctx.llm.calls.find((c) => c.kind === "text")!;
     expect(call.user).toContain("[P1]");
