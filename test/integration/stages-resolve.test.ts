@@ -97,6 +97,73 @@ describe("runResolve", () => {
   });
 });
 
+async function ingestAs(author: "owner" | "other" | "unknown", payload: unknown, body = text) {
+  const ctx = fakeCtx(sql, () => payload);
+  const { id } = await storeDocument(sql, { text: body, sourceKind: "note", author });
+  await runChunk(ctx, id);
+  await runExtract(ctx, id);
+  const report = await runResolve(ctx, id);
+  return { ctx, id, report };
+}
+
+const selfEdges = () => sql<{ type: string }[]>`
+  select e.type from brain.edges e join brain.nodes n on n.id = e.from_node where n.is_self`;
+const suppressedOf = async (id: string) =>
+  (await sql<{ n: number | null }[]>`select (metadata->>'suppressed_self_items')::int as n from brain.documents where id = ${id}`)[0].n;
+
+describe("runResolve author gate", () => {
+  it("writes no facts about the owner and no edges from the owner for a document someone else wrote", async () => {
+    const { id, report } = await ingestAs("other", fakeExtraction);
+    expect(report.suppressedSelfItems).toBe(2);
+    expect(await sql`select id from brain.facts`).toHaveLength(0);
+    expect(await selfEdges()).toHaveLength(0);
+    expect(await suppressedOf(id)).toBe(2);
+    // The model's output is kept as it was, so a later set-author owner can re-apply it.
+    const [ex] = await sql<{ facts: unknown[]; relations: unknown[] }[]>`
+      select payload->'facts_about_self' as facts, payload->'relations' as relations from brain.extractions where document_id = ${id}`;
+    expect(ex.facts).toHaveLength(1);
+    expect(ex.relations).toHaveLength(1);
+    // Entities and mentions are still written: Acme Corp is in the graph.
+    expect(await sql`select id from brain.nodes where canonical_name = 'acme corp'`).toHaveLength(1);
+  });
+
+  it("treats an unknown author the same way", async () => {
+    const { report } = await ingestAs("unknown", fakeExtraction);
+    expect(report.suppressedSelfItems).toBe(2);
+    expect(await sql`select id from brain.facts`).toHaveLength(0);
+  });
+
+  it("writes both for a document the owner wrote", async () => {
+    const { id, report } = await ingestAs("owner", fakeExtraction);
+    expect(report.suppressedSelfItems).toBe(0);
+    expect(await sql`select id from brain.facts`).toHaveLength(1);
+    expect((await selfEdges()).map((e) => e.type)).toEqual(["applied_to"]);
+    expect(await suppressedOf(id)).toBeNull();
+  });
+
+  it("still writes relations between other entities in someone else's document", async () => {
+    const payload = {
+      ...fakeExtraction,
+      entities: [...fakeExtraction.entities, { key: "e3", type: "place", name: "Austin", aliases: [], untyped_hint: null, quote: "Austin" }],
+      relations: [...fakeExtraction.relations, { from_key: "e2", to_key: "e3", type: "located_in", confidence: 0.9, valid_from: null, valid_to: null, quote: "Acme Corp in Austin" }],
+    };
+    const { report } = await ingestAs("other", payload, "I applied to Acme Corp in Austin. I am on F-1 OPT.");
+    expect(report.suppressedSelfItems).toBe(2);
+    expect((await sql<{ type: string }[]>`select type from brain.edges`).map((e) => e.type)).toEqual(["located_in"]);
+  });
+
+  it("suppresses a relation that points from the owner only after its direction is corrected", async () => {
+    const payload = {
+      entities: fakeExtraction.entities,
+      relations: [{ from_key: "e2", to_key: "e1", type: "applied_to", confidence: 0.9, valid_from: null, valid_to: null, quote: "applied to Acme Corp" }],
+      facts_about_self: [],
+    };
+    const { report } = await ingestAs("other", payload);
+    expect(report.suppressedSelfItems).toBe(1);
+    expect(await sql`select id from brain.edges`).toHaveLength(0);
+  });
+});
+
 function person(name: string, aliases: string[] = []) {
   return { key: "p", type: "person", name, aliases, untyped_hint: null, quote: name };
 }

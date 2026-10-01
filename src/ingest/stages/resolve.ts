@@ -196,16 +196,44 @@ async function resolveEntity(
   return canonicalId(sql, created.id);
 }
 
+export interface ResolveReport {
+  /**
+   * Facts about the owner plus relations from the owner that the extractor returned for a document the
+   * owner did not write. They stay in brain.extractions.payload and are not written.
+   */
+  suppressedSelfItems: number;
+}
+
+/** documents.metadata.suppressed_self_items: the count when there is one, absent otherwise. */
+async function recordSuppressed(sql: Db, documentId: string, n: number): Promise<void> {
+  if (n > 0) {
+    await sql`update brain.documents set metadata = metadata || jsonb_build_object('suppressed_self_items', ${n}::int) where id = ${documentId}`;
+  } else {
+    await sql`update brain.documents set metadata = metadata - 'suppressed_self_items' where id = ${documentId}`;
+  }
+}
+
 /** Stage 6. Turns stored extractions into nodes, edges, mentions and facts. Safe to re-run. */
-export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
+export async function runResolve(ctx: Ctx, documentId: string): Promise<ResolveReport> {
   const { sql, embedder } = ctx;
+  const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${documentId}`;
+  if (!doc) throw new Error(`Document ${documentId} not found`);
+  // Hard gate (spec §4.3): whatever the model returned, only a document the owner wrote can state facts
+  // about the owner or relations from the owner.
+  const ownerWrote = doc.author === "owner";
+
   const extractions = await sql<{ section_chunk_id: string; payload: unknown }[]>`
     select section_chunk_id, payload from brain.extractions where document_id = ${documentId}`;
-  if (extractions.length === 0) return; // extraction skipped; the document is still searchable
+  if (extractions.length === 0) {
+    // Extraction skipped; the document is still searchable.
+    await recordSuppressed(sql, documentId, 0);
+    return { suppressedSelfItems: 0 };
+  }
 
   const [self] = await sql<{ id: string }[]>`select id from brain.nodes where is_self`;
   const knownTypes = new Set((await sql<{ name: string }[]>`select name from brain.node_types`).map((r) => r.name));
   const knownEdges = new Set((await sql<{ name: string }[]>`select name from brain.edge_types`).map((r) => r.name));
+  let suppressed = 0;
 
   for (const ex of extractions) {
     const payload = ExtractionSchema.parse(ex.payload);
@@ -248,6 +276,11 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
       const direction = checkDirection(type, nodeType.get(from)!, nodeType.get(to)!);
       if (direction === "swap") [from, to] = [to, from];
       else if (direction === "unverified") props.direction_unverified = true;
+      // Checked after the direction fix, so an edge that only points from the owner once corrected is caught too.
+      if (!ownerWrote && from === self.id) {
+        suppressed++;
+        continue;
+      }
       const quote = r.quote.trim().slice(0, MAX_EDGE_QUOTE);
       if (quote) props.quote = quote;
       const loc = evidenceFor(r.quote);
@@ -258,6 +291,10 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
         on conflict do nothing`;
     }
 
+    if (!ownerWrote) {
+      suppressed += payload.facts_about_self.length;
+      continue;
+    }
     for (const f of payload.facts_about_self) {
       const loc = evidenceFor(f.quote);
       const objectNode = f.object_key ? keyToNode.get(f.object_key) ?? null : null;
@@ -268,4 +305,7 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<void> {
         on conflict do nothing`;
     }
   }
+
+  await recordSuppressed(sql, documentId, suppressed);
+  return { suppressedSelfItems: suppressed };
 }

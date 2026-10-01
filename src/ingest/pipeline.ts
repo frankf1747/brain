@@ -9,7 +9,8 @@ import { runResolve } from "./stages/resolve.js";
 export const STAGES = ["stored", "chunked", "summarized", "embedded", "extracted", "resolved", "done"] as const;
 export type Stage = (typeof STAGES)[number];
 
-type Runner = (ctx: Ctx, documentId: string) => Promise<void>;
+/** A stage may return a report (runResolve does); the pipeline ignores it. */
+type Runner = (ctx: Ctx, documentId: string) => Promise<unknown>;
 const RUNNERS: Record<Exclude<Stage, "stored">, Runner> = {
   chunked: runChunk,
   summarized: runSummarize,
