@@ -232,7 +232,8 @@ evalCmd
     try {
       const run = await runEval(ctx, opts.golden);
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
-      const comparison = base ? compare(base, run.report, run.ranks) : null;
+      const goldenIds = run.results.map((r) => r.id).sort();
+      const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
       const failures = comparison && opts.gate ? gate(comparison) : [];
       if (opts.json) {
         console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
@@ -255,6 +256,7 @@ evalCmd
         if (comparison) {
           const d = comparison.deltas;
           console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);
+          if (comparison.goldenChanged) console.log("  golden set changed since the baseline: deltas compare different question sets");
           for (const r of comparison.regressions) console.log(`  worse   ${r.id}: ${r.before ?? "miss"} -> ${r.after ?? "miss"}`);
           for (const r of comparison.improvements) console.log(`  better  ${r.id}: ${r.before ?? "miss"} -> ${r.after ?? "miss"}`);
           for (const f of failures) console.log(`  GATE: ${f}`);
@@ -265,7 +267,7 @@ evalCmd
       if (failures.length) process.exitCode = 1;
       if (opts.accept) {
         const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
-        await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, report: run.report, ranks: run.ranks });
+        await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);
       }
     } finally {
