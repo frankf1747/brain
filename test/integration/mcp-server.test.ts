@@ -125,6 +125,37 @@ describe("brain MCP server", () => {
     await s.close();
   });
 
+  it("shows suppressed items about the owner in brain_status", async () => {
+    const s = await connect();
+    const ing = await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note", author: "other" });
+    const id = /document ([0-9a-f-]{36})/.exec(ing.text)![1];
+    await s.jobs.drain();
+    const status = await s.call("brain_status");
+    expect(status.text).toContain(`- ${id} Acme note [author other]: 2`);
+    await s.close();
+  });
+
+  it("says when brain_ingest keeps the stored author of text that is already present", async () => {
+    const s = await connect();
+    const text = "I think Databricks costs too much.";
+    const first = await s.call("brain_ingest", { text, source_kind: "note", author: "other" });
+    const id = /document ([0-9a-f-]{36})/.exec(first.text)![1];
+    expect(first.text).not.toContain("author stays");
+    await s.jobs.drain();
+    const again = await s.call("brain_ingest", { text, source_kind: "note", author: "owner" });
+    expect(again.isError).toBe(false);
+    expect(again.text).toContain("Already present");
+    expect(again.text).toContain(`author stays other; use \`brain set-author ${id} owner\` to change it`);
+    const same = await s.call("brain_ingest", { text, source_kind: "note", author: "other" });
+    expect(same.text).not.toContain("author stays");
+    const omitted = await s.call("brain_ingest", { text, source_kind: "note" });
+    expect(omitted.text).not.toContain("author stays");
+    const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${id}`;
+    expect(doc.author).toBe("other");
+    await s.jobs.drain();
+    await s.close();
+  });
+
   it("adds and supersedes facts labeled with the client", async () => {
     const s = await connect();
     const a = await s.call("brain_add_fact", { predicate: "Lives In", object_text: "Austin" });

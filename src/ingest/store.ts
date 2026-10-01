@@ -9,7 +9,8 @@ export interface StoreInput {
   sourceKind?: string;
   /**
    * Who wrote the text. When absent, config.authorDefaults by source kind. Ignored when the same text is
-   * already stored (storing is idempotent on content); `brain set-author` changes it.
+   * already stored (storing is idempotent on content): the result then carries the stored author, and
+   * `brain set-author` changes it.
    */
   author?: Author;
   origin?: string | null;
@@ -18,8 +19,11 @@ export interface StoreInput {
   occurredAt?: Date | null;
 }
 
-/** Stage 1. Idempotent on content: the same bytes always map to the same document id. */
-export async function storeDocument(sql: Db, input: StoreInput): Promise<{ id: string; created: boolean }> {
+/**
+ * Stage 1. Idempotent on content: the same bytes always map to the same document id. `author` is the author
+ * stored on the document, which for existing text may differ from input.author.
+ */
+export async function storeDocument(sql: Db, input: StoreInput): Promise<{ id: string; created: boolean; author: Author }> {
   if (!input.text.trim()) throw new Error("Refusing to store an empty document");
   if (input.author !== undefined && !isAuthor(input.author)) {
     throw new Error(`author must be one of ${AUTHORS.join(", ")}; got "${String(input.author)}"`);
@@ -30,11 +34,11 @@ export async function storeDocument(sql: Db, input: StoreInput): Promise<{ id: s
 
   const healJob = (id: string) => sql`insert into brain.ingest_jobs (document_id, stage) values (${id}, 'stored') on conflict do nothing`;
 
-  const [existing] = await sql<{ id: string }[]>`select id from brain.documents where content_hash = ${hash}`;
+  const [existing] = await sql<{ id: string; author: Author }[]>`select id, author from brain.documents where content_hash = ${hash}`;
   if (existing) {
     // A document without a job (e.g. stored before stores were atomic) would strand runPipeline; heal it.
     await healJob(existing.id);
-    return { id: existing.id, created: false };
+    return { id: existing.id, created: false, author: existing.author };
   }
 
   // Document and job are written together so a crash can never leave one without the other.
@@ -49,9 +53,9 @@ export async function storeDocument(sql: Db, input: StoreInput): Promise<{ id: s
     return inserted as { id: string } | undefined;
   });
   if (!row) {
-    const [raced] = await sql<{ id: string }[]>`select id from brain.documents where content_hash = ${hash}`;
+    const [raced] = await sql<{ id: string; author: Author }[]>`select id, author from brain.documents where content_hash = ${hash}`;
     await healJob(raced.id);
-    return { id: raced.id, created: false };
+    return { id: raced.id, created: false, author: raced.author };
   }
-  return { id: row.id, created: true };
+  return { id: row.id, created: true, author };
 }

@@ -3,6 +3,7 @@ import type { Orientation } from "../retrieve/orient.js";
 import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
 import type { FactDetail } from "../graph/facts.js";
+import type { SuppressedDocument } from "../ingest/set-author.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
@@ -80,9 +81,18 @@ export function renderFacts(facts: FactDetail[]): string {
     .join("\n");
 }
 
-export function renderStatus(pipeline: { stage: string; count: number; failed: number }[], inflight: string[], failures: { document_id: string; stage: string; error: string }[]): string {
+export function renderStatus(
+  pipeline: { stage: string; count: number; failed: number }[],
+  inflight: string[],
+  failures: { document_id: string; stage: string; error: string }[],
+  suppressed: SuppressedDocument[] = [],
+): string {
   const out = [pipeline.map((p) => `${p.stage}: ${p.count}${p.failed ? ` (${p.failed} failed)` : ""}`).join(", ")];
   out.push(inflight.length ? `Processing in this server: ${inflight.join(", ")}` : "Nothing processing in this server.");
   for (const f of failures) out.push(`- ${f.document_id} stuck after ${f.stage}: ${f.error}`);
+  if (suppressed.length) {
+    out.push("Facts and relations about the owner suppressed because the owner did not write the document:");
+    for (const s of suppressed) out.push(`- ${s.documentId} ${s.title ?? "(untitled)"} [author ${s.author}]: ${s.count}`);
+  }
   return out.join("\n");
 }

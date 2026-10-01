@@ -24,13 +24,14 @@ The Voyage free tier without a payment method allows 3 requests per minute. The 
 ## Commands
 
 ```
-npm run brain -- ingest <file|dir|url|-> [--kind note] [--title T] [--occurred-at 2026-01-01] [--meta k=v] [--until chunked]
+npm run brain -- ingest <file|dir|url|-> [--kind note] [--author owner|other|unknown] [--title T] [--occurred-at 2026-01-01] [--meta k=v] [--until chunked]
 npm run brain -- status
 npm run brain -- retry [--stage embedded]
 npm run brain -- search "<query>" [--kind news note] [--since 2026-01-01] [--until 2026-12-31] [--verified] [-k 10] [--json]
 npm run brain -- ask "<question>"
 npm run brain -- node "<name or id>"
 npm run brain -- facts [--all]
+npm run brain -- set-author <document-id> <owner|other|unknown>
 npm run brain -- eval ingest [dir]
 npm run brain -- eval run [--golden eval/golden.jsonl] [--baseline eval/baseline.json] [--compare] [--gate] [--accept] [--json]
 npm run brain -- backfill [--limit 500] [--poll 30]
@@ -57,7 +58,7 @@ The server exposes the knowledge base as nine tools:
 - `brain_get_node`: fetch an entity and its neighbours.
 - `brain_get_facts`: list current facts.
 - `brain_status`: pipeline progress for documents.
-- `brain_ingest`: save text such as a note, pasted article or conversation (a URL can be recorded as its origin, not fetched).
+- `brain_ingest`: save text such as a note, pasted article or conversation (a URL can be recorded as its origin, not fetched). Pass `author: "other"` for anything you did not write.
 - `brain_add_fact`: record a fact.
 - `brain_supersede_fact`: replace a fact with a corrected one.
 
@@ -66,6 +67,8 @@ With `BRAIN_MCP_READONLY=1` only the six read tools (the first six) are exposed.
 `brain_ingest` returns once the document is stored and chunked. Summary, embeddings and extraction continue in the background, at most 2 pipelines at once so a slot stays free for new saves. `brain_status` shows progress; unfinished work resumes on later saves or with `npm run brain -- retry`.
 
 Facts written by an agent are unverified until you run `npm run brain -- verify-fact <id>`. Corrections supersede the old fact; nothing is deleted.
+
+Every document records who wrote it: `owner`, `other` or `unknown`. Only documents you wrote produce facts about you or relationships from you; for any other document the extractor's statements about you are kept in its stored extraction but not written, and `brain status` / `brain_status` show how many per document. Without `--author` (CLI) or `author` (MCP), resume, note, conversation and paste default to `owner`; news, paper, job_description and email to `other`; anything else to `unknown`. Saving text that is already stored keeps its author (the CLI and `brain_ingest` say so when you asked for a different one). If someone else's post was saved as yours, run `npm run brain -- set-author <document-id> other`: it removes the facts and relationships that document produced (facts you verified are kept and listed), applies the rule again and refreshes the Obsidian mirror. While the document is being processed it refuses (try again in a moment); for a document not yet resolved it only records the author, which the resolve stage then applies.
 
 On connect, the server sends instructions that the client places in the model's system prompt: questions about you go to `brain_orient` once, then `brain_search`, and answers cite the returned passages. Every tool call is logged to `brain.tool_calls` with its client, arguments (saved text as its length only), outcome and duration, so you can check whether a session followed that order:
 

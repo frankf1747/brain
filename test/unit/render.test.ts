@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts } from "../../src/mcp/render.js";
+import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus } from "../../src/mcp/render.js";
 
 describe("renderSearch", () => {
   it("numbers passages with ids, lists entities, facts and the fallback notice", () => {
@@ -35,6 +35,14 @@ describe("renderSearch", () => {
 });
 
 describe("other renderers", () => {
+  it("renderStatus lists documents whose items about the owner were suppressed", () => {
+    const pipeline = [{ stage: "done", count: 1, failed: 0 }];
+    const t = renderStatus(pipeline, [], [], [{ documentId: "d1", title: "Databricks costs", author: "other", count: 4 }]);
+    expect(t).toContain("suppressed because the owner did not write the document");
+    expect(t).toContain("- d1 Databricks costs [author other]: 4");
+    expect(renderStatus(pipeline, [], [])).not.toContain("suppressed");
+  });
+
   it("renderOrient lists counts and usage guidance", () => {
     const t = renderOrient({
       totalDocuments: 2, documentsByKind: [{ kind: "news", count: 2 }], nodesByType: [{ type: "person", count: 3 }],

@@ -1,0 +1,102 @@
+import type { Ctx } from "../ctx.js";
+import type { Db } from "../db.js";
+import { UUID } from "../retrieve/documents.js";
+import { refreshMirror } from "../obsidian/auto.js";
+import { runResolve } from "./stages/resolve.js";
+import { withDocumentLock } from "./lock.js";
+import { AUTHORS, isAuthor, type Author } from "./author.js";
+
+export interface SetAuthorResult {
+  documentId: string;
+  previous: Author;
+  author: Author;
+  /** False when the document has not reached the resolve stage; the new author then applies when it does. */
+  reresolved: boolean;
+  /** Facts the document produced before and no longer produces. */
+  removedFacts: { id: string; predicate: string; objectText: string }[];
+  removedEdges: { type: string; fromName: string; toName: string }[];
+  /** Facts from this document the owner verified; undo never deletes them. */
+  keptVerified: { id: string; predicate: string; objectText: string }[];
+  /** Facts a removed fact had superseded that are current again. */
+  restoredFacts: string[];
+  suppressedSelfItems: number;
+}
+
+const RESOLVED_STAGES = new Set(["resolved", "done"]);
+
+/**
+ * Changes who wrote a document and, if it has been resolved, re-runs resolution so facts about the owner and
+ * edges from the owner follow the new author (spec §4.1). A document that has not reached the resolve stage
+ * only gets the new author; the pipeline's resolve stage applies the gate when it gets there. Holds the same
+ * per-document advisory lock as runPipeline, so it never interleaves with a run on the same document.
+ * Notifies the Obsidian mirror; the CLI flushes it on exit.
+ */
+export async function setAuthor(ctx: Ctx, documentId: string, author: Author): Promise<SetAuthorResult> {
+  if (!isAuthor(author)) throw new Error(`author must be one of ${AUTHORS.join(", ")}; got "${String(author)}"`);
+  if (!UUID.test(documentId)) throw new Error(`Document ${documentId} not found`);
+  const r = await withDocumentLock(ctx.sql, documentId, () => setAuthorLocked(ctx, documentId, author));
+  if (!r.locked) throw new Error(`document ${documentId} is being processed; try again in a moment`);
+  refreshMirror(ctx);
+  return r.value;
+}
+
+async function setAuthorLocked(ctx: Ctx, documentId: string, author: Author): Promise<SetAuthorResult> {
+  const [doc] = await ctx.sql<{ author: Author; stage: string | null }[]>`
+    select d.author, j.stage from brain.documents d left join brain.ingest_jobs j on j.document_id = d.id
+    where d.id = ${documentId}`;
+  if (!doc) throw new Error(`Document ${documentId} not found`);
+  await ctx.sql`update brain.documents set author = ${author} where id = ${documentId}`;
+  const result: SetAuthorResult = {
+    documentId, previous: doc.author, author, reresolved: false,
+    removedFacts: [], removedEdges: [], keptVerified: [], restoredFacts: [], suppressedSelfItems: 0,
+  };
+  if (!doc.stage || !RESOLVED_STAGES.has(doc.stage)) return result;
+
+  const report = await runResolve(ctx, documentId, { by: "set-author" });
+  const now = await producedBy(ctx.sql, documentId);
+  result.reresolved = true;
+  result.removedFacts = report.undone.facts.filter(
+    (f) => !now.facts.some((g) => g.predicate === f.predicate && g.objectText === f.objectText),
+  );
+  result.removedEdges = report.undone.edges
+    .filter((e) => !now.edges.some((g) => g.type === e.type && g.fromName === e.fromName && g.toName === e.toName))
+    .map(({ type, fromName, toName }) => ({ type, fromName, toName }));
+  result.keptVerified = report.undone.keptVerified;
+  result.restoredFacts = report.undone.restored.length
+    ? (await ctx.sql<{ id: string }[]>`
+        select id from brain.facts where id = any(${report.undone.restored}::uuid[]) and superseded_by is null`).map((r) => r.id)
+    : [];
+  result.suppressedSelfItems = report.suppressedSelfItems;
+  return result;
+}
+
+async function producedBy(sql: Db, documentId: string) {
+  const facts = await sql<{ predicate: string; objectText: string }[]>`
+    select f.predicate, f.object_text as "objectText"
+    from brain.facts f join brain.chunks c on c.id = f.source_chunk_id
+    where c.document_id = ${documentId}`;
+  const edges = await sql<{ type: string; fromName: string; toName: string }[]>`
+    select e.type, fn.name as "fromName", tn.name as "toName"
+    from brain.edges e join brain.chunks c on c.id = e.evidence_chunk_id
+    join brain.nodes fn on fn.id = e.from_node join brain.nodes tn on tn.id = e.to_node
+    where c.document_id = ${documentId}`;
+  return { facts, edges };
+}
+
+export interface SuppressedDocument {
+  documentId: string;
+  title: string | null;
+  author: string;
+  count: number;
+}
+
+/** Documents whose facts about the owner or relations from the owner were suppressed, largest count first. */
+export async function suppressedDocuments(sql: Db, limit = 20): Promise<SuppressedDocument[]> {
+  const rows = await sql<SuppressedDocument[]>`
+    select id as "documentId", title, author, (metadata->>'suppressed_self_items')::int as "count"
+    from brain.documents
+    where (metadata->>'suppressed_self_items')::int > 0
+    order by "count" desc, ingested_at desc
+    limit ${limit}`;
+  return [...rows];
+}

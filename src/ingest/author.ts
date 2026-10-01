@@ -26,3 +26,12 @@ export function defaultAuthor(sourceKind: string): Author {
   const map: Readonly<Record<string, Author>> = config.authorDefaults;
   return Object.hasOwn(map, sourceKind) ? map[sourceKind] : "unknown";
 }
+
+/**
+ * Storing is idempotent on content, so re-saving known text keeps the author already stored. When the caller
+ * asked for a different author, the note to show them; null otherwise.
+ */
+export function keptAuthorNote(documentId: string, stored: Author, requested: Author | undefined): string | null {
+  if (requested === undefined || requested === stored) return null;
+  return `author stays ${stored}; use \`brain set-author ${documentId} ${requested}\` to change it`;
+}

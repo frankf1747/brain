@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Ctx } from "../ctx.js";
 import { storeDocument } from "../ingest/store.js";
-import { AUTHORS } from "../ingest/author.js";
+import { AUTHORS, keptAuthorNote } from "../ingest/author.js";
+import { suppressedDocuments } from "../ingest/set-author.js";
 import { runPipeline, stageCounts } from "../ingest/pipeline.js";
 import { search } from "../retrieve/search.js";
 import { orient } from "../retrieve/orient.js";
@@ -138,12 +139,12 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
 
   register(
     "brain_status",
-    { title: "Ingestion status", description: "Pipeline stage counts, failures, and documents still processing in this server.", inputSchema: {} },
+    { title: "Ingestion status", description: "Pipeline stage counts, failures, documents still processing in this server, and documents whose facts about the owner were suppressed because someone else wrote them.", inputSchema: {} },
     async () => {
       try {
         const failures = await ctx.sql<{ document_id: string; stage: string; error: string }[]>`
           select document_id, stage, error from brain.ingest_jobs where error is not null order by updated_at desc limit 10`;
-        return text(renderStatus(await stageCounts(ctx), jobs.pending, failures));
+        return text(renderStatus(await stageCounts(ctx), jobs.pending, failures, await suppressedDocuments(ctx.sql)));
       } catch (e) { return fail(e); }
     },
   );
@@ -168,14 +169,16 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
     async (a) => {
       try {
-        const { id, created } = await storeDocument(ctx.sql, {
+        const { id, created, author } = await storeDocument(ctx.sql, {
           text: a.text, title: a.title ?? null, sourceKind: a.source_kind ?? "paste", author: a.author, origin: a.origin ?? `mcp:${opts.client}`,
           metadata: { ...(a.metadata ?? {}), saved_by: opts.client }, occurredAt: dateOrUndefined(a.occurred_at) ?? null,
         });
         const first = await runPipeline(ctx, id, { until: "chunked" });
         const saved = created ? "Saved" : "Already present";
+        const kept = created ? null : keptAuthorNote(id, author, a.author);
+        const note = kept ? ` Note: ${kept}.` : "";
         if (first.skipped) {
-          return text(`${saved}: document ${id} (stage ${first.stage}). Processing is already under way in another runner; brain_status shows progress.`);
+          return text(`${saved}: document ${id} (stage ${first.stage}). Processing is already under way in another runner; brain_status shows progress.${note}`);
         }
         if (first.error) return fail(new Error(`Stored as document ${id} but chunking failed: ${first.error}`));
         jobs.start(id);
@@ -186,7 +189,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
           // The document is stored and queued; failing to resume others must not turn this into an error.
           log(`brain: resuming stalled jobs failed: ${e instanceof Error ? e.message : String(e)}`);
         }
-        return text(`${saved}: document ${id} (stage ${first.stage}). Summary, embeddings and extraction continue in the background; brain_status shows progress.${resumed.length ? ` Also resumed ${resumed.length} stalled job(s).` : ""}`);
+        return text(`${saved}: document ${id} (stage ${first.stage}). Summary, embeddings and extraction continue in the background; brain_status shows progress.${resumed.length ? ` Also resumed ${resumed.length} stalled job(s).` : ""}${note}`);
       } catch (e) { return fail(e); }
     },
   );

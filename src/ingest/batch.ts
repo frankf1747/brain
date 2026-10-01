@@ -2,8 +2,9 @@ import type { Ctx } from "../ctx.js";
 import type { ReadResult } from "./readers.js";
 import type { StoreInput } from "./store.js";
 import { ingest, type PipelineResult, type Stage } from "./pipeline.js";
+import { keptAuthorNote, type Author } from "./author.js";
 
-export type IngestOutcome = PipelineResult & { created: boolean; id: string };
+export type IngestOutcome = PipelineResult & { created: boolean; id: string; author: Author };
 
 export interface IngestAllOptions {
   until?: Stage;
@@ -19,6 +20,15 @@ export interface IngestLog {
 /** Default skip line: `skip  <origin>: <message>` on stderr. */
 export function logSkip(r: ReadResult, message: string): void {
   process.stderr.write(`skip  ${r.origin}: ${message}\n`);
+}
+
+/**
+ * The CLI's line for one ingested item: `new ` or `dup `, id, stage, any error, origin, and for known text
+ * stored under another author than `requested`, a note that the stored author stays.
+ */
+export function ingestLine(r: ReadResult, res: IngestOutcome, requested: Author | undefined): string {
+  const note = res.created ? null : keptAuthorNote(res.id, res.author, requested);
+  return `${res.created ? "new " : "dup "} ${res.id} ${res.stage.padEnd(10)} ${res.error ? "ERROR " + res.error + " " : ""}${r.origin}${note ? ` (${note})` : ""}`;
 }
 
 const defaultInput = (r: ReadResult): StoreInput => ({ text: r.text, title: r.title, origin: r.origin, mimeType: r.mimeType, metadata: r.metadata });

@@ -3,7 +3,7 @@ import { makeCtx, type Ctx } from "./ctx.js";
 import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
 import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
-import { ingestAll, logSkip } from "./ingest/batch.js";
+import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
@@ -74,7 +74,7 @@ program
           }),
         },
         {
-          done: (r, res) => console.log(`${res.created ? "new " : "dup "} ${res.id} ${res.stage.padEnd(10)} ${res.error ? "ERROR " + res.error + " " : ""}${r.origin}`),
+          done: (r, res) => console.log(ingestLine(r, res, author)),
           skip: logSkip,
         },
       );
@@ -84,13 +84,19 @@ program
 
 program
   .command("status")
-  .description("Pipeline stage counts and failures")
+  .description("Pipeline stage counts, failures, and documents whose items about the owner were suppressed")
   .action(async () => {
+    const { suppressedDocuments } = await import("./ingest/set-author.js");
     await withCtx(async (ctx) => {
       for (const s of await stageCounts(ctx)) console.log(`${s.stage.padEnd(10)} ${String(s.count).padStart(6)} ${s.failed ? `(${s.failed} failed)` : ""}`);
       const failed = await ctx.sql<{ document_id: string; stage: string; error: string; attempts: number }[]>`
         select document_id, stage, error, attempts from brain.ingest_jobs where error is not null order by updated_at desc limit 20`;
       for (const f of failed) console.log(`  ${f.document_id} at ${f.stage} (${f.attempts} attempts): ${f.error}`);
+      const suppressed = await suppressedDocuments(ctx.sql);
+      if (suppressed.length) {
+        console.log("suppressed facts/relations about the owner (the owner did not write the document):");
+        for (const s of suppressed) console.log(`  ${s.documentId} ${String(s.count).padStart(3)}  ${s.title ?? "(untitled)"} [${s.author}]`);
+      }
     });
   });
 
@@ -198,6 +204,24 @@ program
       const ok = await verifyFact(ctx.sql, id, "frank");
       if (ok) refreshMirror(ctx); // written when withCtx closes the projector
       console.log(ok ? "verified" : "no such fact");
+    });
+  });
+
+program
+  .command("set-author <documentId> <author>")
+  .description("Change who wrote a document (owner, other, unknown) and redo the facts and relationships it produced")
+  .action(async (documentId: string, authorArg: string) => {
+    const { setAuthor } = await import("./ingest/set-author.js");
+    const author = parseAuthor(authorArg);
+    await withCtx(async (ctx) => {
+      const r = await setAuthor(ctx, documentId, author);
+      console.log(`${r.documentId}: author ${r.previous} -> ${r.author}`);
+      if (!r.reresolved) return void console.log("  not resolved yet; the new author applies when ingestion reaches the resolve stage");
+      for (const f of r.removedFacts) console.log(`  removed fact  ${f.predicate}: ${f.objectText}`);
+      for (const e of r.removedEdges) console.log(`  removed edge  ${e.fromName} -${e.type}-> ${e.toName}`);
+      for (const f of r.keptVerified) console.log(`  kept fact     ${f.predicate}: ${f.objectText} (you verified it; id ${f.id})`);
+      for (const id of r.restoredFacts) console.log(`  restored fact ${id} (it had been superseded by a removed fact)`);
+      console.log(`  ${r.removedFacts.length} facts and ${r.removedEdges.length} edges removed; ${r.suppressedSelfItems} items about the owner suppressed`);
     });
   });
 

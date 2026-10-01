@@ -35,7 +35,7 @@ describe("storeDocument", () => {
     const [row] = await sql<{ id: string }[]>`
       insert into brain.documents (content_hash, source_kind, raw_content) values (${sha256Hex(text)}, 'paste', ${text}) returning id`;
     const res = await storeDocument(sql, { text });
-    expect(res).toEqual({ id: row.id, created: false });
+    expect(res).toEqual({ id: row.id, created: false, author: "unknown" }); // the column default for a raw insert
     const jobs = await sql<{ stage: string }[]>`select stage from brain.ingest_jobs where document_id = ${row.id}`;
     expect(jobs.map((j) => j.stage)).toEqual(["stored"]);
   });
