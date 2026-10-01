@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { kindFromFilename, toQuestionResult, firstExpectedRank } from "../../src/eval/run.js";
+import { kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning } from "../../src/eval/run.js";
 import type { GoldenItem } from "../../src/eval/golden.js";
 import type { SearchResult } from "../../src/retrieve/search.js";
 
@@ -59,5 +59,26 @@ describe("toQuestionResult", () => {
   it("reads the source kind from the file name prefix", () => {
     expect(kindFromFilename("news--acme-series-b.md")).toBe("news");
     expect(kindFromFilename("plain.md")).toBe("note");
+  });
+});
+
+describe("normalizeWhitespace", () => {
+  it("collapses ASCII whitespace runs only, matching the SQL class, so an NBSP is kept", () => {
+    expect(normalizeWhitespace("a \t\r\n\f\vb")).toBe("a b");
+    expect(normalizeWhitespace("a\u00a0b")).toBe("a\u00a0b");
+    expect(normalizeWhitespace("a \u00a0 b")).toBe("a \u00a0 b");
+  });
+  it("an NBSP in a quote does not match a plain space in a passage", () => {
+    const nbsp: GoldenItem = { ...item, expected: [{ origin: "note--fairness-in-ml.md", quote: "cannot\u00a0satisfy" }] };
+    const res = searchResult([{ documentId: "d2", group: "hybrid", content: "you cannot satisfy all three", score: 0.4 }]);
+    expect(toQuestionResult(nbsp, res, new Map([["d2", "/c/note--fairness-in-ml.md"]]), 1, [], 1, []).ranked[0].containsQuote).toBe(false);
+  });
+});
+
+describe("missingQuoteWarning", () => {
+  it("warns when an item has quotes but no passage of its expected documents contains one", () => {
+    expect(missingQuoteWarning(item, 0)).toBe("eval: q05 quote not found in any passage of its expected documents");
+    expect(missingQuoteWarning(item, 2)).toBeNull();
+    expect(missingQuoteWarning({ ...item, expected: [{ origin: "a.md" }] }, 0)).toBeNull();
   });
 });

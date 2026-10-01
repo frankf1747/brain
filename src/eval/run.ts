@@ -21,13 +21,29 @@ export function firstExpectedRank(q: QuestionResult): number | null {
   return m === 0 ? null : Math.round(1 / m);
 }
 
-/** Collapses whitespace runs to one space; applied to quotes and passages alike (and in countRelevantPassages' SQL). */
+/**
+ * ASCII whitespace only (space, tab, CR, LF, FF, VT), written with the literal characters so the same
+ * pattern means the same thing in JS and in Postgres. JS \s is Unicode (it includes NBSP) while Postgres
+ * \s depends on the locale, so neither is used.
+ */
+const WHITESPACE_RUN = "[ \t\r\n\f\v]+";
+const WHITESPACE_RUN_RE = new RegExp(WHITESPACE_RUN, "g");
+
+/** Collapses ASCII whitespace runs to one space; applied to quotes and passages alike (and in countRelevantPassages' SQL). */
 export function normalizeWhitespace(s: string): string {
-  return s.replace(/\s+/g, " ");
+  return s.replace(WHITESPACE_RUN_RE, " ");
 }
 
 function quotesOf(expected: Expected[]): string[] {
-  return expected.map((e) => e.quote).filter((q): q is string => !!q).map((q) => normalizeWhitespace(q).trim()).filter(Boolean);
+  // After collapsing, at most one ASCII space remains at either end; String.trim would also strip NBSP.
+  return expected.map((e) => e.quote).filter((q): q is string => !!q).map((q) => normalizeWhitespace(q).replace(/^ | $/g, "")).filter(Boolean);
+}
+
+/** A golden item whose quotes appear in no passage of its expected documents is almost always a typo. */
+export function missingQuoteWarning(item: GoldenItem, totalRelevant: number): string | null {
+  return quotesOf(item.expected).length > 0 && totalRelevant === 0
+    ? `eval: ${item.id} quote not found in any passage of its expected documents`
+    : null;
 }
 
 /**
@@ -88,7 +104,7 @@ export async function countRelevantPassages(sql: Db, expected: Expected[]): Prom
            or exists (select 1 from unnest(${origins}::text[]) o
                       where d.origin = o or right(d.origin, length(o) + 1) = '/' || o))
       and exists (select 1 from unnest(${quotes}::text[]) q
-                  where strpos(regexp_replace(c.content, '\\s+', ' ', 'g'), q) > 0)`;
+                  where strpos(regexp_replace(c.content, ${WHITESPACE_RUN}, ' ', 'g'), q) > 0)`;
   return row.n;
 }
 
@@ -124,6 +140,8 @@ export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
     const origins = await originsFor(ctx, [main.res, ...paras]);
     const paraphraseRanked: RankedDoc[][] = paras.map((r) => r.passages.map((p) => ({ documentId: p.documentId, origin: origins.get(p.documentId) ?? null, containsQuote: false })));
     const totalRelevant = await countRelevantPassages(ctx.sql, g.expected);
+    const warning = missingQuoteWarning(g, totalRelevant);
+    if (warning) console.error(warning);
     results.push(toQuestionResult(g, main.res, origins, main.ms, paraphraseRanked, totalRelevant, paras.map((r) => r.degraded)));
   }
   const ranks: Record<string, number | null> = {};

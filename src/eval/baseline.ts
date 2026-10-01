@@ -112,6 +112,16 @@ export function gate(c: Comparison): string[] {
   return failures;
 }
 
+/**
+ * The gate's verdict for a run: with --gate, a missing baseline fails (there is nothing to protect against
+ * regressions) unless this run records one with --accept; without --gate nothing fails.
+ */
+export function gateFailures(c: Comparison | null, opts: { gate: boolean; accept: boolean; baselinePath: string }): string[] {
+  if (!opts.gate) return [];
+  if (c) return gate(c);
+  return opts.accept ? [] : [`no baseline at ${opts.baselinePath}; record one with \`eval run --accept\``];
+}
+
 /** Returns null when the file does not exist; throws "malformed baseline" when it is not a valid Baseline. */
 export async function loadBaseline(path: string): Promise<Baseline | null> {
   let text: string;

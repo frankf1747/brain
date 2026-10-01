@@ -225,7 +225,7 @@ evalCmd
   .action(async (opts) => {
     const { makeEvalCtx } = await import("./eval/db.js");
     const { runEval } = await import("./eval/run.js");
-    const { compare, gate, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
+    const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { execSync } = await import("node:child_process");
     const ctx = makeEvalCtx();
@@ -234,7 +234,7 @@ evalCmd
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
-      const failures = comparison && opts.gate ? gate(comparison) : [];
+      const failures = gateFailures(comparison, { gate: !!opts.gate, accept: !!opts.accept, baselinePath: opts.baseline });
       if (opts.json) {
         console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
       } else {
@@ -262,6 +262,7 @@ evalCmd
           for (const f of failures) console.log(`  GATE: ${f}`);
         } else if (opts.compare || opts.gate) {
           console.log("\nno baseline yet; run with --accept to record one");
+          for (const f of failures) console.log(`  GATE: ${f}`);
         }
       }
       if (failures.length) process.exitCode = 1;

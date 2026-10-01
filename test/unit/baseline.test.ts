@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compare, gate, loadBaseline, saveBaseline, type Baseline } from "../../src/eval/baseline.js";
+import { compare, gate, gateFailures, loadBaseline, saveBaseline, type Baseline } from "../../src/eval/baseline.js";
 import type { Report } from "../../src/eval/metrics.js";
 
 function report(overrides: Partial<Report["overall"]> = {}, extra: Partial<Report> = {}): Report {
@@ -84,5 +84,21 @@ describe("loadBaseline", () => {
     await expect(loadBaseline(p)).rejects.toThrow(/malformed baseline.*goldenIds/);
     await writeFile(p, "{not json");
     await expect(loadBaseline(p)).rejects.toThrow(/malformed baseline/);
+  });
+});
+
+describe("gateFailures", () => {
+  const opts = { gate: true, accept: false, baselinePath: "eval/baseline.json" };
+  it("fails the gate when there is no baseline to compare against", () => {
+    expect(gateFailures(null, opts)).toEqual(["no baseline at eval/baseline.json; record one with `eval run --accept`"]);
+  });
+  it("does not fail without --gate, or when this run records the baseline with --accept", () => {
+    expect(gateFailures(null, { ...opts, gate: false })).toEqual([]);
+    expect(gateFailures(null, { ...opts, accept: true })).toEqual([]);
+  });
+  it("runs the gate on a comparison only with --gate", () => {
+    const c = compare(base, report({ recallAt10: 0.9 }), base.ranks, ids);
+    expect(gateFailures(c, opts)).toEqual(gate(c));
+    expect(gateFailures(c, { ...opts, gate: false })).toEqual([]);
   });
 });

@@ -26,6 +26,10 @@ describe("countRelevantPassages", () => {
     await doc("/corpus/xnote--a.md", ["the quote is here"]);
     expect(await countRelevantPassages(sql, [{ origin: "note--a.md", quote: "the quote is" }])).toBe(2);
   });
+  it("collapses ASCII whitespace but not NBSP, like the TS side", async () => {
+    await doc("/corpus/c.md", ["the\tquote\r\nis here", "the\u00a0quote is here"]);
+    expect(await countRelevantPassages(sql, [{ origin: "c.md", quote: "the quote is" }])).toBe(1);
+  });
   it("matches by document id and returns 0 without quotes", async () => {
     const id = await doc("/corpus/b.md", ["alpha beta", "beta gamma"]);
     expect(await countRelevantPassages(sql, [{ document_id: id, quote: "beta" }])).toBe(2);
