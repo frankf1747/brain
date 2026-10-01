@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { makeCtx, type Ctx } from "./ctx.js";
+import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
 import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
 import { ingestAll, logSkip } from "./ingest/batch.js";
@@ -196,22 +197,76 @@ program
     });
   });
 
-program
-  .command("eval")
-  .description("Run the golden set and report recall@10 and MRR")
+const evalCmd = program.command("eval").description("Retrieval eval against the brain_eval database (never the real one)");
+
+evalCmd
+  .command("ingest [dir]")
+  .description("Ingest a corpus directory into the eval database (default eval/corpus)")
+  .action(async (dir: string | undefined) => {
+    const { makeEvalCtx, EVAL_DATABASE_URL } = await import("./eval/db.js");
+    const { ingestCorpus } = await import("./eval/run.js");
+    const ctx = makeEvalCtx();
+    try {
+      if ((await ingestCorpus(ctx, dir ?? "eval/corpus", EVAL_DATABASE_URL)) > 0) process.exitCode = 1;
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
+evalCmd
+  .command("run")
+  .description("Run the golden set and report metrics; --compare shows deltas against eval/baseline.json")
   .option("--golden <path>", "golden set file", "eval/golden.jsonl")
-  .option("--ingest <dir>", "ingest this corpus directory first")
+  .option("--baseline <path>", "baseline file", "eval/baseline.json")
+  .option("--compare", "compare against the baseline")
+  .option("--gate", "exit 1 when the comparison fails the gate (implies --compare)")
+  .option("--accept", "overwrite the baseline with this run")
   .option("--json")
   .action(async (opts) => {
-    const { runEval, ingestCorpus } = await import("./eval/run.js");
-    await withCtx(async (ctx) => {
-      if (opts.ingest && (await ingestCorpus(ctx, opts.ingest)) > 0) process.exitCode = 1;
-      const { scored, summary } = await runEval(ctx, opts.golden);
-      if (opts.json) return void console.log(JSON.stringify({ scored, summary }, null, 2));
-      for (const s of scored) console.log(`${s.rank === null ? "MISS" : `#${String(s.rank).padStart(2)}`}  ${s.needs.padEnd(9)} ${s.question}`);
-      console.log(`\noverall  recall@10=${summary.overall.recallAt10.toFixed(2)}  mrr=${summary.overall.mrr.toFixed(2)}  n=${summary.overall.n}`);
-      for (const [needs, m] of Object.entries(summary.byNeeds)) console.log(`${needs.padEnd(9)} recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}  n=${m.n}`);
-    });
+    const { makeEvalCtx, EVAL_DATABASE_URL } = await import("./eval/db.js");
+    const { runEval } = await import("./eval/run.js");
+    const { compare, gate, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
+    const { execSync } = await import("node:child_process");
+    const ctx = makeEvalCtx();
+    try {
+      const run = await runEval(ctx, opts.golden, EVAL_DATABASE_URL);
+      const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
+      const comparison = base ? compare(base, run.report, run.ranks) : null;
+      const failures = comparison && opts.gate ? gate(comparison) : [];
+      if (opts.json) {
+        console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
+      } else {
+        for (const r of run.results) {
+          const rank = run.ranks[r.id];
+          const tag = r.negative ? (r.topScore !== null && r.topScore >= config.retrieval.fallbackThreshold ? "FALSE" : "abst.") : rank === null ? "MISS" : `#${String(rank).padStart(2)}`;
+          console.log(`${tag.padEnd(5)} ${r.kind.padEnd(11)} ${r.degraded ? "DEGRADED " : ""}${r.id}  ${r.ranked.length ? "" : "(no passages) "}${r.totalMs}ms`);
+        }
+        const o = run.report.overall;
+        console.log(`\noverall  n=${o.n}  recall@1=${o.recallAt1.toFixed(2)}  recall@5=${o.recallAt5.toFixed(2)}  recall@10=${o.recallAt10.toFixed(2)}  mrr=${o.mrr.toFixed(2)}  ndcg@10=${o.ndcgAt10 === null ? "n/a" : o.ndcgAt10.toFixed(2)}`);
+        for (const [kind, m] of Object.entries(run.report.byKind)) console.log(`${kind.padEnd(11)} n=${m.n}  recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}`);
+        const ng = run.report.negatives;
+        if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
+        if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}`);
+        console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
+        if (comparison) {
+          const d = comparison.deltas;
+          console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);
+          for (const r of comparison.regressions) console.log(`  worse   ${r.id}: ${r.before ?? "miss"} -> ${r.after ?? "miss"}`);
+          for (const r of comparison.improvements) console.log(`  better  ${r.id}: ${r.before ?? "miss"} -> ${r.after ?? "miss"}`);
+          for (const f of failures) console.log(`  GATE: ${f}`);
+        } else if (opts.compare || opts.gate) {
+          console.log("\nno baseline yet; run with --accept to record one");
+        }
+      }
+      if (failures.length) process.exitCode = 1;
+      if (opts.accept) {
+        const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+        await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, report: run.report, ranks: run.ranks });
+        console.log(`baseline written to ${opts.baseline} at ${commit}`);
+      }
+    } finally {
+      await ctx.sql.end();
+    }
   });
 
 program
