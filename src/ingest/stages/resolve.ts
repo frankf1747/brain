@@ -201,57 +201,111 @@ export interface UndoReport {
   facts: { id: string; predicate: string; objectText: string }[];
   /** Facts from the document the owner verified; never deleted. */
   keptVerified: { id: string; predicate: string; objectText: string }[];
+  /**
+   * Unverified facts from the document that the owner replaced (their supersession chain ends at a fact the
+   * owner verified or wrote, such as a supersedeFact correction). Kept as the history of that correction, so
+   * re-resolving hits the dedupe index instead of bringing the old value back as current.
+   */
+  keptCorrected: { id: string; predicate: string; objectText: string }[];
   edges: { id: string; type: string; fromName: string; toName: string }[];
   mentions: number;
   /** Facts that a deleted fact had superseded and that are current again. */
   restored: string[];
 }
 
+/** A fact the owner stands behind: verified, or written by someone other than the extractor. */
+function ownerHeld(f: { verified: boolean; verified_by: string | null }): boolean {
+  return f.verified || !(f.verified_by ?? "").startsWith("extractor:");
+}
+
+/**
+ * Follows superseded_by from `start` through the facts in `through` and returns the first fact outside it,
+ * or null when the chain ends or cycles inside it.
+ */
+function chainEnd(start: string | null, through: Set<string>, next: Map<string, string | null>): string | null {
+  let target = start;
+  for (let hops = 0; target !== null && through.has(target) && hops <= through.size; hops++) target = next.get(target) ?? null;
+  return target !== null && through.has(target) ? null : target;
+}
+
+/** previous_valid_to from the fact's latest 'superseded' event naming this superseder, or null. */
+async function previousValidTo(tx: postgres.TransactionSql, factId: string, supersededBy: string): Promise<string | null> {
+  const [last] = await tx<{ previous: string | null }[]>`
+    select detail->>'previous_valid_to' as previous from brain.fact_events
+    where fact_id = ${factId} and event = 'superseded' and detail->>'superseded_by' = ${supersededBy}
+    order by created_at desc, id desc limit 1`;
+  return last?.previous ?? null;
+}
+
 /**
  * Deletes what resolving this document produced so resolution can be applied again (spec §4.3): unverified
  * facts whose source chunk, edges whose evidence chunk, and mentions whose chunk belongs to the document.
- * Nodes are never deleted. A fact that a deleted fact had superseded is re-pointed to the next surviving fact
- * in the deleted fact's chain, or made current again with the valid_to it had before it was superseded
- * (from fact_events). Every removal and restoration is logged to brain.fact_events under `by`.
+ * Nodes are never deleted. Verified facts are kept, and so are facts the owner corrected (keptCorrected).
+ * A fact that a deleted fact had superseded is re-pointed to the next surviving fact in the deleted fact's
+ * chain (logged as a 'superseded' event carrying its previous_valid_to forward), or made current again with
+ * the valid_to it had before it was superseded (from fact_events). Every removal, re-point and restoration
+ * is logged to brain.fact_events under `by`.
  */
 export async function undoResolution(sql: Db, documentId: string, opts: { by?: string } = {}): Promise<UndoReport> {
   const by = opts.by ?? "resolve";
   return sql.begin(async (tx) => {
-    const report: UndoReport = { facts: [], keptVerified: [], edges: [], mentions: 0, restored: [] };
+    const report: UndoReport = { facts: [], keptVerified: [], keptCorrected: [], edges: [], mentions: 0, restored: [] };
     const chunkIds = (await tx<{ id: string }[]>`select id from brain.chunks where document_id = ${documentId}`).map((r) => r.id);
     if (chunkIds.length === 0) return report;
 
-    const produced = await tx<{ id: string; predicate: string; object_text: string; verified: boolean; superseded_by: string | null }[]>`
+    type Row = { id: string; predicate: string; object_text: string; verified: boolean; superseded_by: string | null };
+    const produced = await tx<Row[]>`
       select id, predicate, object_text, verified, superseded_by from brain.facts
       where source_chunk_id = any(${chunkIds}::uuid[])
       order by created_at, id
       for update`;
-    const doomed = produced.filter((f) => !f.verified);
-    report.keptVerified = produced.filter((f) => f.verified).map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text }));
-    report.facts = doomed.map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text }));
+    const view = (f: Row) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text });
+    report.keptVerified = produced.filter((f) => f.verified).map(view);
+
+    // An unverified fact whose chain (through the document's other unverified facts) ends at a fact the owner
+    // holds is the record of an owner correction: keep it.
+    const unverified = produced.filter((f) => !f.verified);
+    const candidates = new Set(unverified.map((f) => f.id));
+    const next = new Map(produced.map((f) => [f.id, f.superseded_by]));
+    const ends = new Map(unverified.map((f) => [f.id, chainEnd(f.superseded_by, candidates, next)]));
+    const endIds = [...new Set([...ends.values()].filter((e): e is string => e !== null))];
+    const held = new Set(
+      (endIds.length
+        ? await tx<{ id: string; verified: boolean; verified_by: string | null }[]>`
+            select id, verified, verified_by from brain.facts where id = any(${endIds}::uuid[])`
+        : []
+      ).filter(ownerHeld).map((f) => f.id),
+    );
+    const isCorrected = (f: Row) => {
+      const end = ends.get(f.id);
+      return end != null && held.has(end);
+    };
+    report.keptCorrected = unverified.filter(isCorrected).map(view);
+    const doomed = unverified.filter((f) => !isCorrected(f));
+    report.facts = doomed.map(view);
 
     if (doomed.length > 0) {
       const doomedIds = doomed.map((f) => f.id);
       const doomedSet = new Set(doomedIds);
-      const next = new Map(doomed.map((f) => [f.id, f.superseded_by]));
       // facts.superseded_by has no ON DELETE action: anything pointing at a doomed fact must move first.
       const referrers = await tx<{ id: string; superseded_by: string }[]>`
         select id, superseded_by from brain.facts
         where superseded_by = any(${doomedIds}::uuid[]) and not (id = any(${doomedIds}::uuid[]))
+        order by created_at, id
         for update`;
       for (const r of referrers) {
-        let target: string | null = r.superseded_by;
-        for (let hops = 0; target !== null && doomedSet.has(target) && hops <= doomedIds.length; hops++) target = next.get(target) ?? null;
-        if (target !== null && doomedSet.has(target)) target = null; // a cycle among doomed facts
+        const target = chainEnd(r.superseded_by, doomedSet, next);
+        const previous = await previousValidTo(tx, r.id, r.superseded_by);
         if (target !== null) {
           await tx`update brain.facts set superseded_by = ${target} where id = ${r.id}`;
+          // A later undo that removes `target` restores this fact from this row.
+          await tx`
+            insert into brain.fact_events (fact_id, event, by, document_id, detail)
+            values (${r.id}, 'superseded', ${by}, ${documentId},
+                    ${tx.json({ superseded_by: target, previous_valid_to: previous } as postgres.JSONValue)})`;
           continue;
         }
-        const [last] = await tx<{ previous: string | null }[]>`
-          select detail->>'previous_valid_to' as previous from brain.fact_events
-          where fact_id = ${r.id} and event = 'superseded' and detail->>'superseded_by' = ${r.superseded_by}
-          order by created_at desc, id desc limit 1`;
-        await tx`update brain.facts set superseded_by = null, valid_to = ${last?.previous ?? null}::date where id = ${r.id}`;
+        await tx`update brain.facts set superseded_by = null, valid_to = ${previous}::date where id = ${r.id}`;
         await tx`
           insert into brain.fact_events (fact_id, event, by, document_id, detail)
           values (${r.id}, 'restored', ${by}, ${documentId}, ${tx.json({ removed_superseder: r.superseded_by } as postgres.JSONValue)})`;
@@ -385,10 +439,18 @@ export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: stri
     for (const f of payload.facts_about_self) {
       const loc = evidenceFor(f.quote);
       const objectNode = f.object_key ? keyToNode.get(f.object_key) ?? null : null;
+      const predicate = normalizePredicate(f.predicate);
+      // A value the owner already verified and holds as current is not stated again (re-chunking moves the
+      // verified fact off this document's chunks, so the dedupe index alone would let a copy in).
       await sql`
         insert into brain.facts (subject_id, predicate, object_text, object_node_id, confidence, source_chunk_id, verified_by, valid_from, valid_to)
-        values (${self.id}, ${normalizePredicate(f.predicate)}, ${f.object_text}, ${objectNode}, ${f.confidence},
-                ${loc?.chunkId ?? ex.section_chunk_id}, ${"extractor:" + ctx.llm.model}, ${dateOrNull(f.valid_from)}, ${dateOrNull(f.valid_to)})
+        select ${self.id}::uuid, ${predicate}::text, ${f.object_text}::text, ${objectNode}::uuid, ${f.confidence}::real,
+               ${loc?.chunkId ?? ex.section_chunk_id}::uuid, ${"extractor:" + ctx.llm.model}::text,
+               ${dateOrNull(f.valid_from)}::date, ${dateOrNull(f.valid_to)}::date
+        where not exists (
+          select 1 from brain.facts v
+          where v.subject_id = ${self.id} and v.predicate = ${predicate} and v.object_text = ${f.object_text}
+            and v.verified and v.superseded_by is null)
         on conflict do nothing`;
     }
   }
