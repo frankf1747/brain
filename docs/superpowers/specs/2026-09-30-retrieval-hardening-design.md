@@ -1,6 +1,6 @@
 # Brain: retrieval hardening, evidence contract and eval program, design
 
-Date: 2026-09-30
+Date: 2026-09-30 (revised 2026-10-01: §3.1 ef_search and exact-score ranks, §3.2 coverage ranking and weights, PG 17.6)
 Status: approved in conversation (sections 1 and 2 reviewed line by line; sections 3 to 7 approved as a package)
 Depends on: the three 2026-09-27 specs (core, MCP server, Obsidian projection). This document changes behaviour they describe; where the two disagree, this one wins.
 Scope: one sub-project in seven phases, each independently shippable. Phase 0 (eval isolation and baseline) comes first so every later phase is measured.
@@ -23,7 +23,7 @@ The design is also meant to be legible to people outside this project: every ret
 |---|---|
 | No model call per query. Ingestion keeps using Claude Code on the owner's Max plan; nothing at query time calls a model. | Citation checking (§6) and all eval metrics (§7) are deterministic. Question drafting for the eval runs through Claude Code at the owner's command, never per search. |
 | Voyage has a payment method now, but spend must be bounded. | §4: a token ledger and a hard daily cap that stops calls rather than exceeding it. |
-| Corpus: short documents, hundreds to low thousands. About 10,000 passages. | Exact vector scans would still be fast at this size. The SQL fix in §3 is done because it is cheap and correct, not because it is urgent. Chunk sizes and the embedding model stay as they are. |
+| Corpus: short documents, hundreds to low thousands. About 10,000 passages. Postgres 17.6 with pgvector 0.8.2. | Exact vector scans would still be fast at this size. The SQL fix in §3 is done because it is cheap and correct, not because it is urgent. Chunk sizes and the embedding model stay as they are. |
 | The MCP tool output is read by a language model. | Structured data is added alongside the text, never instead of it. |
 
 ## 3. Phase 1: retrieval correctness
@@ -36,6 +36,8 @@ Goal: a passage that answers the question reaches the candidate pool, and the po
 
 The candidate pool is `config.retrieval.candidateK`, default 60, applied to both the vector and the keyword branch of both functions (summary search currently gets only k).
 
+As built: the chunk vector branch reads `chunks` alone and applies document filters through an `EXISTS` inside an `OR`, so the filter stays on the HNSW scan node; the planner would not use HNSW with the join in the same query. The vector branch does `ORDER BY distance LIMIT k` in an inner subquery and numbers rows by exact score outside it, because under `relaxed_order` the index's emission order can be slightly wrong and Postgres 17 otherwise numbers rows in that order. `ef_search` is `greatest(4 × candidateK, 100)`.
+
 Verification: an integration test runs `EXPLAIN` on the function body against the test database and fails if a `CTE Scan` appears under the vector sort or the tsvector filter.
 
 ### 3.2 Keyword side
@@ -43,10 +45,11 @@ Verification: an integration test runs `EXPLAIN` on the function body against th
 `websearch_to_tsquery` ANDs every term. It is replaced by a query builder in SQL (`brain.query_to_tsquery(text)`) that:
 
 - keeps quoted phrases as phrase matches (`<->` operators),
-- ORs the remaining stems,
-- drops nothing else; ranking is `ts_rank_cd` with normalisation 32 (rank divided by rank+1) so long passages are not favoured.
+- ORs the remaining stems, dropping unquoted stems shorter than 2 characters (exact strings such as `X-90` are the fallback scan's job, §3.4).
 
-The chunk `tsv` becomes weighted: document title as weight A, heading path as B, content as C. `documents.summary_tsv` adds the title at A. A migration recomputes both for existing rows. The context prefix used for embeddings is unchanged.
+The query is also exposed as its units (`brain.query_units(text) returns tsquery[]`: one per phrase, one per stem). Keyword ranking is, in order: **coverage** (how many distinct units the passage matches), then `ts_rank_cd` with normalisation 1 (divided by 1 + log length, so long passages are not favoured), then id. Coverage comes first because, measured during review, `ts_rank_cd` on an OR query is roughly a weighted count of occurrences: a passage repeating one term six times outranked a passage matching four distinct question terms. (The originally specified normalisation 32 is monotonic and so changes nothing in a rank-only output.)
+
+The chunk `tsv` becomes weighted: content as weight A, heading path as B, context prefix (title, summary line, heading path) as C. Title and summary words still make every passage of the document findable, but content decides the order. (The first version put the context prefix at A; review on `brain_eval` showed the model-written summary line then dominated, and every passage of a document tied.) `documents.summary_tsv` has the title at A and the summary at B. A migration recomputes both for existing rows. The context prefix used for embeddings is unchanged. The context prefix is written by the embed stage, so a document whose embedding failed is keyword-searchable by content only until `brain retry` completes it.
 
 ### 3.3 Entity detection in the query
 
