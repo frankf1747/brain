@@ -49,6 +49,8 @@ describe("setAuthor", () => {
     expect(r).toMatchObject({ documentId: id, previous: "owner", author: "other", reresolved: true, suppressedSelfItems: 4 });
     expect(r.removedFacts.map((f) => f.predicate).sort()).toEqual(["has_experience_with", "recommends", "view_on"]);
     expect(r.removedEdges).toEqual([{ type: "related_to", fromName: "Frank Fu", toName: "Databricks cost governance" }]);
+    expect(r.addedFacts).toEqual([]);
+    expect(r.addedEdges).toEqual([]);
     expect(await selfFacts()).toEqual([]);
     expect(await selfEdges()).toEqual([]);
     const nodes = await sql<{ name: string }[]>`select name from brain.nodes where not is_self order by name`;
@@ -65,6 +67,8 @@ describe("setAuthor", () => {
     await setAuthor(ctx, id, "other");
     const r = await setAuthor(ctx, id, "owner");
     expect(r).toMatchObject({ previous: "other", author: "owner", reresolved: true, suppressedSelfItems: 0, removedFacts: [], removedEdges: [] });
+    expect(r.addedFacts.map((f) => f.predicate).sort()).toEqual(["has_experience_with", "recommends", "view_on"]);
+    expect(r.addedEdges).toEqual([{ type: "related_to", fromName: "Frank Fu", toName: "Databricks cost governance" }]);
     expect(await selfFacts()).toEqual(["has_experience_with", "recommends", "view_on"]);
     const [doc] = await sql<{ n: string | null }[]>`select metadata->>'suppressed_self_items' as n from brain.documents where id = ${id}`;
     expect(doc.n).toBeNull();
@@ -82,6 +86,44 @@ describe("setAuthor", () => {
     expect(await selfEdges()).toEqual([]);
     const [doc] = await sql<{ n: number }[]>`select (metadata->>'suppressed_self_items')::int as n from brain.documents where id = ${id}`;
     expect(doc.n).toBe(4);
+  });
+
+  it("does nothing when the document already has that author", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text: body, sourceKind: "note" });
+    const [before] = await sql<{ n: string }[]>`select count(*)::text as n from brain.fact_events`;
+    let notified = 0;
+    ctx.obsidian = { notify: () => void notified++ } as unknown as ObsidianAutoProjector;
+    const r = await setAuthor(ctx, id, "owner");
+    expect(r).toMatchObject({ documentId: id, previous: "owner", author: "owner", unchanged: true, reresolved: false, removedFacts: [], addedFacts: [] });
+    expect(await selfFacts()).toEqual(["has_experience_with", "recommends", "view_on"]);
+    const [after] = await sql<{ n: string }[]>`select count(*)::text as n from brain.fact_events`;
+    expect(after.n).toBe(before.n); // no undo ran
+    expect(notified).toBe(0);
+  });
+
+  it("leaves the job at extracted with the error when re-resolving fails, so a retry finishes it", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text: body, sourceKind: "note", author: "other" });
+    expect(await selfFacts()).toEqual([]);
+    const working = ctx.embedder;
+    ctx.embedder = { embed: async () => { throw new Error("embedder down"); } } as unknown as typeof ctx.embedder;
+
+    await expect(setAuthor(ctx, id, "owner")).rejects.toThrow(
+      "author changed to owner but re-resolving failed: embedder down; run `brain retry` to finish",
+    );
+    const [job] = await sql<{ stage: string; error: string | null; attempts: number }[]>`
+      select stage, error, attempts from brain.ingest_jobs where document_id = ${id}`;
+    expect(job).toMatchObject({ stage: "extracted", error: "embedder down", attempts: 1 });
+    const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${id}`;
+    expect(doc.author).toBe("owner");
+
+    ctx.embedder = working;
+    expect(await runPipeline(ctx, id)).toMatchObject({ stage: "done", error: null });
+    expect(await selfFacts()).toEqual(["has_experience_with", "recommends", "view_on"]);
+    expect(await selfEdges()).toEqual(["Databricks cost governance"]);
+    const [done] = await sql<{ error: string | null }[]>`select error from brain.ingest_jobs where document_id = ${id}`;
+    expect(done.error).toBeNull();
   });
 
   it("refuses an unknown document and one another runner holds", async () => {
