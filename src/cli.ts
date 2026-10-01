@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
 import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
 import { ingestAll, logSkip } from "./ingest/batch.js";
+import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
 
@@ -46,12 +47,14 @@ program
   .command("ingest <input>")
   .description("Ingest a file, directory, URL, or - for stdin")
   .option("--kind <kind>", "source kind label (note, conversation, news, job_description, ...)", "paste")
+  .option("--author <author>", "who wrote it: owner, other or unknown (default by kind: note, paste, conversation, resume → owner; news, paper, job_description, email → other; else unknown)")
   .option("--title <title>", "override the detected title")
   .option("--occurred-at <date>", "date the content is about (ISO 8601)")
   .option("--meta <k=v...>", "extra metadata pairs")
   .option("--until <stage>", `stop after this stage (${STAGES.join(", ")})`)
   .action(async (input: string, opts) => {
     if (opts.until && !STAGES.includes(opts.until)) throw new Error(`Unknown stage ${opts.until}`);
+    const author = opts.author === undefined ? undefined : parseAuthor(opts.author);
     await withCtx(async (ctx) => {
       const meta = parseMeta(opts.meta);
       const { failed } = await ingestAll(
@@ -63,6 +66,7 @@ program
             text: r.text,
             title: opts.title ?? r.title,
             sourceKind: opts.kind,
+            author,
             origin: r.origin,
             mimeType: r.mimeType,
             metadata: { ...r.metadata, ...meta },

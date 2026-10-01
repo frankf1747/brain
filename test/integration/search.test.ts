@@ -42,6 +42,16 @@ async function seed() {
 }
 
 describe("search", () => {
+  it("reports each passage's document author", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await ingest(ctx, { text: "Lonestar Capital closed a new fund for robotics startups.", sourceKind: "news", title: "Fund news" });
+    await ingest(ctx, { text: "My tomatoes finally ripened this week.", sourceKind: "note", title: "Tomatoes" });
+    const news = (await search(ctx, "Lonestar Capital robotics fund", { includeFacts: false })).passages.find((p) => p.documentTitle === "Fund news")!;
+    expect(news.author).toBe("other");
+    const note = (await search(ctx, "tomatoes ripened", { includeFacts: false })).passages.find((p) => p.documentTitle === "Tomatoes")!;
+    expect(note.author).toBe("owner");
+  });
+
   it("finds a keyword hit, resolves the entity with its neighbors, and loads facts", async () => {
     const ctx = await seed();
     const res = await search(ctx, "What did Zorblax Industries release?");

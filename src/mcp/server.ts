@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Ctx } from "../ctx.js";
 import { storeDocument } from "../ingest/store.js";
+import { AUTHORS } from "../ingest/author.js";
 import { runPipeline, stageCounts } from "../ingest/pipeline.js";
 import { search } from "../retrieve/search.js";
 import { orient } from "../retrieve/orient.js";
@@ -40,7 +41,12 @@ function instructions(readOnly: boolean): string {
     "3. For a named person, organization, or project, call brain_get_node. For the full text of a result, call brain_get_document with its document id.",
     "4. Answer from the returned passages and cite them as [P1], [F1]. If nothing relevant comes back, say so rather than answering from elsewhere, and name any other source you use.",
   ];
-  if (!readOnly) lines.push("To save something, call brain_ingest. Record a fact only when the owner states it about themselves, with brain_add_fact.");
+  if (!readOnly) {
+    lines.push(
+      "To save something, call brain_ingest. Pass author: \"other\" when saving anything the owner did not write (articles, posts, screenshots of other people's posts, emails from others): notes, pastes and conversations default to author owner, and first-person statements in an owner document are recorded as facts about the owner.",
+      "Record a fact only when the owner states it about themselves, with brain_add_fact.",
+    );
+  }
   return lines.join("\n");
 }
 
@@ -148,11 +154,13 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     "brain_ingest",
     {
       title: "Save to the knowledge base",
-      description: "Store any text: a note, a pasted article, a conversation, a job description. Returns immediately after storing and chunking; summary, embeddings and entity extraction continue in the background.",
+      description:
+        "Store any text: a note, a pasted article, a conversation, a job description. Set author to who wrote the text: \"owner\" for the owner's own writing, \"other\" for anything someone else wrote (articles, posts, screenshots of other people's posts, emails from others), \"unknown\" if unsure. Pass author: \"other\" for someone else's writing even when you save it as a note: when author is omitted it defaults by source_kind, and note, paste and conversation default to owner, which would record the writer's first-person statements as facts about the owner. Returns immediately after storing and chunking; summary, embeddings and entity extraction continue in the background.",
       inputSchema: {
         text: z.string().min(1),
         title: z.string().optional(),
         source_kind: z.string().optional().describe("Free label: note, conversation, news, job_description, email, paper, paste"),
+        author: z.enum(AUTHORS).optional().describe("owner (the owner wrote it), other (someone else did), or unknown. Default by source_kind: note, paste, conversation, resume → owner; news, paper, job_description, email → other; anything else → unknown."),
         origin: z.string().optional().describe("URL, file path or other provenance"),
         occurred_at: isoDate.optional().describe("ISO date the content is about, e.g. 2026-09-01"),
         metadata: z.record(z.string(), z.string()).optional(),
@@ -161,7 +169,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     async (a) => {
       try {
         const { id, created } = await storeDocument(ctx.sql, {
-          text: a.text, title: a.title ?? null, sourceKind: a.source_kind ?? "paste", origin: a.origin ?? `mcp:${opts.client}`,
+          text: a.text, title: a.title ?? null, sourceKind: a.source_kind ?? "paste", author: a.author, origin: a.origin ?? `mcp:${opts.client}`,
           metadata: { ...(a.metadata ?? {}), saved_by: opts.client }, occurredAt: dateOrUndefined(a.occurred_at) ?? null,
         });
         const first = await runPipeline(ctx, id, { until: "chunked" });

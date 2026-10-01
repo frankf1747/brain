@@ -33,6 +33,33 @@ async function connect(readOnly = false, llmHandler: (args: { system: string; us
 }
 
 describe("brain MCP server", () => {
+  it("tells clients to pass author other for text the owner did not write", async () => {
+    const s = await connect();
+    const instructions = s.client.getInstructions() ?? "";
+    expect(instructions).toContain('author: "other"');
+    const tools = (await s.client.listTools()).tools;
+    const ingestTool = tools.find((t) => t.name === "brain_ingest")!;
+    expect(ingestTool.description).toContain('author: "other"');
+    await s.close();
+    const ro = await connect(true);
+    expect(ro.client.getInstructions() ?? "").not.toContain("brain_ingest");
+    await ro.close();
+  });
+
+  it("records who wrote a saved document and shows it when reading it", async () => {
+    const s = await connect();
+    const other = await s.call("brain_ingest", { text: "I think Databricks costs too much.", source_kind: "note", author: "other" });
+    const mine = await s.call("brain_ingest", { text: "I moved to Denver last week.", source_kind: "note" });
+    await s.jobs.drain();
+    const otherId = /document ([0-9a-f-]{36})/.exec(other.text)![1];
+    const mineId = /document ([0-9a-f-]{36})/.exec(mine.text)![1];
+    expect((await s.call("brain_get_document", { document_id: otherId })).text).toContain("author: other");
+    expect((await s.call("brain_get_document", { document_id: mineId })).text).toContain("author: owner");
+    const bad = await s.call("brain_ingest", { text: "x", author: "someone" });
+    expect(bad.isError).toBe(true);
+    await s.close();
+  });
+
   it("lists nine tools, or six when read-only", async () => {
     const a = await connect();
     expect((await a.client.listTools()).tools.map((t) => t.name).sort()).toEqual([

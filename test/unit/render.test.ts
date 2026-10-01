@@ -6,8 +6,8 @@ describe("renderSearch", () => {
     const text = renderSearch({
       query: "q",
       passages: [
-        { chunkId: "c1", documentId: "d1", documentTitle: "Doc", sourceKind: "news", content: "Body text", parentContent: null, headingPath: ["H"], charStart: 0, charEnd: 9, score: 0.8, group: "hybrid" },
-        { chunkId: null, documentId: "d2", documentTitle: null, sourceKind: "note", content: "raw hit", parentContent: null, headingPath: [], charStart: 0, charEnd: 7, score: 0, group: "fallback" },
+        { chunkId: "c1", documentId: "d1", documentTitle: "Doc", sourceKind: "news", author: "other", content: "Body text", parentContent: null, headingPath: ["H"], charStart: 0, charEnd: 9, score: 0.8, group: "hybrid" },
+        { chunkId: null, documentId: "d2", documentTitle: null, sourceKind: "note", author: "owner", content: "raw hit", parentContent: null, headingPath: [], charStart: 0, charEnd: 7, score: 0, group: "fallback" },
       ],
       documents: [{ documentId: "d1", title: "Doc", sourceKind: "news", summary: "S", score: 0.1 }],
       entities: [{ id: "n1", type: "organization", name: "Acme", matchedSpan: "acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
@@ -16,8 +16,8 @@ describe("renderSearch", () => {
       topScore: 0.8,
       degraded: false,
     });
-    expect(text).toContain("[P1] hybrid · news · Doc (document d1, chunk c1)");
-    expect(text).toContain("[P2] fallback · note (document d2)");
+    expect(text).toContain("[P1] hybrid · news · author: other · Doc (document d1, chunk c1)");
+    expect(text).toContain("[P2] fallback · note · author: owner (document d2)");
     expect(text).toContain("organization: Acme (node n1) — Austin (place)");
     expect(text).toContain("[F1] visa_status: F-1 (verified)");
     expect(text).toContain("weak match");
@@ -55,8 +55,9 @@ describe("other renderers", () => {
     expect(t).toContain("← applied_to Frank Fu (person, node n0)");
     expect(t).toContain('"I applied"');
   });
-  it("renderDocument shows the slice window", () => {
-    const t = renderDocument({ id: "d1", title: "T", sourceKind: "news", origin: null, occurredAt: null, ingestedAt: new Date(0), summary: null, totalLength: 100, offset: 10, text: "abc" });
+  it("renderDocument shows the author and the slice window", () => {
+    const t = renderDocument({ id: "d1", title: "T", sourceKind: "news", author: "other", origin: null, occurredAt: null, ingestedAt: new Date(0), summary: null, totalLength: 100, offset: 10, text: "abc" });
+    expect(t).toContain("origin: n/a · author: other · about: unknown");
     expect(t).toContain("characters 10–13 of 100");
     expect(t).toContain("abc");
   });
