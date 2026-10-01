@@ -53,7 +53,7 @@ The chunk `tsv` becomes weighted: content as weight A, heading path as B, contex
 
 ### 3.3 Entity detection in the query
 
-`detectEntities` no longer needs capitals. It takes every span of one to three consecutive tokens of the query, canonicalises each the same way node names are canonicalised, and resolves them in one SQL call against `nodes.canonical_name` and `nodes.aliases`. Longer spans win over shorter spans they contain ("Databricks cost governance" beats "Databricks"). Quoted strings are still matched whole. Stopword-only spans are skipped.
+`detectEntities` no longer needs capitals. It takes every span of one to six consecutive tokens of the query (a leading "the" is allowed on spans of two or more tokens), canonicalises each the same way node names are canonicalised, and resolves them in one SQL call against `nodes.canonical_name` and `nodes.aliases`. Longer spans win over shorter spans they contain ("Databricks cost governance" beats "Databricks"). Quoted strings are still matched whole. Spans starting or ending with a stopword are skipped. At most 5 entities are kept per query, longest span first. Aliases are stored canonical at resolve time, so the lookup is an index lookup on `canonical_name` and the GIN index on `aliases`.
 
 ### 3.4 Fallback scan
 
