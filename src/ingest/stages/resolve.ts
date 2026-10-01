@@ -196,7 +196,90 @@ async function resolveEntity(
   return canonicalId(sql, created.id);
 }
 
+export interface UndoReport {
+  /** Facts deleted (unverified facts whose source chunk is in the document). */
+  facts: { id: string; predicate: string; objectText: string }[];
+  /** Facts from the document the owner verified; never deleted. */
+  keptVerified: { id: string; predicate: string; objectText: string }[];
+  edges: { id: string; type: string; fromName: string; toName: string }[];
+  mentions: number;
+  /** Facts that a deleted fact had superseded and that are current again. */
+  restored: string[];
+}
+
+/**
+ * Deletes what resolving this document produced so resolution can be applied again (spec §4.3): unverified
+ * facts whose source chunk, edges whose evidence chunk, and mentions whose chunk belongs to the document.
+ * Nodes are never deleted. A fact that a deleted fact had superseded is re-pointed to the next surviving fact
+ * in the deleted fact's chain, or made current again with the valid_to it had before it was superseded
+ * (from fact_events). Every removal and restoration is logged to brain.fact_events under `by`.
+ */
+export async function undoResolution(sql: Db, documentId: string, opts: { by?: string } = {}): Promise<UndoReport> {
+  const by = opts.by ?? "resolve";
+  return sql.begin(async (tx) => {
+    const report: UndoReport = { facts: [], keptVerified: [], edges: [], mentions: 0, restored: [] };
+    const chunkIds = (await tx<{ id: string }[]>`select id from brain.chunks where document_id = ${documentId}`).map((r) => r.id);
+    if (chunkIds.length === 0) return report;
+
+    const produced = await tx<{ id: string; predicate: string; object_text: string; verified: boolean; superseded_by: string | null }[]>`
+      select id, predicate, object_text, verified, superseded_by from brain.facts
+      where source_chunk_id = any(${chunkIds}::uuid[])
+      order by created_at, id
+      for update`;
+    const doomed = produced.filter((f) => !f.verified);
+    report.keptVerified = produced.filter((f) => f.verified).map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text }));
+    report.facts = doomed.map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text }));
+
+    if (doomed.length > 0) {
+      const doomedIds = doomed.map((f) => f.id);
+      const doomedSet = new Set(doomedIds);
+      const next = new Map(doomed.map((f) => [f.id, f.superseded_by]));
+      // facts.superseded_by has no ON DELETE action: anything pointing at a doomed fact must move first.
+      const referrers = await tx<{ id: string; superseded_by: string }[]>`
+        select id, superseded_by from brain.facts
+        where superseded_by = any(${doomedIds}::uuid[]) and not (id = any(${doomedIds}::uuid[]))
+        for update`;
+      for (const r of referrers) {
+        let target: string | null = r.superseded_by;
+        for (let hops = 0; target !== null && doomedSet.has(target) && hops <= doomedIds.length; hops++) target = next.get(target) ?? null;
+        if (target !== null && doomedSet.has(target)) target = null; // a cycle among doomed facts
+        if (target !== null) {
+          await tx`update brain.facts set superseded_by = ${target} where id = ${r.id}`;
+          continue;
+        }
+        const [last] = await tx<{ previous: string | null }[]>`
+          select detail->>'previous_valid_to' as previous from brain.fact_events
+          where fact_id = ${r.id} and event = 'superseded' and detail->>'superseded_by' = ${r.superseded_by}
+          order by created_at desc, id desc limit 1`;
+        await tx`update brain.facts set superseded_by = null, valid_to = ${last?.previous ?? null}::date where id = ${r.id}`;
+        await tx`
+          insert into brain.fact_events (fact_id, event, by, document_id, detail)
+          values (${r.id}, 'restored', ${by}, ${documentId}, ${tx.json({ removed_superseder: r.superseded_by } as postgres.JSONValue)})`;
+        report.restored.push(r.id);
+      }
+      await tx`
+        insert into brain.fact_events (fact_id, event, by, document_id, detail)
+        select f.id, 'removed', ${by}, ${documentId}, jsonb_build_object('predicate', f.predicate, 'object_text', f.object_text)
+        from brain.facts f where f.id = any(${doomedIds}::uuid[])
+        order by f.created_at, f.id`;
+      await tx`delete from brain.facts where id = any(${doomedIds}::uuid[])`;
+    }
+
+    const edges = await tx<{ id: string; type: string; fromName: string; toName: string }[]>`
+      delete from brain.edges e
+      using brain.nodes fn, brain.nodes tn
+      where e.evidence_chunk_id = any(${chunkIds}::uuid[]) and fn.id = e.from_node and tn.id = e.to_node
+      returning e.id, e.type, fn.name as "fromName", tn.name as "toName"`;
+    report.edges = [...edges];
+    const mentions = await tx`delete from brain.mentions where chunk_id = any(${chunkIds}::uuid[])`;
+    report.mentions = mentions.count;
+    return report;
+  });
+}
+
 export interface ResolveReport {
+  /** What the previous resolution of this document produced and this run removed before re-applying. */
+  undone: UndoReport;
   /**
    * Facts about the owner plus relations from the owner that the extractor returned for a document the
    * owner did not write. They stay in brain.extractions.payload and are not written.
@@ -213,11 +296,15 @@ async function recordSuppressed(sql: Db, documentId: string, n: number): Promise
   }
 }
 
-/** Stage 6. Turns stored extractions into nodes, edges, mentions and facts. Safe to re-run. */
-export async function runResolve(ctx: Ctx, documentId: string): Promise<ResolveReport> {
+/**
+ * Stage 6. Turns stored extractions into nodes, edges, mentions and facts. Re-running it first undoes the
+ * document's previous resolution (undoResolution), so a changed author or payload never leaves stale rows.
+ */
+export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: string } = {}): Promise<ResolveReport> {
   const { sql, embedder } = ctx;
   const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${documentId}`;
   if (!doc) throw new Error(`Document ${documentId} not found`);
+  const undone = await undoResolution(sql, documentId, { by: opts.by ?? "resolve" });
   // Hard gate (spec §4.3): whatever the model returned, only a document the owner wrote can state facts
   // about the owner or relations from the owner.
   const ownerWrote = doc.author === "owner";
@@ -227,7 +314,7 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<ResolveR
   if (extractions.length === 0) {
     // Extraction skipped; the document is still searchable.
     await recordSuppressed(sql, documentId, 0);
-    return { suppressedSelfItems: 0 };
+    return { undone, suppressedSelfItems: 0 };
   }
 
   const [self] = await sql<{ id: string }[]>`select id from brain.nodes where is_self`;
@@ -307,5 +394,5 @@ export async function runResolve(ctx: Ctx, documentId: string): Promise<ResolveR
   }
 
   await recordSuppressed(sql, documentId, suppressed);
-  return { suppressedSelfItems: suppressed };
+  return { undone, suppressedSelfItems: suppressed };
 }
