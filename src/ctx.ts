@@ -24,17 +24,25 @@ export function makeLlm(): Llm {
   return config.llmBackend === "api" ? new AnthropicLlm() : new ClaudeCodeLlm();
 }
 
-export function makeCtx(): Ctx {
+export interface MakeCtxOptions {
+  /** Defaults to config.databaseUrl (the real knowledge base). */
+  databaseUrl?: string;
+  /** False turns the Obsidian mirror off regardless of the environment; the eval database must never be mirrored. */
+  obsidian?: boolean;
+}
+
+export function makeCtx(opts: MakeCtxOptions = {}): Ctx {
   const voyage = new VoyageClient();
   const queryVoyage = new VoyageClient({ maxRateLimitAttempts: 1, maxAttempts: 2 });
   const ctx: Ctx = {
-    sql: connect(config.databaseUrl),
+    sql: connect(opts.databaseUrl ?? config.databaseUrl),
     llm: makeLlm(),
     embedder: voyage,
     reranker: voyage,
     queryEmbedder: queryVoyage,
     queryReranker: queryVoyage,
   };
+  if (opts.obsidian === false) return ctx;
   if (autoProjectionEnabled(process.env, isDirectory)) {
     const obsidian = new ObsidianAutoProjector(ctx);
     ctx.obsidian = obsidian;
