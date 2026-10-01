@@ -83,6 +83,22 @@ describe("search SQL uses its indexes", () => {
     expect(p).not.toContain("CTE Scan");
     expect(p).toMatch(/Index Scan using documents_summary_embedding_idx on documents d\n\s+Order By: \(summary_embedding <=> /);
   });
+  // Under hnsw.iterative_scan = relaxed_order the index output can be slightly out of order, so the ranks
+  // must come from a Sort on the exact scores above the HNSW scan, not from index order.
+  it("hybrid_search: vector ranks come from a Sort on exact scores above the HNSW scan", async () => {
+    const v = await seed();
+    const p = await plan(`select * from brain.hybrid_search('zorblax drill', '${v}'::vector, 60, null::text[], null, null)`, VECTOR);
+    expect(p).toMatch(
+      /WindowAgg\n\s+->  Sort\n\s+Sort Key: [^\n]*score DESC, [^\n]*id\n\s+->  Subquery Scan[^\n]*\n\s+->  Limit\n\s+->  Index Scan using chunks_embedding_idx/,
+    );
+  });
+  it("summary_search: vector ranks come from a Sort on exact scores above the HNSW scan", async () => {
+    const v = await seed();
+    const p = await plan(`select * from brain.summary_search('zorblax drill', '${v}'::vector, 60, null::text[], null, null)`, VECTOR);
+    expect(p).toMatch(
+      /WindowAgg\n\s+->  Sort\n\s+Sort Key: [^\n]*score DESC, [^\n]*id\n\s+->  Subquery Scan[^\n]*\n\s+->  Limit\n\s+->  Index Scan using documents_summary_embedding_idx/,
+    );
+  });
   it("summary_search: keyword branch reads documents through GIN", async () => {
     const v = await seed();
     const p = await plan(`select * from brain.summary_search('zorblax drill', '${v}'::vector, 60, null::text[], null, null)`, KEYWORD);

@@ -21,26 +21,33 @@ create or replace function brain.hybrid_search(
   vector_score real
 ) language sql stable as $$
   with vec as (
-    select c.id, c.document_id,
-           row_number() over (order by c.embedding <=> query_embedding) as r,
-           1 - (c.embedding <=> query_embedding) as score
-    from brain.chunks c
-    where c.level = 1
-      and c.embedding is not null
-      and query_embedding is not null
-      -- Not a join: with documents joined in, the planner sorts the join result and skips HNSW.
-      -- An EXISTS nested under OR is not pulled up into a semi-join, so it stays a filter on the
-      -- HNSW scan itself, and the iterative scan keeps going until k rows pass it. With no filters
-      -- the OR folds to true (literal nulls) or short-circuits at run time (bound nulls).
-      and ((source_kinds is null and since is null and until is null)
-           or exists (
-             select 1 from brain.documents d
-             where d.id = c.document_id
-               and (source_kinds is null or d.source_kind = any (source_kinds))
-               and (since is null or coalesce(d.occurred_at, d.ingested_at) >= since)
-               and (until is null or coalesce(d.occurred_at, d.ingested_at) <= until)))
-    order by c.embedding <=> query_embedding
-    limit k
+    -- Ranks come from a sort on the exact scores, not from index order: under
+    -- hnsw.iterative_scan = relaxed_order the HNSW scan may return rows slightly out of order,
+    -- and a window ordered by distance directly over the index scan would trust that order.
+    select n.id, n.document_id,
+           row_number() over (order by n.score desc, n.id) as r,
+           n.score
+    from (
+      select c.id, c.document_id,
+             1 - (c.embedding <=> query_embedding) as score
+      from brain.chunks c
+      where c.level = 1
+        and c.embedding is not null
+        and query_embedding is not null
+        -- Not a join: with documents joined in, the planner sorts the join result and skips HNSW.
+        -- An EXISTS nested under OR is not pulled up into a semi-join, so it stays a filter on the
+        -- HNSW scan itself, and the iterative scan keeps going until k rows pass it. With no filters
+        -- the OR folds to true (literal nulls) or short-circuits at run time (bound nulls).
+        and ((source_kinds is null and since is null and until is null)
+             or exists (
+               select 1 from brain.documents d
+               where d.id = c.document_id
+                 and (source_kinds is null or d.source_kind = any (source_kinds))
+                 and (since is null or coalesce(d.occurred_at, d.ingested_at) >= since)
+                 and (until is null or coalesce(d.occurred_at, d.ingested_at) <= until)))
+      order by c.embedding <=> query_embedding
+      limit k
+    ) n
   ),
   kw as (
     select c.id, c.document_id,
@@ -78,17 +85,23 @@ create or replace function brain.summary_search(
   vector_score real
 ) language sql stable as $$
   with vec as (
-    select d.id,
-           row_number() over (order by d.summary_embedding <=> query_embedding) as r,
-           1 - (d.summary_embedding <=> query_embedding) as score
-    from brain.documents d
-    where d.summary_embedding is not null
-      and query_embedding is not null
-      and (source_kinds is null or d.source_kind = any (source_kinds))
-      and (since is null or coalesce(d.occurred_at, d.ingested_at) >= since)
-      and (until is null or coalesce(d.occurred_at, d.ingested_at) <= until)
-    order by d.summary_embedding <=> query_embedding
-    limit k
+    -- Ranks from exact scores, not index order (see hybrid_search). Summaries are not reranked,
+    -- so these ranks go straight into fusion.
+    select n.id,
+           row_number() over (order by n.score desc, n.id) as r,
+           n.score
+    from (
+      select d.id,
+             1 - (d.summary_embedding <=> query_embedding) as score
+      from brain.documents d
+      where d.summary_embedding is not null
+        and query_embedding is not null
+        and (source_kinds is null or d.source_kind = any (source_kinds))
+        and (since is null or coalesce(d.occurred_at, d.ingested_at) >= since)
+        and (until is null or coalesce(d.occurred_at, d.ingested_at) <= until)
+      order by d.summary_embedding <=> query_embedding
+      limit k
+    ) n
   ),
   kw as (
     select d.id,

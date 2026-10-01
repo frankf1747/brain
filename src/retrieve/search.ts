@@ -143,20 +143,23 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   }
 
   // pgvector 0.8: with iterative scans the HNSW index keeps going until `limit k` rows satisfy the
-  // source_kind/date filters; ef_search bounds the first pass. SET LOCAL needs a transaction.
-  const [chunkCands, docCands] = await sql.begin(async (tx) => {
-    await tx.unsafe("set local hnsw.iterative_scan = 'relaxed_order'");
-    await tx.unsafe(`set local hnsw.ef_search = ${config.retrieval.efSearch}`);
-    return Promise.all([
-      tx<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
-        select chunk_id, vector_rank, keyword_rank
-        from brain.hybrid_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
-      tx<{ document_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
-        select document_id, vector_rank, keyword_rank
-        from brain.summary_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
-    ]);
-  });
-  const entityRefs = await detectEntities(sql, query);
+  // source_kind/date filters; ef_search = greatest(4 * k, 100) bounds the first pass (spec §3.1).
+  // SET LOCAL needs a transaction; the two searches share its connection and run one after the other.
+  const efSearch = Math.max(4 * config.retrieval.candidateK, 100);
+  const [[chunkCands, docCands], entityRefs] = await Promise.all([
+    sql.begin(async (tx) => {
+      await tx.unsafe(`set local hnsw.iterative_scan = 'relaxed_order'; set local hnsw.ef_search = ${efSearch}`);
+      return Promise.all([
+        tx<{ chunk_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+          select chunk_id, vector_rank, keyword_rank
+          from brain.hybrid_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
+        tx<{ document_id: string; vector_rank: number | null; keyword_rank: number | null }[]>`
+          select document_id, vector_rank, keyword_rank
+          from brain.summary_search(${query}, ${qvec}::vector, ${config.retrieval.candidateK}, ${kinds}::text[], ${since}, ${until})`,
+      ]);
+    }),
+    detectEntities(sql, query),
+  ]);
 
   // Layer 2: fused candidates, reranked.
   const fused = reciprocalRankFusion(chunkCands.map((c) => ({ id: c.chunk_id, vectorRank: c.vector_rank, keywordRank: c.keyword_rank })));
