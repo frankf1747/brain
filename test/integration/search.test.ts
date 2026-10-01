@@ -99,15 +99,16 @@ describe("search", () => {
 
   it("treats LIKE metacharacters inside a trigger term literally", async () => {
     const ctx = await seed();
-    for (const q of ["100%", "a_b-1", "100%_1"]) {
+    for (const q of ["100%", "a_b-1", "100%_1", "a\\b-1"]) {
       const res = await search(ctx, q);
       expect(res.passages.filter((p) => p.group === "fallback")).toEqual([]);
     }
     // Near-misses that an unescaped pattern would match: "%" spans anything, "_" matches one character.
     await ingest(ctx, { text: "Revenue grew 1000 points; the code axb-1 shipped.", sourceKind: "note", title: "Near miss" });
-    await ingest(ctx, { text: "Revenue grew 100% and the code a_b-1 shipped.", sourceKind: "note", title: "Exact" });
+    await ingest(ctx, { text: "Path ab-1 and axb-1 differ.", sourceKind: "note", title: "Slash" });
+    await ingest(ctx, { text: "Revenue grew 100% and the code a_b-1 shipped. Path a\\b-1 too.", sourceKind: "note", title: "Exact" });
     weakRerank(ctx);
-    for (const q of ["100%", "a_b-1"]) {
+    for (const q of ["100%", "a_b-1", "a\\b-1"]) {
       const res = await search(ctx, q);
       expect(res.passages.filter((p) => p.group === "fallback").map((p) => p.documentTitle)).toEqual(["Exact"]);
     }
@@ -115,8 +116,8 @@ describe("search", () => {
 
   it("ranks fallback hits by how many trigger terms they contain", async () => {
     const ctx = weakRerank(fakeCtx(sql, handler));
-    await ingest(ctx, { text: "Only the X-90 here.", sourceKind: "note", title: "One" });
     await ingest(ctx, { text: "Order X-90 and ZX-9000 together.", sourceKind: "note", title: "Both" });
+    await ingest(ctx, { text: "Only the X-90 here.", sourceKind: "note", title: "One" });
     const res = await search(ctx, "X-90 ZX-9000");
     const fb = res.passages.filter((p) => p.group === "fallback");
     expect(fb.map((p) => p.documentTitle)).toEqual(["Both", "One"]);

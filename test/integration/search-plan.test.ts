@@ -142,4 +142,14 @@ describe("search SQL uses its indexes", () => {
     expect(p).toContain("edges_to_idx");
     expect(p).not.toMatch(/Seq Scan on edges\b/);
   });
+
+  it("fallback scan reaches documents through the raw_content trigram index", async () => {
+    await seed();
+    const p = await plan(
+      `select d.id from brain.documents d
+       where d.raw_content ilike any (array(select '%' || brain.like_literal(t) || '%' from unnest(array['ZX-9000', 'X-90']::text[]) t))`,
+      KEYWORD,
+    );
+    expect(p).toMatch(/Bitmap Index Scan on documents_raw_trgm_idx/);
+  });
 });

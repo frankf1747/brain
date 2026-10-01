@@ -268,7 +268,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
       from brain.documents d
       where (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
         and ${inDateRange(sql, "d", since, until)}
-        and exists (select 1 from unnest(${terms}::text[]) t where d.raw_content ilike '%' || brain.like_literal(t) || '%')
+        and d.raw_content ilike any (array(select '%' || brain.like_literal(t) || '%' from unnest(${terms}::text[]) t))
       order by n desc, coalesce(d.occurred_at, d.ingested_at) desc
       limit 10`;
     for (const h of hits) {
