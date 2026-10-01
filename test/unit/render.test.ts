@@ -10,7 +10,7 @@ describe("renderSearch", () => {
         { chunkId: null, documentId: "d2", documentTitle: null, sourceKind: "note", content: "raw hit", parentContent: null, headingPath: [], charStart: 0, charEnd: 7, score: 0, group: "fallback" },
       ],
       documents: [{ documentId: "d1", title: "Doc", sourceKind: "news", summary: "S", score: 0.1 }],
-      entities: [{ id: "n1", type: "organization", name: "Acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
+      entities: [{ id: "n1", type: "organization", name: "Acme", matchedSpan: "acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
       facts: [{ id: "f1", predicate: "visa_status", objectText: "F-1", confidence: 1, verified: true, sourceChunkId: null }],
       usedFallback: true,
       topScore: 0.8,

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { ingest } from "../../src/ingest/pipeline.js";
+import { canonicalName } from "../../src/text/normalize.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 
 const sql = testDb();
@@ -104,5 +105,26 @@ describe("weighted tsvector", () => {
     const rows = await sql<{ keyword_rank: number | null }[]>`
       select keyword_rank from brain.summary_search('What about my garden?', null::vector, 60, null::text[], null, null)`;
     expect(rows.map((r) => r.keyword_rank)).toEqual([1]);
+  });
+});
+
+describe("canonical_text", () => {
+  it("matches canonicalName", async () => {
+    const [r] = await sql<{ t: string }[]>`select brain.canonical_text(${"  Acme’s  Corp., Inc! "}) as t`;
+    expect(r.t).toBe("acmes corp inc");
+  });
+  it("agrees with canonicalName on tricky strings", async () => {
+    // Known divergence, deliberately not asserted: JS \p{N} keeps "other numbers" (x², ½, ①) that
+    // Postgres [[:alnum:]] treats as punctuation. Only aliases containing such characters are affected.
+    const samples = [
+      "O'Brien's", "Acme’s  Corp., Inc!", "café", "CAFÉ au lait", "東京 Tower", "東京タワー", "ZX-9000", "$115k", "rerank-2.5",
+      "a...b///c", "  --  ", "naïve résumé", "Straße", "İstanbul", "ǅ", "٣٤٥", "e\u0301cole", "under_score", "tab\tsep\nnl", "emoji 🙂 ok", "ÀÉÎ", "ß", "ﬁsh",
+    ];
+    const diffs: string[] = [];
+    for (const s of samples) {
+      const [r] = await sql<{ t: string }[]>`select brain.canonical_text(${s}) as t`;
+      if (r.t !== canonicalName(s)) diffs.push(`${JSON.stringify(s)}: sql=${JSON.stringify(r.t)} js=${JSON.stringify(canonicalName(s))}`);
+    }
+    expect(diffs).toEqual([]);
   });
 });

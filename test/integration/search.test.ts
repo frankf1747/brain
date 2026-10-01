@@ -187,6 +187,19 @@ describe("search", () => {
     expect(res.degraded).toBe(false);
   });
 
+  it("detects an entity from a lowercase query and expands its neighbours", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "what did zorblax industries release?");
+    expect(res.entities.map((e) => e.name)).toEqual(["Zorblax Industries"]);
+    expect(res.entities[0].matchedSpan).toBe("zorblax industries");
+    expect(res.entities[0].neighbors.map((n) => n.name)).toContain("Austin");
+  });
+  it("detects an entity by a one-word alias in a lowercase query", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "tell me about zorblax");
+    expect(res.entities.map((e) => e.name)).toEqual(["Zorblax Industries"]);
+    expect(res.entities[0].matchedSpan).toBe("zorblax");
+  });
   it("rejects an empty query", async () => {
     const ctx = fakeCtx(sql, handler);
     await expect(search(ctx, "   ")).rejects.toThrow("Search query is empty");

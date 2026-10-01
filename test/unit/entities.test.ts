@@ -1,27 +1,39 @@
 import { describe, it, expect } from "vitest";
-import { candidateNames } from "../../src/retrieve/entities.js";
+import { candidateSpans, dropContainedSpans } from "../../src/retrieve/entities.js";
 
-describe("candidateNames", () => {
-  it("picks quoted strings and capitalized runs, dropping question words", () => {
-    expect(candidateNames('Who works at Acme Corp and "beta ventures"?')).toEqual(["beta ventures", "Acme Corp"]);
+describe("candidateSpans", () => {
+  it("returns every 1- to 3-token span that does not start or end with a stopword, plus quoted strings", () => {
+    const spans = candidateSpans('who works at acme corp and "beta ventures"?');
+    expect(spans).toContain("beta ventures");
+    expect(spans).toContain("acme corp");
+    expect(spans).toContain("acme");
+    expect(spans).toContain("corp");
+    expect(spans).not.toContain("at acme");
+    expect(spans).not.toContain("corp and");
+    expect(spans).not.toContain("who");
   });
-  it("keeps connectors inside a run and trims trailing ones", () => {
-    expect(candidateNames("Tell me about the University of Texas and")).toEqual(["University of Texas"]);
+  it("is case-insensitive and strips possessives", () => {
+    expect(candidateSpans("Who led Acme's Series B?")).toEqual(expect.arrayContaining(["Acme", "Series B", "Acme Series B", "Series", "B"]));
   });
-  it("returns nothing for lowercase questions", () => {
-    expect(candidateNames("what did i say about fairness")).toEqual([]);
+  it("returns nothing for a stopword-only query", () => {
+    expect(candidateSpans("what is the")).toEqual([]);
   });
-  it("strips leading question words from a capitalized run", () => {
-    expect(candidateNames("Does Acme sponsor work visas?")).toEqual(["Acme"]);
-    expect(candidateNames("Is Acme hiring?")).toEqual(["Acme"]);
-    expect(candidateNames("Did Priya say anything?")).toEqual(["Priya"]);
+});
+
+describe("dropContainedSpans", () => {
+  it("keeps the longest matched span and drops matches contained in it", () => {
+    const kept = dropContainedSpans([
+      { id: "1", type: "organization", name: "Databricks", matchedSpan: "databricks" },
+      { id: "2", type: "concept", name: "Databricks cost governance", matchedSpan: "databricks cost governance" },
+      { id: "3", type: "place", name: "Austin", matchedSpan: "austin" },
+    ]);
+    expect(kept.map((k) => k.id)).toEqual(["2", "3"]);
   });
-  it("splits runs at possessives and keeps the stem", () => {
-    expect(new Set(candidateNames("Who led Acme's Series B?"))).toEqual(new Set(["Acme", "Series B"]));
-    expect(candidateNames("What is Priya’s role?")).toEqual(["Priya"]);
-    expect(candidateNames("Tell me about the Jones' house")).toEqual(["Jones"]);
-  });
-  it("keeps a leading connector that is part of the name", () => {
-    expect(candidateNames("Does The Home Depot hire?")).toEqual(["The Home Depot"]);
+  it("keeps one entry per node, with the longest span", () => {
+    const kept = dropContainedSpans([
+      { id: "1", type: "organization", name: "Acme", matchedSpan: "acme" },
+      { id: "1", type: "organization", name: "Acme", matchedSpan: "acme corp" },
+    ]);
+    expect(kept).toEqual([{ id: "1", type: "organization", name: "Acme", matchedSpan: "acme corp" }]);
   });
 });
