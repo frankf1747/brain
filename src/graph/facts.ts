@@ -1,6 +1,8 @@
+import type postgres from "postgres";
 import type { Db } from "../db.js";
 import { normalizePredicate } from "../ingest/stages/resolve.js";
 import { UUID } from "../retrieve/documents.js";
+import { linkSupersession } from "./supersede.js";
 
 export interface FactDetail {
   id: string;
@@ -53,7 +55,7 @@ export async function addFact(
   return { id: row.id, predicate };
 }
 
-/** Replaces a fact's value. The old fact is kept and points at the new one. */
+/** Replaces a fact's value. The old fact is kept and points at the new one; the change is logged to fact_events. */
 export async function supersedeFact(sql: Db, factId: string, input: { objectText: string; by: string; validFrom?: Date | null }): Promise<string> {
   const objectText = cleanValue(input.objectText);
   if (!UUID.test(factId)) throw new Error(`Fact ${factId} not found`);
@@ -78,8 +80,11 @@ export async function supersedeFact(sql: Db, factId: string, input: { objectText
         set superseded_by = null, valid_to = null, verified = false, verified_by = ${input.by},
             valid_from = coalesce(${input.validFrom ?? null}::date, valid_from)
         where id = ${row.id}`;
+      await tx`
+        insert into brain.fact_events (fact_id, event, by, document_id, detail)
+        values (${row.id}, 'restored', ${input.by}, null, ${tx.json({ revived: true } as postgres.JSONValue)})`;
     }
-    await tx`update brain.facts set superseded_by = ${row.id}, valid_to = coalesce(valid_to, current_date) where id = ${factId}`;
+    await linkSupersession(tx, { oldId: factId, newId: row.id, by: input.by, documentId: null, endsOn: null });
     return row.id;
   });
 }

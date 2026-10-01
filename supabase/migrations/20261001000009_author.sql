@@ -54,4 +54,36 @@ alter table brain.fact_events enable row level security;
 create index if not exists facts_source_chunk_idx on brain.facts (source_chunk_id);
 create index if not exists edges_evidence_chunk_idx on brain.edges (evidence_chunk_id);
 
+-- (Task 7) The date a fact holds from, for deciding which of two single-valued facts is newer: its valid_from,
+-- else its source document's occurred_at, else when that document was ingested, else (facts added by hand,
+-- which have no source document) when the fact was recorded.
+create or replace function brain.fact_effective_from(p_fact uuid) returns date
+language sql stable as $$
+  select coalesce(f.valid_from, d.occurred_at::date, d.ingested_at::date, f.created_at::date)
+  from brain.facts f
+  left join brain.chunks c on c.id = f.source_chunk_id
+  left join brain.documents d on d.id = c.document_id
+  where f.id = p_fact;
+$$;
+
+-- (Task 7) A fact the owner stands behind: verified, or written by someone other than the extractor. The one
+-- definition undoResolution (keptCorrected) and resolve's insert guard share.
+create or replace function brain.fact_owner_held(p_verified boolean, p_verified_by text) returns boolean
+language sql immutable as $$
+  select p_verified or coalesce(p_verified_by, '') not like 'extractor:%';
+$$;
+
+-- (Task 7) True when following superseded_by from the fact reaches a fact the owner holds: the fact is the
+-- record of an owner correction. UNION (not UNION ALL) stops on a cycle.
+create or replace function brain.fact_corrected_by_owner(p_fact uuid) returns boolean
+language sql stable as $$
+  with recursive chain(id) as (
+    select superseded_by from brain.facts where id = p_fact and superseded_by is not null
+    union
+    select f.superseded_by from brain.facts f join chain c on f.id = c.id where f.superseded_by is not null
+  )
+  select exists (
+    select 1 from chain c join brain.facts f on f.id = c.id where brain.fact_owner_held(f.verified, f.verified_by));
+$$;
+
 commit;

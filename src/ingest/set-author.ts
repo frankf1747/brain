@@ -25,6 +25,8 @@ export interface SetAuthorResult {
   addedEdges: { type: string; fromName: string; toName: string }[];
   /** Facts from this document the owner verified; undo never deletes them. */
   keptVerified: { id: string; predicate: string; objectText: string }[];
+  /** Facts from this document the owner corrected (they point at the owner's value); kept as its history. */
+  keptCorrected: { id: string; predicate: string; objectText: string }[];
   /** Facts a removed fact had superseded that are current again. */
   restoredFacts: string[];
   suppressedSelfItems: number;
@@ -55,7 +57,7 @@ async function setAuthorLocked(ctx: Ctx, documentId: string, author: Author): Pr
   if (!doc) throw new Error(`Document ${documentId} not found`);
   const result: SetAuthorResult = {
     documentId, previous: doc.author, author, unchanged: doc.author === author, reresolved: false,
-    removedFacts: [], removedEdges: [], addedFacts: [], addedEdges: [], keptVerified: [], restoredFacts: [], suppressedSelfItems: 0,
+    removedFacts: [], removedEdges: [], addedFacts: [], addedEdges: [], keptVerified: [], keptCorrected: [], restoredFacts: [], suppressedSelfItems: 0,
   };
   if (result.unchanged) return result;
   await ctx.sql`update brain.documents set author = ${author} where id = ${documentId}`;
@@ -83,17 +85,36 @@ async function setAuthorLocked(ctx: Ctx, documentId: string, author: Author): Pr
   result.removedEdges = report.undone.edges
     .filter((e) => !now.edges.some((g) => sameEdge(e, g)))
     .map(({ type, fromName, toName }) => ({ type, fromName, toName }));
-  // Verified facts survive the undo, so they are neither removed nor added.
-  const before = [...report.undone.facts, ...report.undone.keptVerified];
+  // Verified and corrected facts survive the undo, so they are neither removed nor added.
+  const before = [...report.undone.facts, ...report.undone.keptVerified, ...report.undone.keptCorrected];
   result.addedFacts = now.facts.filter((f) => !before.some((g) => sameFact(f, g)));
   result.addedEdges = now.edges.filter((e) => !report.undone.edges.some((g) => sameEdge(e, g)));
   result.keptVerified = report.undone.keptVerified;
+  result.keptCorrected = report.undone.keptCorrected;
   result.restoredFacts = report.undone.restored.length
     ? (await ctx.sql<{ id: string }[]>`
         select id from brain.facts where id = any(${report.undone.restored}::uuid[]) and superseded_by is null`).map((r) => r.id)
     : [];
   result.suppressedSelfItems = report.suppressedSelfItems;
   return result;
+}
+
+/** What `brain set-author` prints for a result, one line per entry. */
+export function setAuthorLines(r: SetAuthorResult): string[] {
+  if (r.unchanged) return [`${r.documentId}: author already ${r.author}; nothing to do`];
+  const lines = [`${r.documentId}: author ${r.previous} -> ${r.author}`];
+  if (!r.reresolved) return [...lines, "  not resolved yet; the new author applies when ingestion reaches the resolve stage"];
+  for (const f of r.removedFacts) lines.push(`  removed fact  ${f.predicate}: ${f.objectText}`);
+  for (const e of r.removedEdges) lines.push(`  removed edge  ${e.fromName} -${e.type}-> ${e.toName}`);
+  for (const f of r.addedFacts) lines.push(`  added fact    ${f.predicate}: ${f.objectText}`);
+  for (const e of r.addedEdges) lines.push(`  added edge    ${e.fromName} -${e.type}-> ${e.toName}`);
+  for (const f of r.keptVerified) lines.push(`  kept fact     ${f.predicate}: ${f.objectText} (you verified it; id ${f.id})`);
+  for (const f of r.keptCorrected) lines.push(`  kept fact     ${f.predicate}: ${f.objectText} (you corrected it; id ${f.id})`);
+  for (const id of r.restoredFacts) lines.push(`  restored fact ${id} (it had been superseded by a removed fact)`);
+  lines.push(
+    `  ${r.removedFacts.length} facts and ${r.removedEdges.length} edges removed, ${r.addedFacts.length} facts and ${r.addedEdges.length} edges added; ${r.suppressedSelfItems} items about the owner suppressed`,
+  );
+  return lines;
 }
 
 async function producedBy(sql: Db, documentId: string) {

@@ -183,6 +183,30 @@ describe("undoResolution with supersession chains", () => {
     expect(row.superseded_by).toBe(corrected);
   });
 
+  it("re-chunking after the owner corrected an extracted fact leaves the correction the only current value", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text, sourceKind: "note" });
+    const extracted = await factOf(id);
+    const corrected = await supersedeFact(sql, extracted, { objectText: "H-1B", by: "frank" });
+    await runChunk(ctx, id);
+    await runExtract(ctx, id);
+    await runResolve(ctx, id);
+    expect(await currentValues("visa_status")).toEqual(["H-1B"]);
+    const rows = await sql<{ id: string; superseded_by: string | null }[]>`
+      select id, superseded_by from brain.facts where object_text = 'F-1 OPT'`;
+    expect(rows).toEqual([{ id: extracted, superseded_by: corrected }]);
+  });
+
+  it("another document can still state a value the owner corrected in this one", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text, sourceKind: "note" });
+    await supersedeFact(sql, await factOf(id), { objectText: "H-1B", by: "frank" });
+    const { id: other } = await ingest(ctx, { text: text2, sourceKind: "note" });
+    const [row] = await sql<{ object_text: string }[]>`
+      select f.object_text from brain.facts f join brain.chunks c on c.id = f.source_chunk_id where c.document_id = ${other}`;
+    expect(row).toEqual({ object_text: "F-1 OPT" });
+  });
+
   it("does not insert a second current copy of a verified fact after re-chunking", async () => {
     const ctx = fakeCtx(sql, handler);
     const { id } = await ingest(ctx, { text, sourceKind: "note" });

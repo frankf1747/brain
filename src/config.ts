@@ -37,4 +37,6 @@ export const config = {
     job_description: "other",
     email: "other",
   },
+  /** Predicates that hold one current value: a newer statement in an owner document supersedes the older (spec §4.4). */
+  singleValuedPredicates: ["lives_in", "visa_status", "targeting_role", "pursuing_degree", "employment_status", "current_employer", "phone", "email"],
 } as const;

@@ -211,20 +211,10 @@ program
   .command("set-author <documentId> <author>")
   .description("Change who wrote a document (owner, other, unknown) and redo the facts and relationships it produced")
   .action(async (documentId: string, authorArg: string) => {
-    const { setAuthor } = await import("./ingest/set-author.js");
+    const { setAuthor, setAuthorLines } = await import("./ingest/set-author.js");
     const author = parseAuthor(authorArg);
     await withCtx(async (ctx) => {
-      const r = await setAuthor(ctx, documentId, author);
-      if (r.unchanged) return void console.log(`${r.documentId}: author already ${r.author}; nothing to do`);
-      console.log(`${r.documentId}: author ${r.previous} -> ${r.author}`);
-      if (!r.reresolved) return void console.log("  not resolved yet; the new author applies when ingestion reaches the resolve stage");
-      for (const f of r.removedFacts) console.log(`  removed fact  ${f.predicate}: ${f.objectText}`);
-      for (const e of r.removedEdges) console.log(`  removed edge  ${e.fromName} -${e.type}-> ${e.toName}`);
-      for (const f of r.addedFacts) console.log(`  added fact    ${f.predicate}: ${f.objectText}`);
-      for (const e of r.addedEdges) console.log(`  added edge    ${e.fromName} -${e.type}-> ${e.toName}`);
-      for (const f of r.keptVerified) console.log(`  kept fact     ${f.predicate}: ${f.objectText} (you verified it; id ${f.id})`);
-      for (const id of r.restoredFacts) console.log(`  restored fact ${id} (it had been superseded by a removed fact)`);
-      console.log(`  ${r.removedFacts.length} facts and ${r.removedEdges.length} edges removed, ${r.addedFacts.length} facts and ${r.addedEdges.length} edges added; ${r.suppressedSelfItems} items about the owner suppressed`);
+      for (const line of setAuthorLines(await setAuthor(ctx, documentId, author))) console.log(line);
     });
   });
 

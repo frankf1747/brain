@@ -3,6 +3,7 @@ import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { ingest, runPipeline } from "../../src/ingest/pipeline.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { setAuthor, suppressedDocuments } from "../../src/ingest/set-author.js";
+import { supersedeFact } from "../../src/graph/facts.js";
 import type { ObsidianAutoProjector } from "../../src/obsidian/auto.js";
 
 const sql = testDb();
@@ -124,6 +125,20 @@ describe("setAuthor", () => {
     expect(await selfEdges()).toEqual(["Databricks cost governance"]);
     const [done] = await sql<{ error: string | null }[]>`select error from brain.ingest_jobs where document_id = ${id}`;
     expect(done.error).toBeNull();
+  });
+
+  it("lists the facts it kept because the owner corrected them, and does not report them as added", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text: body, sourceKind: "note" });
+    const [viewOn] = await sql<{ id: string }[]>`select id from brain.facts where predicate = 'view_on'`;
+    await supersedeFact(sql, viewOn.id, { objectText: "cost governance matters", by: "frank" });
+    const r = await setAuthor(ctx, id, "other");
+    expect(r.keptCorrected).toEqual([{ id: viewOn.id, predicate: "view_on", objectText: "Databricks cost governance is not optional" }]);
+    expect(r.removedFacts.map((f) => f.predicate).sort()).toEqual(["has_experience_with", "recommends"]);
+    expect(r.addedFacts).toEqual([]);
+    const back = await setAuthor(ctx, id, "owner");
+    expect(back.keptCorrected).toEqual(r.keptCorrected);
+    expect(back.addedFacts.map((f) => f.predicate).sort()).toEqual(["has_experience_with", "recommends"]);
   });
 
   it("refuses an unknown document and one another runner holds", async () => {

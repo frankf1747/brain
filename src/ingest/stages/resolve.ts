@@ -4,6 +4,7 @@ import type { Ctx } from "../../ctx.js";
 import { toVector, type Db } from "../../db.js";
 import { canonicalName } from "../../text/normalize.js";
 import { ExtractionSchema, type Extraction } from "./extract.js";
+import { supersedeByExtraction } from "../../graph/supersede.js";
 
 export type Decision = { action: "match"; nodeId: string } | { action: "create"; possibleDuplicateOf: string | null };
 
@@ -127,6 +128,8 @@ export function checkDirection(edgeType: string, fromType: string, toType: strin
 
 /** Longest relation quote kept on an edge as properties.quote, the evidence shown for the relationship. */
 const MAX_EDGE_QUOTE = 300;
+/** Predicates that hold one current value (config.singleValuedPredicates). */
+const SINGLE_VALUED = new Set<string>(config.singleValuedPredicates);
 
 const LEXICALLY_CHECKED_TYPES = new Set(["person", "organization"]);
 
@@ -213,11 +216,6 @@ export interface UndoReport {
   restored: string[];
 }
 
-/** A fact the owner stands behind: verified, or written by someone other than the extractor. */
-function ownerHeld(f: { verified: boolean; verified_by: string | null }): boolean {
-  return f.verified || !(f.verified_by ?? "").startsWith("extractor:");
-}
-
 /**
  * Follows superseded_by from `start` through the facts in `through` and returns the first fact outside it,
  * or null when the chain ends or cycles inside it.
@@ -269,12 +267,13 @@ export async function undoResolution(sql: Db, documentId: string, opts: { by?: s
     const next = new Map(produced.map((f) => [f.id, f.superseded_by]));
     const ends = new Map(unverified.map((f) => [f.id, chainEnd(f.superseded_by, candidates, next)]));
     const endIds = [...new Set([...ends.values()].filter((e): e is string => e !== null))];
+    // brain.fact_owner_held: verified, or written by someone other than the extractor.
     const held = new Set(
       (endIds.length
-        ? await tx<{ id: string; verified: boolean; verified_by: string | null }[]>`
-            select id, verified, verified_by from brain.facts where id = any(${endIds}::uuid[])`
+        ? await tx<{ id: string }[]>`
+            select id from brain.facts where id = any(${endIds}::uuid[]) and brain.fact_owner_held(verified, verified_by)`
         : []
-      ).filter(ownerHeld).map((f) => f.id),
+      ).map((f) => f.id),
     );
     const isCorrected = (f: Row) => {
       const end = ends.get(f.id);
@@ -440,9 +439,11 @@ export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: stri
       const loc = evidenceFor(f.quote);
       const objectNode = f.object_key ? keyToNode.get(f.object_key) ?? null : null;
       const predicate = normalizePredicate(f.predicate);
-      // A value the owner already verified and holds as current is not stated again (re-chunking moves the
-      // verified fact off this document's chunks, so the dedupe index alone would let a copy in).
-      await sql`
+      // Not stated again (re-chunking sets source_chunk_id to null on what undo kept, so the dedupe index
+      // alone would let a copy in as current): a value the owner verified and holds as current, and a value
+      // this document produced that the owner since corrected (undo's keptCorrected; its chain reaches a
+      // fact the owner holds, brain.fact_corrected_by_owner).
+      const [inserted] = await sql<{ id: string }[]>`
         insert into brain.facts (subject_id, predicate, object_text, object_node_id, confidence, source_chunk_id, verified_by, valid_from, valid_to)
         select ${self.id}::uuid, ${predicate}::text, ${f.object_text}::text, ${objectNode}::uuid, ${f.confidence}::real,
                ${loc?.chunkId ?? ex.section_chunk_id}::uuid, ${"extractor:" + ctx.llm.model}::text,
@@ -450,8 +451,21 @@ export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: stri
         where not exists (
           select 1 from brain.facts v
           where v.subject_id = ${self.id} and v.predicate = ${predicate} and v.object_text = ${f.object_text}
-            and v.verified and v.superseded_by is null)
-        on conflict do nothing`;
+            and (
+              (v.verified and v.superseded_by is null)
+              or (not brain.fact_owner_held(v.verified, v.verified_by)
+                  and (v.source_chunk_id is null
+                       or exists (select 1 from brain.chunks c where c.id = v.source_chunk_id and c.document_id = ${documentId}))
+                  and brain.fact_corrected_by_owner(v.id))))
+        on conflict do nothing
+        returning id`;
+      // A single-valued predicate holds one current value: the newer statement supersedes the older (spec §4.4).
+      if (inserted && SINGLE_VALUED.has(predicate)) {
+        await supersedeByExtraction(sql, {
+          factId: inserted.id, subjectId: self.id, predicate, objectText: f.object_text,
+          by: "extractor:" + ctx.llm.model, documentId,
+        });
+      }
     }
   }
 
