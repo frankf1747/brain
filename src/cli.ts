@@ -203,11 +203,11 @@ evalCmd
   .command("ingest [dir]")
   .description("Ingest a corpus directory into the eval database (default eval/corpus)")
   .action(async (dir: string | undefined) => {
-    const { makeEvalCtx, EVAL_DATABASE_URL } = await import("./eval/db.js");
+    const { makeEvalCtx } = await import("./eval/db.js");
     const { ingestCorpus } = await import("./eval/run.js");
     const ctx = makeEvalCtx();
     try {
-      if ((await ingestCorpus(ctx, dir ?? "eval/corpus", EVAL_DATABASE_URL)) > 0) process.exitCode = 1;
+      if ((await ingestCorpus(ctx, dir ?? "eval/corpus")) > 0) process.exitCode = 1;
     } finally {
       await ctx.sql.end();
     }
@@ -223,13 +223,13 @@ evalCmd
   .option("--accept", "overwrite the baseline with this run")
   .option("--json")
   .action(async (opts) => {
-    const { makeEvalCtx, EVAL_DATABASE_URL } = await import("./eval/db.js");
+    const { makeEvalCtx } = await import("./eval/db.js");
     const { runEval } = await import("./eval/run.js");
     const { compare, gate, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { execSync } = await import("node:child_process");
     const ctx = makeEvalCtx();
     try {
-      const run = await runEval(ctx, opts.golden, EVAL_DATABASE_URL);
+      const run = await runEval(ctx, opts.golden);
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const comparison = base ? compare(base, run.report, run.ranks) : null;
       const failures = comparison && opts.gate ? gate(comparison) : [];

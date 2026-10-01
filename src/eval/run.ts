@@ -7,7 +7,7 @@ import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
 import { parseGolden, type GoldenItem } from "./golden.js";
 import { summarize, mrr, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
-import { assertEvalDatabase } from "./db.js";
+import { assertEvalConnection } from "./db.js";
 
 export function kindFromFilename(name: string): string {
   const i = name.indexOf("--");
@@ -67,8 +67,8 @@ export interface EvalRun {
 }
 
 /** Runs every golden item (and its paraphrases) against the context's database, which must be the eval database. */
-export async function runEval(ctx: Ctx, goldenPath: string, databaseUrl: string): Promise<EvalRun> {
-  assertEvalDatabase(databaseUrl);
+export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
+  await assertEvalConnection(ctx.sql);
   const golden = parseGolden(await readFile(goldenPath, "utf8"));
   const results: QuestionResult[] = [];
   for (const g of golden) {
@@ -86,8 +86,8 @@ export async function runEval(ctx: Ctx, goldenPath: string, databaseUrl: string)
 }
 
 /** Ingests every file under dir into the eval database; a file that cannot be stored is logged and skipped. Returns how many failed. */
-export async function ingestCorpus(ctx: Ctx, dir: string, databaseUrl: string): Promise<number> {
-  assertEvalDatabase(databaseUrl);
+export async function ingestCorpus(ctx: Ctx, dir: string): Promise<number> {
+  await assertEvalConnection(ctx.sql);
   const { failed } = await ingestAll(
     ctx,
     await readInput(dir),
