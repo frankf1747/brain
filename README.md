@@ -31,7 +31,8 @@ npm run brain -- search "<query>" [--kind news note] [--since 2026-01-01] [--unt
 npm run brain -- ask "<question>"
 npm run brain -- node "<name or id>"
 npm run brain -- facts [--all]
-npm run brain -- eval [--golden eval/golden.jsonl] [--ingest eval/corpus] [--json]
+npm run brain -- eval ingest [dir]
+npm run brain -- eval run [--golden eval/golden.jsonl] [--baseline eval/baseline.json] [--compare] [--gate] [--accept] [--json]
 npm run brain -- backfill [--limit 500] [--poll 30]
 ```
 
@@ -39,7 +40,7 @@ npm run brain -- backfill [--limit 500] [--poll 30]
 
 - `npm run test:unit` needs nothing.
 - `npm run test:int` needs `npm run db:start`. It recreates a separate `brain_test` database from the migrations and runs there with fakes for Claude and Voyage, so your real knowledge base is never touched. The test helper refuses any database whose name does not end in `_test`.
-- `npm run brain -- eval --ingest eval/corpus` is the retrieval gate; run it after changing chunking, embedding or fusion. Latest result: recall@10 1.00 and MRR 1.00 on 14 questions over 6 documents. The set is small, so treat it as a regression check, not a quality estimate.
+- The retrieval eval runs only against `brain_eval` and checks the live connection before any write (`npm run eval:prepare` creates it from the migrations; `--reset` recreates it). `npm run brain -- eval ingest` loads `eval/corpus`; `npm run eval:run` scores `eval/golden.jsonl` and compares with `eval/baseline.json`; `npm run eval:gate` exits 1 on a regression (recall@10 or MRR down more than 0.02, abstention down, any degraded search, a changed golden set, or no baseline). After a deliberate change, `npm run brain -- eval run --accept` records the new baseline. `eval:prepare` only creates `brain_eval`; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. Metrics: set recall@1/5/10 over the top-k passages, MRR over distinct documents, nDCG@10 against all quote-bearing passages, paraphrase consistency, abstention and false-answer rate on negatives, degraded fraction, nearest-rank latency. Baseline on 2026-09-30 (commit `2b3426d`, before any retrieval change): recall@1 0.79, recall@10 1.00, MRR 1.00, p50 236 ms, 0% degraded, 14 questions over 6 documents. The set is small and has no negatives yet, so treat it as a regression check until Phase 6 of `docs/superpowers/specs/2026-09-30-retrieval-hardening-design.md` grows it.
 
 ## Layout
 
@@ -51,6 +52,7 @@ The server exposes the knowledge base as nine tools:
 
 - `brain_orient`: what the base holds (counts, recent documents, facts about you) and which tool to use; call first.
 - `brain_search`: hybrid keyword, vector and graph search.
+  Search runs five layers. Hybrid: vector search plus keyword search that ORs the query's stems over passage content, headings and title, ranked by how many distinct query terms a passage matches; the two lists are fused with RRF and reranked. Document summaries, fused the same way. Graph expansion from entities named in the query (any case, names up to six words, at most 5 entities; up to 20 neighbours and 5 passages each, including mentions on merged nodes). Facts that share a term with the query or point at a named entity (at most 10, entity-linked first). A literal scan for exact-string terms such as `X-90` or `$115k` when the best hit is weak or the search ran degraded. Vector and keyword search use the HNSW and GIN indexes; `test/integration/search-plan.test.ts` fails if a query plan stops using them. `verified_only` filters facts and neighbours only.
 - `brain_get_document`: fetch one document.
 - `brain_get_node`: fetch an entity and its neighbours.
 - `brain_get_facts`: list current facts.

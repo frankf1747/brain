@@ -1,6 +1,6 @@
 # Brain: retrieval hardening, evidence contract and eval program, design
 
-Date: 2026-09-30
+Date: 2026-09-30 (revised 2026-10-01: §3.1 ef_search and exact-score ranks, §3.2 coverage ranking and weights, PG 17.6)
 Status: approved in conversation (sections 1 and 2 reviewed line by line; sections 3 to 7 approved as a package)
 Depends on: the three 2026-09-27 specs (core, MCP server, Obsidian projection). This document changes behaviour they describe; where the two disagree, this one wins.
 Scope: one sub-project in seven phases, each independently shippable. Phase 0 (eval isolation and baseline) comes first so every later phase is measured.
@@ -23,7 +23,7 @@ The design is also meant to be legible to people outside this project: every ret
 |---|---|
 | No model call per query. Ingestion keeps using Claude Code on the owner's Max plan; nothing at query time calls a model. | Citation checking (§6) and all eval metrics (§7) are deterministic. Question drafting for the eval runs through Claude Code at the owner's command, never per search. |
 | Voyage has a payment method now, but spend must be bounded. | §4: a token ledger and a hard daily cap that stops calls rather than exceeding it. |
-| Corpus: short documents, hundreds to low thousands. About 10,000 passages. | Exact vector scans would still be fast at this size. The SQL fix in §3 is done because it is cheap and correct, not because it is urgent. Chunk sizes and the embedding model stay as they are. |
+| Corpus: short documents, hundreds to low thousands. About 10,000 passages. Postgres 17.6 with pgvector 0.8.2. | Exact vector scans would still be fast at this size. The SQL fix in §3 is done because it is cheap and correct, not because it is urgent. Chunk sizes and the embedding model stay as they are. |
 | The MCP tool output is read by a language model. | Structured data is added alongside the text, never instead of it. |
 
 ## 3. Phase 1: retrieval correctness
@@ -32,9 +32,11 @@ Goal: a passage that answers the question reaches the candidate pool, and the po
 
 ### 3.1 Search SQL
 
-`hybrid_search` and `summary_search` are rewritten so the vector and keyword branches each read the base table directly with the filters inlined (`with filtered as not materialized`, or the filter repeated per branch; the migration picks whichever `EXPLAIN` shows using the index). pgvector is 0.8.2, so the vector branch runs with `set local hnsw.iterative_scan = relaxed_order` and `hnsw.ef_search = greatest(4 * k, 100)`, which lets a filtered query keep scanning until it has k rows instead of returning short.
+`hybrid_search` and `summary_search` are rewritten so the vector and keyword branches each read the base table directly with the filters inlined (`with filtered as not materialized`, or the filter repeated per branch; the migration picks whichever `EXPLAIN` shows using the index). pgvector is 0.8.2, so the vector branch runs with `set local hnsw.iterative_scan = relaxed_order` and `hnsw.ef_search = greatest(4 × candidateK, 100)`, which lets a filtered query keep scanning until it has k rows instead of returning short.
 
 The candidate pool is `config.retrieval.candidateK`, default 60, applied to both the vector and the keyword branch of both functions (summary search currently gets only k).
+
+As built: the chunk vector branch reads `chunks` alone and applies document filters through an `EXISTS` inside an `OR`, so the filter stays on the HNSW scan node; the planner would not use HNSW with the join in the same query. The vector branch does `ORDER BY distance LIMIT k` in an inner subquery and numbers rows by exact score outside it, because under `relaxed_order` the index's emission order can be slightly wrong and Postgres 17 otherwise numbers rows in that order. `ef_search` is `greatest(4 × candidateK, 100)`.
 
 Verification: an integration test runs `EXPLAIN` on the function body against the test database and fails if a `CTE Scan` appears under the vector sort or the tsvector filter.
 
@@ -43,14 +45,15 @@ Verification: an integration test runs `EXPLAIN` on the function body against th
 `websearch_to_tsquery` ANDs every term. It is replaced by a query builder in SQL (`brain.query_to_tsquery(text)`) that:
 
 - keeps quoted phrases as phrase matches (`<->` operators),
-- ORs the remaining stems,
-- drops nothing else; ranking is `ts_rank_cd` with normalisation 32 (rank divided by rank+1) so long passages are not favoured.
+- ORs the remaining stems, dropping unquoted stems shorter than 2 characters (exact strings such as `X-90` are the fallback scan's job, §3.4).
 
-The chunk `tsv` becomes weighted: document title as weight A, heading path as B, content as C. `documents.summary_tsv` adds the title at A. A migration recomputes both for existing rows. The context prefix used for embeddings is unchanged.
+The query is also exposed as its units (`brain.query_units(text) returns tsquery[]`: one per phrase, one per stem). Keyword ranking is, in order: **coverage** (how many distinct units the passage matches), then `ts_rank_cd` with normalisation 1 (divided by 1 + log length, so long passages are not favoured), then id. Coverage comes first because, measured during review, `ts_rank_cd` on an OR query is roughly a weighted count of occurrences: a passage repeating one term six times outranked a passage matching four distinct question terms. (The originally specified normalisation 32 is monotonic and so changes nothing in a rank-only output.)
+
+The chunk `tsv` becomes weighted: content as weight A, heading path as B, context prefix (title, summary line, heading path) as C. Title and summary words still make every passage of the document findable, but content decides the order. (The first version put the context prefix at A; review on `brain_eval` showed the model-written summary line then dominated, and every passage of a document tied.) `documents.summary_tsv` has the title at A and the summary at B. A migration recomputes both for existing rows. The context prefix used for embeddings is unchanged. The context prefix is written by the embed stage, so a document whose embedding failed is keyword-searchable by content only until `brain retry` completes it.
 
 ### 3.3 Entity detection in the query
 
-`detectEntities` no longer needs capitals. It takes every span of one to three consecutive tokens of the query, canonicalises each the same way node names are canonicalised, and resolves them in one SQL call against `nodes.canonical_name` and `nodes.aliases`. Longer spans win over shorter spans they contain ("Databricks cost governance" beats "Databricks"). Quoted strings are still matched whole. Stopword-only spans are skipped.
+`detectEntities` no longer needs capitals. It takes every span of one to six consecutive tokens of the query (a leading "the" is allowed on spans of two or more tokens), canonicalises each the same way node names are canonicalised, and resolves them in one SQL call against `nodes.canonical_name` and `nodes.aliases`. Longer spans win over shorter spans they contain ("Databricks cost governance" beats "Databricks"). Quoted strings are still matched whole. Spans starting or ending with a stopword are skipped. At most 5 entities are kept per query, longest span first. Aliases are stored canonical at resolve time, so the lookup is an index lookup on `canonical_name` and the GIN index on `aliases`.
 
 ### 3.4 Fallback scan
 
@@ -60,8 +63,8 @@ The trigram fallback runs per term rather than per query. Trigger terms are: any
 
 - `neighbors()` is rewritten to join on `edges.from_node` and `edges.to_node` directly and canonicalise the results afterwards, so `edges_from_idx` and `edges_to_idx` apply. Signature unchanged.
 - Per detected entity: at most 20 neighbours, ordered by edge confidence then name; at most 5 mentioned level-1 passages, ordered by document `occurred_at` desc then chunk ordinal. Mentions stored on level-0 sections are mapped to the first level-1 passage of that section so they are no longer invisible.
-- Facts returned by a search are the 10 whose predicate, object text or linked node overlaps the query's content terms (same stem overlap used in §6), plus any fact whose object node is a detected entity. `brain_get_facts` and `brain_orient` still list everything.
-- Graph passages stay after the k hybrid passages, so a search returns at most k + 5 × entities passages. The contract (§5) labels them.
+- Facts returned by a search are at most 10: those whose object node is a detected entity (ranked first), then those whose predicate or object text shares a stem with the query (ranked verified first, then confidence, then newest). `brain_get_facts` and `brain_orient` still list everything.
+- Graph passages stay after the k hybrid passages, so a search returns at most k + 5 × min(entities, 5) + 10 passages (the last term is the fallback scan's limit). The contract (§5) labels them.
 
 ### 3.6 `verified_only`
 
@@ -255,7 +258,7 @@ Per-kind breakdowns are always printed.
 
 ### 8.5 Baseline and gate
 
-`eval/baseline.json` holds the last accepted run: metrics overall and per kind, plus per-question ranks. `brain eval run --compare` prints each metric with its delta and lists every question whose rank got worse, by id. `npm run eval:gate` fails when set recall@10 or MRR drops by more than 0.02, when any attribution item fails, when abstention falls, or when degraded fraction is above 0. `brain eval accept` overwrites the baseline after a deliberate change.
+`eval/baseline.json` holds the last accepted run: metrics overall and per kind, plus per-question ranks. `brain eval run --compare` prints each metric with its delta and lists every question whose rank got worse, by id. `npm run eval:gate` fails when set recall@10 or MRR drops by more than 0.02, when any attribution item fails, when abstention falls, or when degraded fraction is above 0. `brain eval run --accept` overwrites the baseline after a deliberate change.
 
 Phase 0 records the baseline on the current code before any retrieval change; the README reports the numbers and the date.
 

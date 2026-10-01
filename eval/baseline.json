@@ -1,0 +1,104 @@
+{
+  "recordedAt": "2026-10-01T17:56:56.551Z",
+  "commit": "8cb4540",
+  "goldenIds": [
+    "q01",
+    "q02",
+    "q03",
+    "q04",
+    "q05",
+    "q06",
+    "q07",
+    "q08",
+    "q09",
+    "q10",
+    "q11",
+    "q12",
+    "q13",
+    "q14"
+  ],
+  "report": {
+    "n": 14,
+    "overall": {
+      "n": 14,
+      "recallAt1": 0.7857142857142858,
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "mrr": 1,
+      "ndcgAt10": 1
+    },
+    "byKind": {
+      "keyword": {
+        "n": 3,
+        "recallAt1": 1,
+        "recallAt5": 1,
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": null
+      },
+      "semantic": {
+        "n": 4,
+        "recallAt1": 0.8333333333333333,
+        "recallAt5": 1,
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": 1
+      },
+      "graph": {
+        "n": 3,
+        "recallAt1": 0.4444444444444444,
+        "recallAt5": 1,
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": null
+      },
+      "filter": {
+        "n": 2,
+        "recallAt1": 1,
+        "recallAt5": 1,
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": null
+      },
+      "fallback": {
+        "n": 2,
+        "recallAt1": 0.6666666666666666,
+        "recallAt5": 1,
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": null
+      }
+    },
+    "negatives": {
+      "n": 0,
+      "abstentionRate": 0,
+      "falseAnswerRate": 0
+    },
+    "paraphrase": {
+      "n": 0,
+      "consistency": 0,
+      "meanRecallDelta": 0
+    },
+    "degradedFraction": 0,
+    "latencyMs": {
+      "p50": 263,
+      "p95": 858
+    }
+  },
+  "ranks": {
+    "q01": 1,
+    "q02": 1,
+    "q03": 1,
+    "q04": 1,
+    "q05": 1,
+    "q06": 1,
+    "q07": 1,
+    "q08": 1,
+    "q09": 1,
+    "q10": 1,
+    "q11": 1,
+    "q12": 1,
+    "q13": 1,
+    "q14": 1
+  }
+}

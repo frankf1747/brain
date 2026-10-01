@@ -1,14 +1,14 @@
-{"question": "What is the salary range for the Acme Senior Data Analyst role?", "expected_origins": ["job_description--acme-senior-data-analyst.md"], "needs": "keyword"}
-{"question": "Who led Acme's Series B?", "expected_origins": ["news--acme-series-b.md"], "needs": "keyword"}
-{"question": "Does Acme sponsor work visas?", "expected_origins": ["job_description--acme-senior-data-analyst.md", "conversation--interview-prep-with-priya.md", "email--recruiter-followup-beta-ventures.md"], "needs": "semantic"}
-{"question": "What should I study before the SQL screen?", "expected_origins": ["conversation--interview-prep-with-priya.md"], "needs": "semantic"}
-{"question": "Why can't you satisfy every fairness definition at once?", "expected_origins": ["note--fairness-in-ml.md"], "needs": "semantic"}
-{"question": "How much did prepending context to chunks reduce retrieval failures?", "expected_origins": ["paper--contextual-retrieval-abstract.md"], "needs": "semantic"}
-{"question": "What do I know about Priya Natarajan?", "expected_origins": ["conversation--interview-prep-with-priya.md", "job_description--acme-senior-data-analyst.md", "email--recruiter-followup-beta-ventures.md"], "needs": "graph"}
-{"question": "Which companies is Beta Ventures connected to?", "expected_origins": ["news--acme-series-b.md", "email--recruiter-followup-beta-ventures.md"], "needs": "graph"}
-{"question": "What is the ZX-9000?", "expected_origins": ["news--acme-series-b.md", "job_description--acme-senior-data-analyst.md"], "needs": "graph"}
-{"question": "Acme funding news", "expected_origins": ["news--acme-series-b.md"], "needs": "filter", "filters": {"sourceKinds": ["news"]}}
-{"question": "remote product analyst Denver", "expected_origins": ["email--recruiter-followup-beta-ventures.md"], "needs": "filter", "filters": {"sourceKinds": ["email"]}}
-{"question": "Chouldechova", "expected_origins": ["note--fairness-in-ml.md"], "needs": "keyword"}
-{"question": "X-90", "expected_origins": ["news--acme-series-b.md", "job_description--acme-senior-data-analyst.md", "conversation--interview-prep-with-priya.md"], "needs": "fallback"}
-{"question": "$115k", "expected_origins": ["email--recruiter-followup-beta-ventures.md"], "needs": "fallback"}
+{"id":"q01","question":"What is the salary range for the Acme Senior Data Analyst role?","kind":"keyword","expected":[{"origin":"job_description--acme-senior-data-analyst.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q02","question":"Who led Acme's Series B?","kind":"keyword","expected":[{"origin":"news--acme-series-b.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q03","question":"Does Acme sponsor work visas?","kind":"semantic","expected":[{"origin":"job_description--acme-senior-data-analyst.md"},{"origin":"conversation--interview-prep-with-priya.md"},{"origin":"email--recruiter-followup-beta-ventures.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q04","question":"What should I study before the SQL screen?","kind":"semantic","expected":[{"origin":"conversation--interview-prep-with-priya.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q05","question":"Why can't you satisfy every fairness definition at once?","kind":"semantic","expected":[{"origin":"note--fairness-in-ml.md","quote":"cannot satisfy all three when base rates differ"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q06","question":"How much did prepending context to chunks reduce retrieval failures?","kind":"semantic","expected":[{"origin":"paper--contextual-retrieval-abstract.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q07","question":"What do I know about Priya Natarajan?","kind":"graph","expected":[{"origin":"conversation--interview-prep-with-priya.md"},{"origin":"job_description--acme-senior-data-analyst.md"},{"origin":"email--recruiter-followup-beta-ventures.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q08","question":"Which companies is Beta Ventures connected to?","kind":"graph","expected":[{"origin":"news--acme-series-b.md"},{"origin":"email--recruiter-followup-beta-ventures.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q09","question":"What is the ZX-9000?","kind":"graph","expected":[{"origin":"news--acme-series-b.md"},{"origin":"job_description--acme-senior-data-analyst.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q10","question":"Acme funding news","kind":"filter","expected":[{"origin":"news--acme-series-b.md"}],"filters":{"sourceKinds":["news"]},"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q11","question":"remote product analyst Denver","kind":"filter","expected":[{"origin":"email--recruiter-followup-beta-ventures.md"}],"filters":{"sourceKinds":["email"]},"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q12","question":"Chouldechova","kind":"keyword","expected":[{"origin":"note--fairness-in-ml.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q13","question":"X-90","kind":"fallback","expected":[{"origin":"news--acme-series-b.md"},{"origin":"job_description--acme-senior-data-analyst.md"},{"origin":"conversation--interview-prep-with-priya.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"q14","question":"$115k","kind":"fallback","expected":[{"origin":"email--recruiter-followup-beta-ventures.md"}],"source":"fixture","approved_at":"2026-09-30"}
