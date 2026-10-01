@@ -53,6 +53,20 @@ describe("search", () => {
     expect(res.facts).toEqual([]);
   });
 
+  it("keyword side matches a question that shares only some terms with the passage", async () => {
+    const ctx = await seed();
+    ctx.embedder = { embed: async () => { throw new Error("no vectors in this test"); } } as unknown as typeof ctx.embedder;
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // "Texas" and "year" appear nowhere; the old AND query returned nothing.
+      const res = await search(ctx, "What did Zorblax release in Texas this year?");
+      // Hybrid group only: entity detection also brings the passage in as a graph passage.
+      expect(res.passages.some((p) => p.group === "hybrid" && p.content.includes("ZX-9000"))).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   it("falls back to a raw substring scan when nothing ranks well", async () => {
     const ctx = await seed();
     const res = await search(ctx, "X-90");
