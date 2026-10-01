@@ -206,8 +206,9 @@ export interface UndoReport {
   keptVerified: { id: string; predicate: string; objectText: string }[];
   /**
    * Unverified facts from the document that the owner replaced (their supersession chain ends at a fact the
-   * owner verified or wrote, such as a supersedeFact correction). Kept as the history of that correction, so
-   * re-resolving hits the dedupe index instead of bringing the old value back as current.
+   * owner verified or wrote, such as a supersedeFact correction, through a link the owner made rather than
+   * one extraction made by parking the fact behind the owner's value). Kept as the history of that
+   * correction, so re-resolving does not bring the old value back as current.
    */
   keptCorrected: { id: string; predicate: string; objectText: string }[];
   edges: { id: string; type: string; fromName: string; toName: string }[];
@@ -217,13 +218,20 @@ export interface UndoReport {
 }
 
 /**
- * Follows superseded_by from `start` through the facts in `through` and returns the first fact outside it,
- * or null when the chain ends or cycles inside it.
+ * Follows superseded_by from `from` (which points at `start`) through the facts in `through`. Returns the first
+ * fact outside it as `end` (null when the chain ends or cycles inside it) and the fact whose superseded_by
+ * points at that end as `last`.
  */
-function chainEnd(start: string | null, through: Set<string>, next: Map<string, string | null>): string | null {
+function chainEnd(
+  from: string, start: string | null, through: Set<string>, next: Map<string, string | null>,
+): { last: string; end: string | null } {
+  let last = from;
   let target = start;
-  for (let hops = 0; target !== null && through.has(target) && hops <= through.size; hops++) target = next.get(target) ?? null;
-  return target !== null && through.has(target) ? null : target;
+  for (let hops = 0; target !== null && through.has(target) && hops <= through.size; hops++) {
+    last = target;
+    target = next.get(target) ?? null;
+  }
+  return { last, end: target !== null && through.has(target) ? null : target };
 }
 
 /** previous_valid_to from the fact's latest 'superseded' event naming this superseder, or null. */
@@ -261,24 +269,21 @@ export async function undoResolution(sql: Db, documentId: string, opts: { by?: s
     report.keptVerified = produced.filter((f) => f.verified).map(view);
 
     // An unverified fact whose chain (through the document's other unverified facts) ends at a fact the owner
-    // holds is the record of an owner correction: keep it.
+    // holds (brain.fact_owner_held), by a link the owner made (brain.fact_link_is_correction), is the record of
+    // an owner correction: keep it. A fact extraction parked behind the owner's value is not.
     const unverified = produced.filter((f) => !f.verified);
     const candidates = new Set(unverified.map((f) => f.id));
     const next = new Map(produced.map((f) => [f.id, f.superseded_by]));
-    const ends = new Map(unverified.map((f) => [f.id, chainEnd(f.superseded_by, candidates, next)]));
-    const endIds = [...new Set([...ends.values()].filter((e): e is string => e !== null))];
-    // brain.fact_owner_held: verified, or written by someone other than the extractor.
-    const held = new Set(
-      (endIds.length
-        ? await tx<{ id: string }[]>`
-            select id from brain.facts where id = any(${endIds}::uuid[]) and brain.fact_owner_held(verified, verified_by)`
-        : []
-      ).map((f) => f.id),
-    );
-    const isCorrected = (f: Row) => {
-      const end = ends.get(f.id);
-      return end != null && held.has(end);
-    };
+    const links = new Map(unverified.map((f) => [f.id, chainEnd(f.id, f.superseded_by, candidates, next)]));
+    const corrected = new Set<string>();
+    for (const [id, link] of links) {
+      if (link.end === null) continue;
+      const [row] = await tx<{ ok: boolean }[]>`
+        select brain.fact_owner_held(verified, verified_by) and brain.fact_link_is_correction(${link.last}, ${link.end}) as ok
+        from brain.facts where id = ${link.end}`;
+      if (row?.ok) corrected.add(id);
+    }
+    const isCorrected = (f: Row) => corrected.has(f.id);
     report.keptCorrected = unverified.filter(isCorrected).map(view);
     const doomed = unverified.filter((f) => !isCorrected(f));
     report.facts = doomed.map(view);
@@ -293,15 +298,19 @@ export async function undoResolution(sql: Db, documentId: string, opts: { by?: s
         order by created_at, id
         for update`;
       for (const r of referrers) {
-        const target = chainEnd(r.superseded_by, doomedSet, next);
+        const { last, end: target } = chainEnd(r.id, r.superseded_by, doomedSet, next);
         const previous = await previousValidTo(tx, r.id, r.superseded_by);
         if (target !== null) {
+          // The new link inherits the author of the link it replaces (last -> target), so a fact extraction
+          // parked behind the owner's value never turns into an owner correction by being re-pointed.
+          const [inherited] = await tx<{ link_by: string | null }[]>`select brain.fact_link_by(${last}, ${target}) as link_by`;
           await tx`update brain.facts set superseded_by = ${target} where id = ${r.id}`;
           // A later undo that removes `target` restores this fact from this row.
+          const detail: Record<string, string | null> = { superseded_by: target, previous_valid_to: previous };
+          if (inherited?.link_by) detail.link_by = inherited.link_by;
           await tx`
             insert into brain.fact_events (fact_id, event, by, document_id, detail)
-            values (${r.id}, 'superseded', ${by}, ${documentId},
-                    ${tx.json({ superseded_by: target, previous_valid_to: previous } as postgres.JSONValue)})`;
+            values (${r.id}, 'superseded', ${by}, ${documentId}, ${tx.json(detail as postgres.JSONValue)})`;
           continue;
         }
         await tx`update brain.facts set superseded_by = null, valid_to = ${previous}::date where id = ${r.id}`;

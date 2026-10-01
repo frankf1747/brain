@@ -3,7 +3,10 @@ import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { ingest } from "../../src/ingest/pipeline.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { runResolve } from "../../src/ingest/stages/resolve.js";
+import { runChunk } from "../../src/ingest/stages/chunk.js";
+import { runExtract } from "../../src/ingest/stages/extract.js";
 import { setAuthor } from "../../src/ingest/set-author.js";
+import { supersedeFact, verifyFact } from "../../src/graph/facts.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -91,6 +94,51 @@ describe("supersession by the extractor", () => {
       ["restored", austin.id],
       ["removed", denver.id],
     ]);
+  });
+
+  it("an undated owner note never overrides the owner's own correction", async () => {
+    await ownerNote("I live in Austin.", "2026-06-01T12:00:00Z");
+    const austin = (await factsFor("lives_in"))[0];
+    const boulder = await supersedeFact(sql, austin.id, { objectText: "Boulder", by: "frank" });
+    const denverDoc = (await ingest(ctx, { text: "I moved to Denver.", sourceKind: "note" })).id;
+    const rows = await factsFor("lives_in");
+    expect(current(rows)).toEqual(["Boulder"]);
+    const denver = rows.find((r) => r.object_text === "Denver")!;
+    expect(denver.superseded_by).toBe(boulder);
+    expect((await events()).slice(-1)).toEqual([
+      { fact_id: denver.id, event: "superseded", by: "extractor:fake", document_id: denverDoc, superseded_by: boulder },
+    ]);
+  });
+
+  it("a newer owner note never overrides a value the owner verified", async () => {
+    await ownerNote("I live in Austin.", "2026-06-01T12:00:00Z");
+    const austin = (await factsFor("lives_in"))[0];
+    expect(await verifyFact(sql, austin.id, "frank")).toBe(true);
+    await ownerNote("I moved to Denver.", "2026-09-26T12:00:00Z");
+    const rows = await factsFor("lives_in");
+    expect(current(rows)).toEqual(["Austin"]);
+    expect(rows.find((r) => r.object_text === "Denver")!.superseded_by).toBe(austin.id);
+  });
+
+  it("undoing a note kept behind the owner's value leaves the owner's value current", async () => {
+    await ownerNote("I live in Austin.", "2026-06-01T12:00:00Z");
+    const austin = (await factsFor("lives_in"))[0];
+    expect(await verifyFact(sql, austin.id, "frank")).toBe(true);
+    const denverDoc = await ownerNote("I moved to Denver.", "2026-09-26T12:00:00Z");
+    await setAuthor(ctx, denverDoc, "other");
+    expect(await factsFor("lives_in")).toEqual([{ id: austin.id, object_text: "Austin", superseded_by: null, valid_to: null }]);
+  });
+
+  it("re-chunking a note kept behind the owner's value parks it again", async () => {
+    await ownerNote("I live in Austin.", "2026-06-01T12:00:00Z");
+    const austin = (await factsFor("lives_in"))[0];
+    expect(await verifyFact(sql, austin.id, "frank")).toBe(true);
+    const denverDoc = await ownerNote("I moved to Denver.", "2026-09-26T12:00:00Z");
+    await runChunk(ctx, denverDoc);
+    await runExtract(ctx, denverDoc);
+    await runResolve(ctx, denverDoc);
+    const rows = await factsFor("lives_in");
+    expect(rows.map((r) => [r.object_text, r.superseded_by])).toEqual([["Austin", null], ["Denver", austin.id]]);
   });
 
   it("re-resolving either note, in any order, keeps exactly one current value", async () => {

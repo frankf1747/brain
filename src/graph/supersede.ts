@@ -23,10 +23,14 @@ export async function linkSupersession(
 }
 
 /**
- * After resolve inserts `factId` (a single-valued predicate from an owner document): every current fact with
- * the same subject and predicate, a different value (case-insensitive) and an effective date not later than
- * the new fact's is superseded by it. If a current fact is newer, the new fact is itself superseded by the
- * newest one, so the predicate keeps exactly one current value whatever order documents are resolved in.
+ * After resolve inserts `factId` (a single-valued predicate from an owner document), among the current facts
+ * with the same subject and predicate and a different value (case-insensitive):
+ * - an owner-held one (brain.fact_owner_held: verified, or set by hand) is never superseded by extraction,
+ *   whatever the dates: the new fact is inserted already superseded by it;
+ * - extractor-written ones with an effective date not later than the new fact's are superseded by it;
+ * - otherwise, if an extractor-written one is newer, the new fact is superseded by the newest one.
+ * So the predicate keeps exactly one current value whatever order documents are resolved in, and an owner
+ * action always wins. Every link goes through linkSupersession, so undo can reverse it.
  */
 export async function supersedeByExtraction(
   sql: Db,
@@ -34,10 +38,11 @@ export async function supersedeByExtraction(
 ): Promise<{ superseded: string[]; supersededBy: string | null }> {
   return sql.begin(async (tx) => {
     const [mine] = await tx<{ eff: string }[]>`select brain.fact_effective_from(${input.factId})::text as eff`;
-    const others = await tx<{ id: string; eff: string; not_newer: boolean }[]>`
+    const others = await tx<{ id: string; eff: string; not_newer: boolean; owner_held: boolean }[]>`
       select f.id,
              brain.fact_effective_from(f.id)::text as eff,
-             brain.fact_effective_from(f.id) <= brain.fact_effective_from(${input.factId}) as not_newer
+             brain.fact_effective_from(f.id) <= brain.fact_effective_from(${input.factId}) as not_newer,
+             brain.fact_owner_held(f.verified, f.verified_by) as owner_held
       from brain.facts f
       where f.subject_id = ${input.subjectId}
         and f.predicate = ${input.predicate}
@@ -48,11 +53,12 @@ export async function supersedeByExtraction(
       order by brain.fact_effective_from(f.id) desc, f.created_at desc
       for update`;
     const superseded: string[] = [];
-    for (const o of others.filter((x) => x.not_newer)) {
+    for (const o of others.filter((x) => x.not_newer && !x.owner_held)) {
       await linkSupersession(tx, { oldId: o.id, newId: input.factId, by: input.by, documentId: input.documentId, endsOn: mine.eff });
       superseded.push(o.id);
     }
-    const newest = others.find((x) => !x.not_newer) ?? null;
+    // `others` is newest first, so this is the newest owner-held fact, else the newest newer extracted one.
+    const newest = others.find((x) => x.owner_held) ?? others.find((x) => !x.not_newer) ?? null;
     if (newest) {
       await linkSupersession(tx, { oldId: input.factId, newId: newest.id, by: input.by, documentId: input.documentId, endsOn: newest.eff });
     }

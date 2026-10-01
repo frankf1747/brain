@@ -73,17 +73,42 @@ language sql immutable as $$
   select p_verified or coalesce(p_verified_by, '') not like 'extractor:%';
 $$;
 
--- (Task 7) True when following superseded_by from the fact reaches a fact the owner holds: the fact is the
--- record of an owner correction. UNION (not UNION ALL) stops on a cycle.
+-- (Task 7) Who linked p_fact to p_to (superseded_by): the `by` of the latest 'superseded' event naming p_to,
+-- or the detail's link_by when undo re-pointed the fact past removed facts (it carries the original link's
+-- author forward). Null when no event records the link.
+create or replace function brain.fact_link_by(p_fact uuid, p_to uuid) returns text
+language sql stable as $$
+  select coalesce(detail->>'link_by', by) from brain.fact_events
+  where fact_id = p_fact and event = 'superseded' and detail->>'superseded_by' = p_to::text
+  order by created_at desc, id desc
+  limit 1;
+$$;
+
+-- (Task 7) A supersession link into an owner-held fact is an owner correction unless the extractor made it
+-- (extraction parks a fact behind the owner's value; that is not a correction). An unrecorded link counts as
+-- the owner's.
+create or replace function brain.fact_link_is_correction(p_fact uuid, p_to uuid) returns boolean
+language sql stable as $$
+  select coalesce(brain.fact_link_by(p_fact, p_to), '') not like 'extractor:%';
+$$;
+
+-- (Task 7) True when the first owner-held fact reached by following superseded_by from the fact was linked
+-- by an owner correction: the fact is the record of that correction.
 create or replace function brain.fact_corrected_by_owner(p_fact uuid) returns boolean
 language sql stable as $$
-  with recursive chain(id) as (
-    select superseded_by from brain.facts where id = p_fact and superseded_by is not null
-    union
-    select f.superseded_by from brain.facts f join chain c on f.id = c.id where f.superseded_by is not null
-  )
-  select exists (
-    select 1 from chain c join brain.facts f on f.id = c.id where brain.fact_owner_held(f.verified, f.verified_by));
+  with recursive chain(from_id, to_id, depth) as (
+    select id, superseded_by, 1 from brain.facts where id = p_fact and superseded_by is not null
+    union all
+    select f.id, f.superseded_by, c.depth + 1
+    from chain c join brain.facts f on f.id = c.to_id
+    where f.superseded_by is not null
+  ) cycle from_id set is_cycle using path
+  select coalesce((
+    select brain.fact_link_is_correction(c.from_id, c.to_id)
+    from chain c join brain.facts t on t.id = c.to_id
+    where not c.is_cycle and brain.fact_owner_held(t.verified, t.verified_by)
+    order by c.depth
+    limit 1), false);
 $$;
 
 commit;
