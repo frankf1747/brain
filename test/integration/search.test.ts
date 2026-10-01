@@ -27,6 +27,12 @@ const handler = ({ system, user }: { system: string; user: string }) =>
     ? { title: "Untitled", summary_line: "A note.", summary: user.slice(0, 80), occurred_at: null }
     : user.includes("Clinical Trial Risk") ? longExtraction : user.includes("Zorblax") ? extraction : { entities: [], relations: [], facts_about_self: [] };
 
+/** Makes every reranked hit weak, so the fallback scan runs even when keyword search found the document. */
+function weakRerank<T extends { reranker: unknown }>(ctx: T): T {
+  ctx.reranker = { rerank: async (_q: string, docs: string[], k: number) => docs.slice(0, k).map((_d, index) => ({ index, score: 0.01 })) };
+  return ctx;
+}
+
 async function seed() {
   const ctx = fakeCtx(sql, handler);
   await ingest(ctx, { text: "Zorblax Industries in Austin released the ZX-9000 drill. I am on F-1 OPT.", sourceKind: "news", title: "Zorblax news" });
@@ -80,14 +86,65 @@ describe("search", () => {
     expect(fb.content).toContain("ZX-9000");
   });
 
-  it("treats LIKE metacharacters in the query literally in the fallback scan", async () => {
+  it("does not scan for a plain natural-language question even when nothing ranks well", async () => {
     const ctx = await seed();
-    // No seeded document contains a literal "%" or "_"; unescaped, "%" would match every document.
-    for (const q of ["%", "_"]) {
+    ctx.reranker = { rerank: async (_q, docs, k) => docs.slice(0, k).map((_d, index) => ({ index, score: 0.01 })) };
+    const res = await search(ctx, "tell me about gardening in winter");
+    expect(res.usedFallback).toBe(false);
+    expect(res.passages.filter((p) => p.group === "fallback")).toEqual([]);
+  });
+
+  it("treats LIKE metacharacters inside a trigger term literally", async () => {
+    const ctx = await seed();
+    for (const q of ["100%", "a_b-1", "100%_1"]) {
       const res = await search(ctx, q);
       expect(res.passages.filter((p) => p.group === "fallback")).toEqual([]);
-      expect(res.usedFallback).toBe(false);
     }
+    // Near-misses that an unescaped pattern would match: "%" spans anything, "_" matches one character.
+    await ingest(ctx, { text: "Revenue grew 1000 points; the code axb-1 shipped.", sourceKind: "note", title: "Near miss" });
+    await ingest(ctx, { text: "Revenue grew 100% and the code a_b-1 shipped.", sourceKind: "note", title: "Exact" });
+    weakRerank(ctx);
+    for (const q of ["100%", "a_b-1"]) {
+      const res = await search(ctx, q);
+      expect(res.passages.filter((p) => p.group === "fallback").map((p) => p.documentTitle)).toEqual(["Exact"]);
+    }
+  });
+
+  it("ranks fallback hits by how many trigger terms they contain", async () => {
+    const ctx = weakRerank(fakeCtx(sql, handler));
+    await ingest(ctx, { text: "Only the X-90 here.", sourceKind: "note", title: "One" });
+    await ingest(ctx, { text: "Order X-90 and ZX-9000 together.", sourceKind: "note", title: "Both" });
+    const res = await search(ctx, "X-90 ZX-9000");
+    const fb = res.passages.filter((p) => p.group === "fallback");
+    expect(fb.map((p) => p.documentTitle)).toEqual(["Both", "One"]);
+  });
+
+  it("returns one fallback passage per document, matches case-insensitively, and windows at document edges", async () => {
+    const ctx = weakRerank(fakeCtx(sql, handler));
+    const long = "x".repeat(500);
+    await ingest(ctx, { text: `ZX-90 ${long} zx-90 ${long} Zx-90 end`, sourceKind: "note", title: "Repeats" });
+    await ingest(ctx, { text: `${long} the code Q-77 closes`, sourceKind: "note", title: "Tail" });
+    const rep = await search(ctx, "zx-90");
+    const fbRep = rep.passages.filter((p) => p.group === "fallback");
+    expect(fbRep).toHaveLength(1);
+    expect(fbRep[0].charStart).toBe(0);
+    expect(fbRep[0].content.startsWith("ZX-90")).toBe(true);
+    const tail = await search(ctx, "q-77");
+    const fbTail = tail.passages.filter((p) => p.group === "fallback");
+    expect(fbTail).toHaveLength(1);
+    expect(fbTail[0].content.endsWith("closes")).toBe(true);
+    expect(fbTail[0].charEnd - fbTail[0].charStart).toBeLessThan(500);
+  });
+
+  it("applies source_kind and since/until to fallback hits", async () => {
+    const ctx = weakRerank(fakeCtx(sql, handler));
+    await ingest(ctx, { text: "Old build K-42 passed.", sourceKind: "news", title: "Old", occurredAt: new Date("2020-01-01T00:00:00Z") });
+    await ingest(ctx, { text: "New build K-42 passed.", sourceKind: "note", title: "New", occurredAt: new Date("2026-01-01T00:00:00Z") });
+    const titles = async (o = {}) => (await search(ctx, "K-42", o)).passages.filter((p) => p.group === "fallback").map((p) => p.documentTitle).sort();
+    expect(await titles()).toEqual(["New", "Old"]);
+    expect(await titles({ since: new Date("2025-01-01T00:00:00Z") })).toEqual(["New"]);
+    expect(await titles({ until: new Date("2021-01-01T00:00:00Z") })).toEqual(["Old"]);
+    expect(await titles({ sourceKinds: ["news"] })).toEqual(["Old"]);
   });
 
   it("applies since/until to graph and fallback passages too", async () => {

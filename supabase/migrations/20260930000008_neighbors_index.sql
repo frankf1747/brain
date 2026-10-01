@@ -3,3 +3,8 @@
 create or replace function brain.canonical_text(s text) returns text language sql immutable as $$
   select btrim(regexp_replace(lower(replace(replace(s, '''', ''), '’', '')), '[^[:alnum:]]+', ' ', 'g'));
 $$;
+
+-- LIKE escaping for the fallback scan (default escape character is backslash).
+create or replace function brain.like_literal(s text) returns text language sql immutable as $$
+  select replace(replace(replace(s, '\', '\\'), '%', '\%'), '_', '\_');
+$$;

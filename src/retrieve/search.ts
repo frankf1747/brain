@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import type { Ctx } from "../ctx.js";
 import { toVector, type Db } from "../db.js";
 import { reciprocalRankFusion } from "./fuse.js";
+import { triggerTerms } from "./fallback.js";
 import { detectEntities, type EntityRef } from "./entities.js";
 
 export interface SearchOptions {
@@ -110,11 +111,6 @@ function toPassage(row: ChunkRow, score: number, group: PassageGroup): Passage {
     score,
     group,
   };
-}
-
-/** Escapes LIKE metacharacters so the user's query matches literally (default escape char is backslash). */
-function likeLiteral(s: string): string {
-  return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }
 
 /** The same date window hybrid_search and summary_search apply, for queries that read documents directly. */
@@ -241,23 +237,31 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
       .map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, confidence: f.confidence, verified: f.verified, sourceChunkId: f.source_chunk_id }));
   }
 
-  // Fallback: raw substring scan when the best reranked hit is weak.
+  // Fallback: literal substring scan for exact-string terms (codes, figures, versions), when the search
+  // was degraded or the best reranked hit is weak. Natural-language queries have no trigger terms and skip it.
+  // In degraded mode scores are RRF values (or keyword-only), so the threshold means nothing: always scan.
   const topScore = passages.find((p) => p.group === "hybrid")?.score ?? null;
   let usedFallback = false;
-  // In degraded mode scores are RRF values (or keyword-only), so the threshold means nothing: always scan.
-  if (degraded || topScore === null || topScore < config.retrieval.fallbackThreshold) {
-    const hits = await sql<{ id: string; title: string | null; source_kind: string; raw_content: string; pos: number }[]>`
-      select d.id, d.title, d.source_kind, d.raw_content, position(lower(${query}) in lower(d.raw_content)) as pos
+  const terms = triggerTerms(query);
+  const weak = degraded || topScore === null || topScore < config.retrieval.fallbackThreshold;
+  if (terms.length && weak) {
+    const hits = await sql<{ id: string; title: string | null; source_kind: string; raw_content: string; matched: string[]; n: number }[]>`
+      select d.id, d.title, d.source_kind, d.raw_content,
+             array(select t from unnest(${terms}::text[]) with ordinality u(t, o)
+                   where d.raw_content ilike '%' || brain.like_literal(t) || '%' order by o) as matched,
+             (select count(*)::int from unnest(${terms}::text[]) t where d.raw_content ilike '%' || brain.like_literal(t) || '%') as n
       from brain.documents d
-      where d.raw_content ilike ${"%" + likeLiteral(query) + "%"}
-        and (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
+      where (${kinds}::text[] is null or d.source_kind = any(${kinds}::text[]))
         and ${inDateRange(sql, "d", since, until)}
+        and exists (select 1 from unnest(${terms}::text[]) t where d.raw_content ilike '%' || brain.like_literal(t) || '%')
+      order by n desc, coalesce(d.occurred_at, d.ingested_at) desc
       limit 10`;
     for (const h of hits) {
       usedFallback = true;
-      const at = Math.max(0, h.pos - 1);
+      const term = h.matched[0];
+      const at = Math.max(0, h.raw_content.toLowerCase().indexOf(term.toLowerCase()));
       const start = Math.max(0, at - 200);
-      const end = Math.min(h.raw_content.length, at + query.length + 200);
+      const end = Math.min(h.raw_content.length, at + term.length + 200);
       passages.push({
         chunkId: null,
         documentId: h.id,
