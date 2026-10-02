@@ -36,6 +36,8 @@ const defaultInput = (r: ReadResult): StoreInput => ({ text: r.text, title: r.ti
 /**
  * Ingests each item on its own: an item that throws (an unreadable file, an empty PDF) is logged and skipped,
  * and the rest still run. Stage failures inside the pipeline are not thrown; they stay on the job for retry.
+ * After the first item the Voyage daily cap stops, the rest are stored, chunked and summarized and stop before
+ * embedding without asking the ledger again (voyageBlocked).
  */
 export async function ingestAll(
   ctx: Ctx,
@@ -46,16 +48,18 @@ export async function ingestAll(
   const toInput = opts.toInput ?? defaultInput;
   const ok: { origin: string; result: IngestOutcome }[] = [];
   const failed: { origin: string; error: string }[] = [];
+  let voyageBlocked = false;
   for (const r of results) {
     let result: IngestOutcome;
     try {
-      result = await ingest(ctx, toInput(r), { until: opts.until });
+      result = await ingest(ctx, toInput(r), { until: opts.until, voyageBlocked });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       failed.push({ origin: r.origin, error: message });
       log.skip(r, message);
       continue;
     }
+    if (result.spendCap) voyageBlocked = true;
     ok.push({ origin: r.origin, result });
     log.done(r, result);
   }

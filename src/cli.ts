@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { makeCtx, type Ctx } from "./ctx.js";
 import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
-import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
+import { redoSkipped, retryFailed, stageCounts, STAGES, SPEND_CAP_ADVICE, type Stage } from "./ingest/pipeline.js";
 import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
@@ -57,7 +57,7 @@ program
     const author = opts.author === undefined ? undefined : parseAuthor(opts.author);
     await withCtx(async (ctx) => {
       const meta = parseMeta(opts.meta);
-      const { failed } = await ingestAll(
+      const { ok, failed } = await ingestAll(
         ctx,
         await readInput(input),
         {
@@ -78,6 +78,7 @@ program
           skip: logSkip,
         },
       );
+      if (ok.some((o) => o.result.spendCap)) console.error(SPEND_CAP_ADVICE);
       if (failed.length) process.exitCode = 1;
     });
   });
@@ -113,6 +114,7 @@ program
       for (const r of results) {
         console.log(`${r.documentId} ${r.stage}${r.skipped ? " (busy, left alone)" : ""}${r.error ? " ERROR " + r.error : ""}`);
       }
+      if (results.some((r) => r.spendCap)) console.log(SPEND_CAP_ADVICE);
     });
   });
 

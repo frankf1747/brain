@@ -3,7 +3,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import type { z } from "zod";
 import { config } from "../config.js";
 import type { Ctx } from "../ctx.js";
-import { runPipeline } from "./pipeline.js";
+import { runPipeline, SPEND_CAP_ADVICE } from "./pipeline.js";
 import { SummarySchema, buildSummaryRequests, applySummary, applyStubSummary, type Summary } from "./stages/summarize.js";
 import { ExtractionSchema, buildExtractionRequests, applyExtraction, markExtractionSkipped, type ExtractionRequest, type Extraction } from "./stages/extract.js";
 
@@ -175,9 +175,13 @@ export async function backfill(ctx: Ctx, opts: { client?: Anthropic; limit?: num
   const s = await runBatch(client, ctx, "summarized", summaryDocs, summaryPending, pollMs);
   console.log(`summaries: ${s.applied} applied, ${s.fellBack} stubbed, ${s.failed} failed`);
 
-  // 3. Embeddings online (Voyage, cheap and fast).
+  // 3. Embeddings online (Voyage). After the daily cap refuses one document, the rest are deferred without asking again.
+  let voyageBlocked = false;
   const summarized = await ctx.sql<{ document_id: string }[]>`select document_id from brain.ingest_jobs where stage = 'summarized' limit ${limit}`;
-  for (const j of summarized) await runPipeline(ctx, j.document_id, { until: "embedded" });
+  for (const j of summarized) {
+    const r = await runPipeline(ctx, j.document_id, { until: "embedded", voyageBlocked });
+    if (r.spendCap) voyageBlocked = true;
+  }
 
   // 4. Extraction in one batch, one request per section.
   const embedded = await ctx.sql<{ document_id: string }[]>`select document_id from brain.ingest_jobs where stage = 'embedded' limit ${limit}`;
@@ -203,5 +207,9 @@ export async function backfill(ctx: Ctx, opts: { client?: Anthropic; limit?: num
 
   // 5. Resolve online (local plus name embeddings).
   const extracted = await ctx.sql<{ document_id: string }[]>`select document_id from brain.ingest_jobs where stage = 'extracted' limit ${limit}`;
-  for (const j of extracted) await runPipeline(ctx, j.document_id);
+  for (const j of extracted) {
+    const r = await runPipeline(ctx, j.document_id, { voyageBlocked });
+    if (r.spendCap) voyageBlocked = true;
+  }
+  if (voyageBlocked) console.log(SPEND_CAP_ADVICE);
 }

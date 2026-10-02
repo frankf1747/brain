@@ -2,6 +2,7 @@ import type { Ctx } from "../ctx.js";
 import { storeDocument, type StoreInput } from "./store.js";
 import { withDocumentLock } from "./lock.js";
 import type { Author } from "./author.js";
+import { isSpendCap, SPEND_CAP_PREFIX } from "../llm/errors.js";
 import { runChunk } from "./stages/chunk.js";
 import { runSummarize } from "./stages/summarize.js";
 import { runEmbed } from "./stages/embed.js";
@@ -10,6 +11,17 @@ import { runResolve } from "./stages/resolve.js";
 
 export const STAGES = ["stored", "chunked", "summarized", "embedded", "extracted", "resolved", "done"] as const;
 export type Stage = (typeof STAGES)[number];
+
+/** Stages whose runner calls Voyage: embed (passages and summary) and resolve (entity names). */
+export const VOYAGE_STAGES: readonly Stage[] = ["embedded", "resolved"];
+
+/** The job error of a document a batch stopped before a Voyage stage because an earlier document hit the cap. */
+export const DEFERRED_MESSAGE = `${SPEND_CAP_PREFIX}deferred: the Voyage daily cap was reached earlier in this run`;
+
+/** Printed by the CLI after a run in which the cap stopped any document. */
+export const SPEND_CAP_ADVICE =
+  "Voyage daily cap reached: documents stopped before the stages that call Voyage (embedding, resolving). " +
+  "`brain retry` finishes them after 00:00 UTC, or now if BRAIN_VOYAGE_DAILY_TOKEN_CAP is raised; `brain usage` shows today's spend.";
 
 /** A stage may return a report (runResolve does); the pipeline ignores it. */
 type Runner = (ctx: Ctx, documentId: string) => Promise<unknown>;
@@ -28,6 +40,19 @@ export interface PipelineResult {
   error: string | null;
   /** True when another runner holds this document's lock, so this call did nothing. */
   skipped?: boolean;
+  /** True when the Voyage daily cap stopped the run: refused by the ledger, or deferred (DEFERRED_MESSAGE). */
+  spendCap?: boolean;
+}
+
+export interface RunOptions {
+  /** Stop after this stage (default done). */
+  until?: Stage;
+  /**
+   * Set by batch callers once any document in the batch hit the Voyage daily cap: the run stops before the first
+   * stage that calls Voyage and records DEFERRED_MESSAGE, without asking the ledger again. Chunk and summarize,
+   * which do not call Voyage, still run.
+   */
+  voyageBlocked?: boolean;
 }
 
 /**
@@ -69,30 +94,42 @@ async function currentStage(ctx: Ctx, documentId: string): Promise<Stage> {
  * returns the current stage with skipped: true and does nothing. At most MAX_CONCURRENT_PIPELINES
  * runs proceed at once per process; the rest wait their turn.
  */
-export async function runPipeline(ctx: Ctx, documentId: string, opts: { until?: Stage } = {}): Promise<PipelineResult> {
+export async function runPipeline(ctx: Ctx, documentId: string, opts: RunOptions = {}): Promise<PipelineResult> {
   await acquireSlot();
   try {
-    return await runLocked(ctx, documentId, opts.until ?? "done");
+    return await runLocked(ctx, documentId, opts.until ?? "done", opts.voyageBlocked ?? false);
   } finally {
     releaseSlot();
   }
 }
 
-async function runLocked(ctx: Ctx, documentId: string, until: Stage): Promise<PipelineResult> {
-  const r = await withDocumentLock(ctx.sql, documentId, () => advance(ctx, documentId, until));
+async function runLocked(ctx: Ctx, documentId: string, until: Stage, voyageBlocked: boolean): Promise<PipelineResult> {
+  const r = await withDocumentLock(ctx.sql, documentId, () => advance(ctx, documentId, until, voyageBlocked));
   return r.locked ? r.value : { documentId, stage: await currentStage(ctx, documentId), error: null, skipped: true };
 }
 
-async function advance(ctx: Ctx, documentId: string, target: Stage): Promise<PipelineResult> {
+async function advance(ctx: Ctx, documentId: string, target: Stage, voyageBlocked: boolean): Promise<PipelineResult> {
   for (;;) {
     const stage = await currentStage(ctx, documentId);
     const idx = STAGES.indexOf(stage);
     if (idx >= STAGES.indexOf(target)) return { documentId, stage, error: null };
     const next = STAGES[idx + 1] as Exclude<Stage, "stored">;
+    if (voyageBlocked && VOYAGE_STAGES.includes(next)) {
+      // Not a failure: no attempt is counted, so `brain retry` and resumeStalled pick it up later.
+      await ctx.sql`update brain.ingest_jobs set error = ${DEFERRED_MESSAGE}, updated_at = now() where document_id = ${documentId}`;
+      return { documentId, stage, error: DEFERRED_MESSAGE, spendCap: true };
+    }
     try {
       await RUNNERS[next](ctx, documentId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (isSpendCap(err)) {
+        // The ledger refused the call before it was sent. Not this document's failure, so no attempt is counted:
+        // resumeStalled only resumes jobs with attempts < 5, and capped days must not use those up.
+        const capped = SPEND_CAP_PREFIX + message;
+        await ctx.sql`update brain.ingest_jobs set error = ${capped}, updated_at = now() where document_id = ${documentId}`;
+        return { documentId, stage, error: capped, spendCap: true };
+      }
       await ctx.sql`update brain.ingest_jobs set error = ${message}, attempts = attempts + 1, updated_at = now() where document_id = ${documentId}`;
       return { documentId, stage, error: message };
     }
@@ -118,21 +155,29 @@ function documentChanged(ctx: Ctx, documentId: string): void {
 export async function ingest(
   ctx: Ctx,
   input: StoreInput,
-  opts: { until?: Stage } = {},
+  opts: RunOptions = {},
 ): Promise<PipelineResult & { created: boolean; id: string; author: Author }> {
   const { id, created, author } = await storeDocument(ctx.sql, input);
   const result = await runPipeline(ctx, id, opts);
   return { ...result, created, id: result.documentId, author };
 }
 
-/** Re-runs every job that is not done, oldest first. */
+/**
+ * Re-runs every job that is not done, oldest first. After the first document the Voyage cap stops, the rest run
+ * with voyageBlocked: they still get chunked and summarized, and stop before embedding without asking the ledger.
+ */
 export async function retryFailed(ctx: Ctx, opts: { stage?: Stage; limit?: number } = {}): Promise<PipelineResult[]> {
   const jobs = await ctx.sql<{ document_id: string }[]>`
     select document_id from brain.ingest_jobs
     where stage <> 'done' and (${opts.stage ?? null}::text is null or stage = ${opts.stage ?? null})
     order by updated_at limit ${opts.limit ?? 1000}`;
   const out: PipelineResult[] = [];
-  for (const j of jobs) out.push(await runPipeline(ctx, j.document_id));
+  let voyageBlocked = false;
+  for (const j of jobs) {
+    const r = await runPipeline(ctx, j.document_id, { voyageBlocked });
+    out.push(r);
+    if (r.spendCap) voyageBlocked = true;
+  }
   return out;
 }
 
@@ -144,7 +189,8 @@ const AFTER_EMBEDDED: Stage[] = ["extracted", "resolved", "done"];
  * Redoes enrichment that was skipped because the model refused or kept failing the schema: a stubbed
  * summary is redone from the chunked stage (which also redoes embedding and extraction), a skipped
  * extraction from the embedded stage. The reset happens only while holding the document's advisory
- * lock, so a document another runner holds is left alone and reported as skipped.
+ * lock, so a document another runner holds is left alone and reported as skipped. Stops asking Voyage
+ * after the first cap refusal, like retryFailed.
  */
 export async function redoSkipped(ctx: Ctx, opts: { limit?: number } = {}): Promise<PipelineResult[]> {
   const docs = await ctx.sql<{ id: string }[]>`
@@ -152,12 +198,15 @@ export async function redoSkipped(ctx: Ctx, opts: { limit?: number } = {}): Prom
     where d.metadata->>'summary' = 'skipped' or d.metadata->>'extraction' = 'skipped'
     order by j.updated_at limit ${opts.limit ?? 1000}`;
   const out: PipelineResult[] = [];
+  let voyageBlocked = false;
   for (const { id } of docs) {
     if (!(await resetSkipped(ctx, id))) {
       out.push({ documentId: id, stage: await currentStage(ctx, id), error: null, skipped: true });
       continue;
     }
-    out.push(await runPipeline(ctx, id));
+    const r = await runPipeline(ctx, id, { voyageBlocked });
+    out.push(r);
+    if (r.spendCap) voyageBlocked = true;
   }
   return out;
 }

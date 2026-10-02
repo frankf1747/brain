@@ -401,21 +401,77 @@ async function recordSuppressed(sql: Db, documentId: string, n: number): Promise
   }
 }
 
+/** Entity-name vectors for resolving a document, keyed by the embedded text (entityText). */
+export type EntityVectors = Map<string, number[]>;
+
+interface LoadedExtractions {
+  extractions: { section_chunk_id: string; payload: Extraction }[];
+  knownTypes: Set<string>;
+}
+
+async function loadExtractions(sql: Db, documentId: string): Promise<LoadedExtractions> {
+  const rows = await sql<{ section_chunk_id: string; payload: unknown }[]>`
+    select section_chunk_id, payload from brain.extractions where document_id = ${documentId}`;
+  const knownTypes = new Set((await sql<{ name: string }[]>`select name from brain.node_types`).map((r) => r.name));
+  const extractions = rows.map((r) => ({ section_chunk_id: r.section_chunk_id, payload: ExtractionSchema.parse(r.payload) }));
+  return { extractions, knownTypes };
+}
+
+/** The text an entity's name is embedded as: "type: name", unknown types as concept. */
+function entityText(e: Extraction["entities"][number], knownTypes: Set<string>): string {
+  return `${knownTypes.has(e.type) ? e.type : "concept"}: ${e.name}`;
+}
+
+/**
+ * Embeds, in one embedder call (the client splits it into requests of its batch size), every entity name across
+ * the document's extractions that `have` does not already hold. Throws whatever the embedder throws, such as
+ * SpendCapError, before anything is written.
+ */
+async function embedNames(embedder: Ctx["embedder"], loaded: LoadedExtractions, have?: EntityVectors): Promise<EntityVectors> {
+  const vectors: EntityVectors = new Map(have ?? []);
+  const missing = [
+    ...new Set(loaded.extractions.flatMap((ex) => ex.payload.entities.map((e) => entityText(e, loaded.knownTypes)))),
+  ].filter((t) => !vectors.has(t));
+  if (missing.length === 0) return vectors;
+  const got = await embedder.embed(missing, "document");
+  if (got.length !== missing.length) {
+    throw new Error(`Embedder returned ${got.length} vectors for ${missing.length} entity names`);
+  }
+  missing.forEach((t, i) => vectors.set(t, got[i]));
+  return vectors;
+}
+
+/**
+ * Every Voyage call resolving this document needs (its entity-name embeddings), made without writing anything.
+ * set-author calls it before changing the author, so a refusal by the daily cap changes nothing.
+ */
+export async function embedEntityNames(ctx: Ctx, documentId: string): Promise<EntityVectors> {
+  return embedNames(ctx.embedder, await loadExtractions(ctx.sql, documentId));
+}
+
 /**
  * Stage 6. Turns stored extractions into nodes, edges, mentions and facts. Re-running it first undoes the
  * document's previous resolution (undoResolution), so a changed author or payload never leaves stale rows.
+ * Every Voyage call (the entity-name embeddings) happens before the undo, so a call that fails, or that the daily
+ * cap refuses, leaves the previous resolution in place. `vectors` (from embedEntityNames) saves embedding again.
  */
-export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: string } = {}): Promise<ResolveReport> {
+export async function runResolve(
+  ctx: Ctx,
+  documentId: string,
+  opts: { by?: string; vectors?: EntityVectors } = {},
+): Promise<ResolveReport> {
   const { sql, embedder } = ctx;
   const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${documentId}`;
   if (!doc) throw new Error(`Document ${documentId} not found`);
+  const loaded = await loadExtractions(sql, documentId);
+  const { extractions, knownTypes } = loaded;
+  const vectors = await embedNames(embedder, loaded, opts.vectors);
+
   const undone = await undoResolution(sql, documentId, { by: opts.by ?? "resolve" });
   // Hard gate (spec §4.3): whatever the model returned, only a document the owner wrote can state facts
   // about the owner or relations from the owner.
   const ownerWrote = doc.author === "owner";
 
-  const extractions = await sql<{ section_chunk_id: string; payload: unknown }[]>`
-    select section_chunk_id, payload from brain.extractions where document_id = ${documentId}`;
   if (extractions.length === 0) {
     // Extraction skipped; the document is still searchable.
     await recordSuppressed(sql, documentId, 0);
@@ -423,26 +479,18 @@ export async function runResolve(ctx: Ctx, documentId: string, opts: { by?: stri
   }
 
   const [self] = await sql<{ id: string }[]>`select id from brain.nodes where is_self`;
-  const knownTypes = new Set((await sql<{ name: string }[]>`select name from brain.node_types`).map((r) => r.name));
   const knownEdges = new Set((await sql<{ name: string }[]>`select name from brain.edge_types`).map((r) => r.name));
   let suppressed = 0;
 
   for (const ex of extractions) {
-    const payload = ExtractionSchema.parse(ex.payload);
+    const payload = ex.payload;
     const passages = await sql<{ id: string; content: string }[]>`
       select id, content from brain.chunks where parent_id = ${ex.section_chunk_id} order by ordinal`;
     const evidenceFor = (quote: string) => locateQuote(passages, quote);
 
-    const names = payload.entities.map((e) => `${knownTypes.has(e.type) ? e.type : "concept"}: ${e.name}`);
-    const vectors = names.length ? await embedder.embed(names, "document") : [];
-    if (vectors.length !== names.length) {
-      throw new Error(`Embedder returned ${vectors.length} vectors for ${names.length} entity names`);
-    }
-
     const keyToNode = new Map<string, string>();
-    for (let i = 0; i < payload.entities.length; i++) {
-      const e = payload.entities[i];
-      const nodeId = await resolveEntity(sql, e, vectors[i], knownTypes, ctx.llm.model);
+    for (const e of payload.entities) {
+      const nodeId = await resolveEntity(sql, e, vectors.get(entityText(e, knownTypes))!, knownTypes, ctx.llm.model);
       keyToNode.set(e.key, nodeId);
       const loc = evidenceFor(e.quote);
       await sql`

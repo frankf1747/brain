@@ -2,7 +2,8 @@ import type { Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
 import { UUID } from "../retrieve/documents.js";
 import { refreshMirror } from "../obsidian/auto.js";
-import { runResolve, type ResolveReport } from "./stages/resolve.js";
+import { embedEntityNames, runResolve, type EntityVectors, type ResolveReport } from "./stages/resolve.js";
+import { isSpendCap, SPEND_CAP_PREFIX } from "../llm/errors.js";
 import { withDocumentLock } from "./lock.js";
 import { AUTHORS, isAuthor, type Author } from "./author.js";
 
@@ -39,6 +40,7 @@ const RESOLVED_STAGES = new Set(["resolved", "done"]);
  * edges from the owner follow the new author (spec §4.1). A document that has not reached the resolve stage
  * only gets the new author; the pipeline's resolve stage applies the gate when it gets there. Holds the same
  * per-document advisory lock as runPipeline, so it never interleaves with a run on the same document.
+ * When the Voyage daily cap refuses the re-resolve's embeddings, throws without changing anything.
  * Notifies the Obsidian mirror; the CLI flushes it on exit.
  */
 export async function setAuthor(ctx: Ctx, documentId: string, author: Author): Promise<SetAuthorResult> {
@@ -60,18 +62,47 @@ async function setAuthorLocked(ctx: Ctx, documentId: string, author: Author): Pr
     removedFacts: [], removedEdges: [], addedFacts: [], addedEdges: [], keptVerified: [], keptCorrected: [], restoredFacts: [], suppressedSelfItems: 0,
   };
   if (result.unchanged) return result;
+  const reresolve = !!doc.stage && RESOLVED_STAGES.has(doc.stage);
+
+  // The Voyage calls re-resolving needs come first, before anything changes. When the daily cap refuses them the
+  // author stays as it was and so does the graph, so the two never disagree (a document marked `other` whose
+  // facts about the owner are still current) while waiting for the cap to reset.
+  let vectors: EntityVectors | undefined;
+  let embedFailure: { err: unknown } | undefined;
+  if (reresolve) {
+    try {
+      vectors = await embedEntityNames(ctx, documentId);
+    } catch (err) {
+      if (isSpendCap(err)) {
+        const raw = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `author not changed (still ${doc.author}): ${SPEND_CAP_PREFIX}${raw}; ` +
+            "set it again after 00:00 UTC or once BRAIN_VOYAGE_DAILY_TOKEN_CAP is raised (`brain usage` shows today's spend)",
+          { cause: err },
+        );
+      }
+      // Any other failure is handled as before: the author changes and the job goes back before resolve (below).
+      embedFailure = { err };
+    }
+  }
+
   await ctx.sql`update brain.documents set author = ${author} where id = ${documentId}`;
-  if (!doc.stage || !RESOLVED_STAGES.has(doc.stage)) return result;
+  if (!reresolve) return result;
 
   let report: ResolveReport;
   try {
-    report = await runResolve(ctx, documentId, { by: "set-author" });
+    if (embedFailure) throw embedFailure.err;
+    report = await runResolve(ctx, documentId, { by: "set-author", vectors });
   } catch (err) {
-    // The undo has committed and only part of the document may be re-applied. Put the job back before the
-    // resolve stage with the error, so `brain retry` re-runs resolve (which undoes and re-applies in full).
-    const message = err instanceof Error ? err.message : String(err);
+    // runResolve makes its Voyage calls before its undo, but a later failure leaves the undo committed and only
+    // part of the document re-applied. Either way, put the job back before the resolve stage with the error, so
+    // `brain retry` re-runs resolve (which undoes and re-applies in full) under the new author.
+    // A cap refusal is not the document's failure and counts no attempt (as in src/ingest/pipeline.ts).
+    const capped = isSpendCap(err);
+    const raw = err instanceof Error ? err.message : String(err);
+    const message = capped ? SPEND_CAP_PREFIX + raw : raw;
     await ctx.sql`
-      update brain.ingest_jobs set stage = 'extracted', error = ${message}, attempts = attempts + 1, updated_at = now()
+      update brain.ingest_jobs set stage = 'extracted', error = ${message}, attempts = attempts + ${capped ? 0 : 1}, updated_at = now()
       where document_id = ${documentId}`;
     throw new Error(`author changed to ${author} but re-resolving failed: ${message}; run \`brain retry\` to finish`, { cause: err });
   }
