@@ -72,15 +72,38 @@ describe("brain MCP server", () => {
     await s.close();
   });
 
-  it("lists nine tools, or six when read-only", async () => {
+  it("lists ten tools, or seven when read-only (brain_explain is read-only)", async () => {
     const a = await connect();
     expect((await a.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
-      "brain_add_fact", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_ingest", "brain_orient", "brain_search", "brain_status", "brain_supersede_fact",
+      "brain_add_fact", "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_ingest", "brain_orient", "brain_search", "brain_status", "brain_supersede_fact",
     ]);
     await a.close();
     const b = await connect(true);
-    expect((await b.client.listTools()).tools.length).toBe(6);
+    expect((await b.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
+      "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_orient", "brain_search", "brain_status",
+    ]);
     await b.close();
+  });
+
+  it("brain_explain replays a brain_search from its retrieval id, also read-only, and says when the id is unknown", async () => {
+    const s = await connect();
+    await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note" });
+    await s.jobs.drain();
+    const found = await s.call("brain_search", { query: "Acme Corp visa", k: 5 });
+    const id = /^retrieval ([0-9a-f-]{36}) · mode: hybrid/.exec(found.text)![1];
+    await s.close();
+    const ro = await connect(true);
+    const ex = await ro.call("brain_explain", { retrieval_id: id });
+    expect(ex.isError).toBe(false);
+    expect(ex.text.split("\n")[0]).toMatch(new RegExp(`^retrieval ${id} · logged \\S+ · client test$`));
+    expect(ex.text).toContain('query: "Acme Corp visa"');
+    expect(ex.text).toContain("mode: hybrid · k 5");
+    expect(ex.text).toMatch(/#1 \[P1\] score \d\.\d\d \(rerank\) · layers /);
+    const missing = await ro.call("brain_explain", { retrieval_id: "00000000-0000-0000-0000-000000000000" });
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toContain('No logged search has retrieval id "00000000-0000-0000-0000-000000000000"');
+    expect((await sql`select id from brain.retrieval_log`).length).toBe(1);
+    await ro.close();
   });
 
   it("tells clients to route questions about the owner through orient then search", async () => {
@@ -100,6 +123,8 @@ describe("brain MCP server", () => {
     const searchTool = (await s.client.listTools()).tools.find((t) => t.name === "brain_search")!;
     expect(searchTool.description).toContain("score kind rerank is 0 to 1");
     expect(searchTool.description).toContain("structuredContent");
+    expect(searchTool.description).toContain("brain_explain");
+    expect(instructions).toContain("brain_explain with the retrieval id replays how that search ranked its passages");
     expect(searchTool.outputSchema).toBeDefined();
     await s.close();
   });

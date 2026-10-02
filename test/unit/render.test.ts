@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
+  renderExplain,
 } from "../../src/mcp/render.js";
+import { toLoggedPassages } from "../../src/retrieve/contract.js";
+import type { Explanation } from "../../src/retrieve/explain.js";
 import { passage, fact, searchResult } from "./search-fixture.js";
 
 const graphPassage = passage({
@@ -109,6 +112,70 @@ describe("renderSearch", () => {
   it("factLine and searchHeader are what renderSearch prints", () => {
     expect(factLine(fact(), 0)).toBe("[F1] visa_status: F-1 OPT (unverified · from note d9)");
     expect(searchHeader(fixture)).toBe("retrieval r1 · mode: hybrid · 4 passages");
+  });
+});
+
+describe("renderExplain", () => {
+  const base: Explanation = {
+    retrievalId: "r1", query: "acme X-90", client: "mcp-stdio", createdAt: "2026-10-02T09:15:00.000Z",
+    filters: { sourceKinds: ["note", "news"], since: "2026-09-01T00:00:00.000Z", until: null, verifiedOnly: false },
+    v2: true, k: 10, mode: "hybrid", degraded: { embedding: false, rerank: false, capReached: false },
+    candidates: { vector: 60, keyword: 12, fused: 64 }, timings: { embedMs: 120.3, sqlMs: 45.1, rerankMs: 210, graphMs: 3.2, totalMs: 380.9 },
+    results: toLoggedPassages(fixture.passages), layers: ["hybrid", "summary", "graph", "fallback"], chunkIds: ["c1", "c2", "c3"], nodeIds: ["n1"],
+    topScore: 0.76, usedFallback: true,
+  };
+
+  it("replays a v2 row: who and when, filters, mode, flags, candidates, timings, and every passage's ranks and score", () => {
+    expect(renderExplain(base)).toBe(
+      [
+        "retrieval r1 · logged 2026-10-02T09:15:00.000Z · client mcp-stdio",
+        'query: "acme X-90"',
+        "filters: source_kinds note, news · since 2026-09-01T00:00:00.000Z",
+        "mode: hybrid · k 10",
+        "degraded: embedding no · rerank no · cap reached no",
+        "candidates: vector 60 · keyword 12 · fused 64",
+        "timings: embed 120.3 ms · sql 45.1 ms · rerank 210.0 ms · graph 3.2 ms · total 380.9 ms",
+        "top rerank score: 0.76",
+        "fallback scan: used",
+        "",
+        "Passages in rank order (P labels as brain_search showed them): 4",
+        '#1 [P1] score 0.76 (rerank) · layers vector+keyword · vector 2 · keyword 5 · rerank 1 · "Doc" · author: other · news (doc d1, chunk c1)',
+        "#2 [P2] score 0.41 (rerank) · layers vector · vector 1 · keyword - · rerank 2 · (untitled) · author: owner · note (doc d2, chunk c2)",
+        '#3 [P3] score - (none) · layers graph via Acme · vector - · keyword - · rerank - · "Acme memo" · author: owner · note (doc d3, chunk c3)',
+        '#4 [P4] score - (none) · layers fallback "X-90" · vector - · keyword - · rerank - · "Codes" · author: unknown · note (doc d4, chars 10–30)',
+      ].join("\n"),
+    );
+  });
+
+  it("shows the degraded note and an RRF ranking for a degraded row", () => {
+    const rrf = passage({ score: 1 / 61, scoreKind: "rrf", layers: ["keyword"], vectorRank: null, keywordRank: 1, rerankRank: null });
+    const t = renderExplain({
+      ...base, mode: "keyword-only", degraded: { embedding: true, rerank: true, capReached: true }, topScore: null, results: toLoggedPassages([rrf]),
+      filters: {},
+    });
+    expect(t).toContain("filters: none");
+    expect(t).toContain("mode: keyword-only · k 10");
+    expect(t).toContain("degraded: embedding yes · rerank yes · cap reached yes\n(Voyage daily cap reached; keyword-only results)");
+    expect(t).toContain("top rerank score: none (no rerank ran, or it returned nothing)");
+    expect(t).toContain("#1 [P1] score 0.0164 (rrf) · layers keyword · vector - · keyword 1 · rerank -");
+  });
+
+  it("explains what is known about a row logged before evidence v2", () => {
+    const t = renderExplain({
+      ...base, v2: false, k: null, mode: null, degraded: null, candidates: null, timings: null, results: null, filters: {},
+      layers: ["hybrid", "summary", "degraded"], chunkIds: ["c1", "c2"], nodeIds: [], topScore: 0.031, usedFallback: false,
+    });
+    expect(t.split("\n")).toEqual([
+      "retrieval r1 · logged 2026-10-02T09:15:00.000Z · client mcp-stdio",
+      'query: "acme X-90"',
+      "filters: none",
+      "logged before evidence v2: only the chunk ids, the top score, the layers and the fallback flag were recorded.",
+      "layers: hybrid, summary, degraded",
+      "top score: 0.03 (before evidence v2 this is an RRF value when the search was degraded)",
+      "fallback scan: not used",
+      "chunks in rank order (fallback passages were not recorded): c1, c2",
+      "entities: none",
+    ]);
   });
 });
 

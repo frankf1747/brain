@@ -1,4 +1,5 @@
-import { degradedNote, factSource, type FactRow, type LoggedPassage, type SearchResult } from "../retrieve/contract.js";
+import { NOT_DEGRADED, degradedNote, factSource, searchMode, type FactRow, type LoggedPassage, type SearchResult } from "../retrieve/contract.js";
+import type { Explanation } from "../retrieve/explain.js";
 import type { Orientation } from "../retrieve/orient.js";
 import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
@@ -75,6 +76,64 @@ export function renderSearch(r: SearchResult, opts: { brief?: boolean } = {}): s
   return out.join("\n");
 }
 
+const yesNo = (b: boolean) => (b ? "yes" : "no");
+const msText = (n: number) => `${n.toFixed(1)} ms`;
+
+function filtersText(f: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (Array.isArray(f.sourceKinds) && f.sourceKinds.length) parts.push(`source_kinds ${f.sourceKinds.join(", ")}`);
+  if (typeof f.since === "string") parts.push(`since ${f.since}`);
+  if (typeof f.until === "string") parts.push(`until ${f.until}`);
+  if (f.verifiedOnly === true) parts.push("verified_only");
+  return parts.length ? parts.join(" · ") : "none";
+}
+
+/** One passage in brain_explain: rank and label, score with its kind, layers, every branch rank, title, author, ids. */
+export function explainLine(p: LoggedPassage, index: number): string {
+  const rank = (r: number | null) => (r === null ? "-" : String(r));
+  const score = p.score === null ? "-" : p.score.toFixed(p.scoreKind === "rrf" ? 4 : 2);
+  const via = p.viaEntity ? ` via ${p.viaEntity.name}` : p.fallbackTerm !== null ? ` "${p.fallbackTerm}"` : "";
+  const title = p.title ? `"${p.title}"` : "(untitled)";
+  const where = p.chunkId ? `(doc ${p.documentId}, chunk ${p.chunkId})` : `(doc ${p.documentId}, chars ${p.charStart}–${p.charEnd})`;
+  return `#${index + 1} [P${index + 1}] score ${score} (${p.scoreKind}) · layers ${p.layers.join("+")}${via} · vector ${rank(p.vectorRank)} · keyword ${rank(p.keywordRank)} · rerank ${rank(p.rerankRank)} · ${title} · author: ${p.author} · ${p.sourceKind} ${where}`;
+}
+
+/** brain_explain and `brain explain`: a logged search replayed from brain.retrieval_log, with no new search. */
+export function renderExplain(e: Explanation): string {
+  const out = [
+    `retrieval ${e.retrievalId} · logged ${e.createdAt} · client ${e.client ?? "unknown"}`,
+    `query: "${e.query}"`,
+    `filters: ${filtersText(e.filters)}`,
+  ];
+  if (!e.v2 || e.results === null) {
+    out.push(
+      "logged before evidence v2: only the chunk ids, the top score, the layers and the fallback flag were recorded.",
+      `layers: ${e.layers.join(", ") || "none"}`,
+      `top score: ${e.topScore === null ? "none" : e.topScore.toFixed(2)} (before evidence v2 this is an RRF value when the search was degraded)`,
+      `fallback scan: ${e.usedFallback ? "used" : "not used"}`,
+      `chunks in rank order (fallback passages were not recorded): ${e.chunkIds.join(", ") || "none"}`,
+      `entities: ${e.nodeIds.join(", ") || "none"}`,
+    );
+    return out.join("\n");
+  }
+  const d = e.degraded ?? NOT_DEGRADED;
+  out.push(`mode: ${e.mode ?? searchMode(d)} · k ${e.k ?? "unknown"}`);
+  out.push(`degraded: embedding ${yesNo(d.embedding)} · rerank ${yesNo(d.rerank)} · cap reached ${yesNo(d.capReached)}`);
+  const note = degradedNote(d);
+  if (note) out.push(`(${note})`);
+  if (e.candidates) out.push(`candidates: vector ${e.candidates.vector} · keyword ${e.candidates.keyword} · fused ${e.candidates.fused}`);
+  if (e.timings) {
+    const t = e.timings;
+    out.push(`timings: embed ${msText(t.embedMs)} · sql ${msText(t.sqlMs)} · rerank ${msText(t.rerankMs)} · graph ${msText(t.graphMs)} · total ${msText(t.totalMs)}`);
+  }
+  out.push(`top rerank score: ${e.topScore === null ? "none (no rerank ran, or it returned nothing)" : e.topScore.toFixed(2)}`);
+  out.push(`fallback scan: ${e.usedFallback ? "used" : "not used"}`);
+  out.push("", `Passages in rank order (P labels as brain_search showed them): ${e.results.length}`);
+  if (e.results.length === 0) out.push("none");
+  e.results.forEach((p, i) => out.push(explainLine(p, i)));
+  return out.join("\n");
+}
+
 export function renderOrient(o: Orientation): string {
   return [
     `The knowledge base holds ${o.totalDocuments} documents and ${o.nodesByType.reduce((s, t) => s + t.count, 0)} entities.`,
@@ -89,7 +148,7 @@ export function renderOrient(o: Orientation): string {
     "Current facts about the owner:",
     ...(o.facts.length ? o.facts.map((f) => `- ${f.predicate}: ${f.objectText}${f.verified ? "" : " (unverified)"}`) : ["- none yet"]),
     "",
-    "How to use: brain_search for anything the owner may have read, written or discussed; brain_get_node for a person, company or topic; brain_get_document to read more of a hit; brain_ingest to save new material; brain_add_fact to record something the owner states about themselves.",
+    "How to use: brain_search for anything the owner may have read, written or discussed; brain_get_node for a person, company or topic; brain_get_document to read more of a hit; brain_explain to see how a search ranked its passages; brain_ingest to save new material; brain_add_fact to record something the owner states about themselves.",
   ].join("\n");
 }
 

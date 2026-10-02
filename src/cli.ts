@@ -7,7 +7,8 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
-import { renderSearch } from "./mcp/render.js";
+import { renderSearch, renderExplain } from "./mcp/render.js";
+import { explain, explainNotFound } from "./retrieve/explain.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -133,6 +134,22 @@ program
       const res = await search(ctx, query, { ...searchOptions(opts), client: "cli" });
       if (opts.json) return void console.log(JSON.stringify(res, null, 2));
       console.log(renderSearch(res, { brief: true }));
+      console.log(`\nbrain explain ${res.retrievalId} replays how these passages were ranked.`);
+    });
+  });
+
+program
+  .command("explain <retrievalId>")
+  .description("Replay a logged search from its retrieval id: mode, candidates, timings, and each passage's ranks and score")
+  .action(async (retrievalId: string) => {
+    await withCtx(async (ctx) => {
+      const e = await explain(ctx.sql, retrievalId);
+      if (!e) {
+        console.error(explainNotFound(retrievalId));
+        process.exitCode = 1;
+        return;
+      }
+      console.log(renderExplain(e));
     });
   });
 
