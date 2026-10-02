@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning } from "../../src/eval/run.js";
+import { kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning, evalVoyageLine } from "../../src/eval/run.js";
 import type { GoldenItem } from "../../src/eval/golden.js";
 import type { SearchResult } from "../../src/retrieve/search.js";
 
@@ -81,5 +81,14 @@ describe("missingQuoteWarning", () => {
     expect(missingQuoteWarning(item, 0)).toBe("eval: q05 quote not found in any passage of its expected documents");
     expect(missingQuoteWarning(item, 2)).toBeNull();
     expect(missingQuoteWarning({ ...item, expected: [{ origin: "a.md" }] }, 0)).toBeNull();
+  });
+});
+
+describe("evalVoyageLine", () => {
+  it("prints the run's Voyage spend, and warns when the cap refused calls", () => {
+    expect(evalVoyageLine({ requests: 30, tokens: 41_200, refused: 0 })).toBe("voyage  tokens=41200 requests=30 refused=0");
+    expect(evalVoyageLine({ requests: 3, tokens: 90, refused: 2 })).toBe(
+      "voyage  tokens=90 requests=3 refused=2  (brain_eval's daily cap refused calls; those searches ran degraded)",
+    );
   });
 });

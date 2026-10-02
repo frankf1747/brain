@@ -8,7 +8,8 @@ import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
 import { parseGolden, type Expected, type GoldenItem } from "./golden.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
-import { assertEvalConnection } from "./db.js";
+import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
+import { voyageSpendSince, type VoyageSpend } from "../llm/usage.js";
 import { parseAuthor, type Author } from "../ingest/author.js";
 
 export function kindFromFilename(name: string): string {
@@ -65,6 +66,12 @@ export function attributionGate(a: AttributionLeaks): string[] {
   return a.selfFacts + a.selfEdges === 0
     ? []
     : [`attribution: ${a.selfFacts} facts about the owner and ${a.selfEdges} edges from the owner come from documents the owner did not write; must be 0`];
+}
+
+/** The eval output line for the run's Voyage spend. */
+export function evalVoyageLine(v: VoyageSpend): string {
+  const base = `voyage  tokens=${v.tokens} requests=${v.requests} refused=${v.refused}`;
+  return v.refused ? `${base}  (brain_eval's daily cap refused calls; those searches ran degraded)` : base;
 }
 
 /** 1-based rank of the first expected document among distinct ranked documents, or null. */
@@ -179,11 +186,15 @@ export interface EvalRun {
   ranks: Record<string, number | null>;
   /** Kept out of Report so eval/baseline.json's schema does not change. */
   attribution: AttributionLeaks;
+  /** Voyage spend of this run (searches and anything else under the eval client) in brain_eval's ledger. Kept out of Report. */
+  voyage: VoyageSpend;
 }
 
 /** Runs every golden item (and its paraphrases) against the context's database, which must be the eval database. */
 export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
   await assertEvalConnection(ctx.sql);
+  // The database's clock, so the window matches the ledger's created_at exactly.
+  const [{ startedAt }] = await ctx.sql<{ startedAt: Date }[]>`select clock_timestamp() as "startedAt"`;
   const golden = parseGolden(await readFile(goldenPath, "utf8"));
   const results: QuestionResult[] = [];
   for (const g of golden) {
@@ -200,7 +211,13 @@ export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
   }
   const ranks: Record<string, number | null> = {};
   for (const r of results) if (!r.negative) ranks[r.id] = firstExpectedRank(r);
-  return { results, report: summarize(results, config.retrieval.fallbackThreshold), ranks, attribution: await attributionLeaks(ctx.sql) };
+  return {
+    results,
+    report: summarize(results, config.retrieval.fallbackThreshold),
+    ranks,
+    attribution: await attributionLeaks(ctx.sql),
+    voyage: await voyageSpendSince(ctx.sql, startedAt, EVAL_CLIENT),
+  };
 }
 
 /**

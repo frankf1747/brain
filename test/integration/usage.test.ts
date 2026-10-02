@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { testDb, wipe } from "./helpers.js";
-import { usageByDay, formatUsage } from "../../src/llm/usage.js";
+import { usageByDay, formatUsage, voyageSpendSince } from "../../src/llm/usage.js";
 import { tokensToday } from "../../src/llm/ledger.js";
 
 const sql = testDb();
@@ -54,5 +54,21 @@ describe("usageByDay", () => {
   it("rejects a day count that is not a positive whole number", async () => {
     await expect(usageByDay(sql, 0)).rejects.toThrow(/days must be a positive whole number/);
     await expect(usageByDay(sql, 1.5)).rejects.toThrow(/days must be a positive whole number/);
+  });
+});
+
+describe("voyageSpendSince", () => {
+  it("sums one client's requests, tokens and refusals from a moment on", async () => {
+    await seed("embed_query", "ok", 5, 7, "2 hours", "eval"); // before the run
+    const [{ t }] = await sql<{ t: Date }[]>`select clock_timestamp() - interval '1 hour' as t`;
+    await seed("embed_query", "ok", 5, 6, "0 seconds", "eval");
+    await seed("rerank", "ok", 100, 90, "0 seconds", "eval");
+    await seed("rerank", "refused", 100, 0, "0 seconds", "eval");
+    await seed("rerank", "ok", 100, 500, "0 seconds", "cli"); // another client
+    expect(await voyageSpendSince(sql, t, "eval")).toEqual({ requests: 2, tokens: 96, refused: 1 });
+  });
+
+  it("is all zeros when nothing was spent", async () => {
+    expect(await voyageSpendSince(sql, new Date(), "eval")).toEqual({ requests: 0, tokens: 0, refused: 0 });
   });
 });

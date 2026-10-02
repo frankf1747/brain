@@ -104,3 +104,21 @@ export function formatUsage(
   out.push(`${voyageTodayLine(opts.tokensToday, opts.cap)}; the count resets at 00:00 UTC.`);
   return out;
 }
+
+export interface VoyageSpend {
+  requests: number;
+  /** Counted the way the cap counts (see UsageRow.tokens). */
+  tokens: number;
+  refused: number;
+}
+
+/** One client's Voyage spend in this database's ledger from `since` on (the eval's spend per run). */
+export async function voyageSpendSince(sql: Db, since: Date, client: string): Promise<VoyageSpend> {
+  const [row] = await sql<VoyageSpend[]>`
+    select coalesce(sum(requests), 0)::int as requests,
+           coalesce(sum(case status when 'ok' then tokens when 'reserved' then estimated_tokens else 0 end), 0)::float8 as tokens,
+           (count(*) filter (where status = 'refused'))::int as refused
+    from brain.provider_usage
+    where provider = 'voyage' and client = ${client} and created_at >= ${since}`;
+  return row;
+}
