@@ -29,6 +29,7 @@ export async function wipe(sql: Db): Promise<void> {
   await sql`delete from brain.nodes where is_self = false`;
   await sql`truncate brain.retrieval_log`;
   await sql`truncate brain.tool_calls`;
+  await sql`truncate brain.provider_usage`;
 }
 
 export function fakeVector(seed: number, dims = 1024): number[] {

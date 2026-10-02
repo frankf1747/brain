@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { isSchemaFailure, isRefusal, SchemaFailure, ModelRefusal } from "../../src/llm/errors.js";
+import { isSchemaFailure, isRefusal, SchemaFailure, ModelRefusal, SpendCapError, isSpendCap, SPEND_CAP_PREFIX } from "../../src/llm/errors.js";
 
 describe("isSchemaFailure", () => {
   it("recognizes ZodError and the schema-failure messages", () => {
@@ -28,5 +28,23 @@ describe("typed LLM errors", () => {
     expect(isSchemaFailure(new ModelRefusal("anything"))).toBe(false);
     expect(isRefusal(new Error("Model refused: x"))).toBe(true);
     expect(isRefusal(new Error("network down"))).toBe(false);
+  });
+});
+
+describe("SpendCapError", () => {
+  it("is recognized by type and by name, and carries the numbers", () => {
+    const e = new SpendCapError("Voyage daily token cap reached: x", { used: 10, estimated: 5, cap: 12 });
+    expect(isSpendCap(e)).toBe(true);
+    expect(e.name).toBe("SpendCapError");
+    expect([e.used, e.estimated, e.cap]).toEqual([10, 5, 12]);
+    // An error that crossed a boundary that loses the class (a worker, a re-thrown copy) is still recognized.
+    expect(isSpendCap(Object.assign(new Error("m"), { name: "SpendCapError" }))).toBe(true);
+    expect(isSpendCap(new Error("Voyage /embeddings returned 429: rate limited"))).toBe(false);
+    expect(isSpendCap("SpendCapError")).toBe(false);
+    expect(isSpendCap(null)).toBe(false);
+  });
+
+  it("names the prefix pipeline jobs record", () => {
+    expect(SPEND_CAP_PREFIX).toBe("spend_cap: ");
   });
 });

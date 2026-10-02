@@ -1,0 +1,99 @@
+import type { Db } from "../db.js";
+import { config } from "../config.js";
+import { SpendCapError } from "./errors.js";
+
+/**
+ * The Voyage spend ledger (spec §5). Every HTTP attempt is reserved here before it is sent and settled after it.
+ *
+ * reserveTokens runs one READ COMMITTED transaction: take the one advisory lock every Voyage reservation in this
+ * database shares, sum today's counted tokens (brain.provider_tokens_today), then insert either a `reserved` row
+ * or a `refused` row. The lock makes check-and-insert atomic across connections and processes, and the sum runs
+ * after the lock is granted, so it sees every reservation committed before it. At each admission, settled actual
+ * tokens plus in-flight estimates stay within the cap; the day's total can pass the cap only by how far in-flight
+ * calls' actual counts exceed their estimates.
+ *
+ * The ledger is per database: the real knowledge base and brain_eval each count and cap their own calls. Voyage
+ * bills per account, so the account's daily spend can reach the sum of the caps of every database using the key.
+ */
+
+export type VoyageOperation = "embed_document" | "embed_query" | "rerank";
+
+export interface VoyageLedger {
+  /** The database whose brain.provider_usage records and caps the calls. */
+  sql: Db;
+  /** Who is spending (cli, mcp-stdio, mcp-http, eval, test); stored on every row. */
+  client: string;
+  /** Tokens per UTC day; defaults to config.voyageDailyTokenCap. Only tests set it. */
+  dailyTokenCap?: number;
+}
+
+export interface MeteredCall {
+  operation: VoyageOperation;
+  model: string;
+  /** Characters / 4 (src/llm/voyage.ts); at least 1 is reserved. */
+  estimatedTokens: number;
+}
+
+/** How a reservation ends: Voyage's token count (null: none reported, keep the estimate), or an error at 0 tokens. */
+export type Settlement = { tokens: number | null; error?: string } | { error: string };
+
+/** A row still `reserved` after this long belongs to a process that died mid-call. It keeps counting at its estimate. */
+export const STALE_RESERVATION_MINUTES = 10;
+
+export function spendCapMessage(used: number, estimate: number, cap: number): string {
+  return cap === 0
+    ? "Voyage daily token cap reached: BRAIN_VOYAGE_DAILY_TOKEN_CAP is 0, which blocks every Voyage call"
+    : `Voyage daily token cap reached: ${used} tokens counted today (UTC) + ${estimate} estimated for this call > cap ${cap}`;
+}
+
+/** Tokens counted against today's (UTC) cap in this database. */
+export async function tokensToday(sql: Db): Promise<number> {
+  const [row] = await sql<{ n: number }[]>`select brain.provider_tokens_today('voyage')::float8 as n`;
+  return row.n;
+}
+
+/**
+ * Reserves one Voyage HTTP attempt. Returns the row id to settle, or throws SpendCapError (after recording a
+ * `refused` row) when today's counted tokens plus the estimate would pass the cap. Throws whatever the database
+ * throws if the reservation cannot be written; the caller then does not send the request (fail closed).
+ */
+export async function reserveTokens(ledger: VoyageLedger, call: MeteredCall): Promise<string> {
+  const cap = ledger.dailyTokenCap ?? config.voyageDailyTokenCap;
+  const estimate = Math.max(1, Math.ceil(call.estimatedTokens));
+  const outcome = await ledger.sql.begin(async (tx) => {
+    // Must be the transaction's first statement. READ COMMITTED gives the sum below a snapshot taken after the lock.
+    await tx`set transaction isolation level read committed`;
+    await tx`select pg_advisory_xact_lock(hashtextextended('brain:voyage-spend', 0))`;
+    const [{ used }] = await tx<{ used: number }[]>`select brain.provider_tokens_today('voyage')::float8 as used`;
+    if (used + estimate > cap) {
+      const message = spendCapMessage(used, estimate, cap);
+      await tx`
+        insert into brain.provider_usage (provider, operation, model, requests, estimated_tokens, tokens, status, error, client, finished_at)
+        values ('voyage', ${call.operation}, ${call.model}, 0, ${estimate}, 0, 'refused', ${message}, ${ledger.client}, now())`;
+      return { refused: true as const, used, message };
+    }
+    const [row] = await tx<{ id: string }[]>`
+      insert into brain.provider_usage (provider, operation, model, requests, estimated_tokens, status, client)
+      values ('voyage', ${call.operation}, ${call.model}, 1, ${estimate}, 'reserved', ${ledger.client})
+      returning id::text as id`;
+    return { refused: false as const, id: row.id };
+  });
+  // Thrown after the commit, so the refused row is kept.
+  if (outcome.refused) throw new SpendCapError(outcome.message, { used: outcome.used, estimated: estimate, cap });
+  return outcome.id;
+}
+
+/** Settles a reservation once; a row that is no longer `reserved` is left alone. */
+export async function settleReservation(sql: Db, id: string, outcome: Settlement): Promise<void> {
+  if ("tokens" in outcome) {
+    await sql`
+      update brain.provider_usage
+      set status = 'ok', tokens = coalesce(${outcome.tokens}::int, estimated_tokens), error = ${outcome.error ?? null}, finished_at = now()
+      where id = ${id}::bigint and status = 'reserved'`;
+  } else {
+    await sql`
+      update brain.provider_usage
+      set status = 'error', tokens = 0, error = ${outcome.error.slice(0, 1000)}, finished_at = now()
+      where id = ${id}::bigint and status = 'reserved'`;
+  }
+}

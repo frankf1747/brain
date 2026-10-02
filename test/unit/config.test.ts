@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { config } from "../../src/config.js";
+import { config, parseTokenCap, DEFAULT_VOYAGE_DAILY_TOKEN_CAP } from "../../src/config.js";
 
 describe("config", () => {
   it("pins the embedding dimension the schema was created with", () => {
@@ -7,5 +7,30 @@ describe("config", () => {
   });
   it("falls back to the local Supabase connection string", () => {
     expect(config.databaseUrl).toMatch(/^postgresql:\/\//);
+  });
+});
+
+describe("parseTokenCap", () => {
+  it("defaults to 5,000,000 when unset or empty", () => {
+    expect(DEFAULT_VOYAGE_DAILY_TOKEN_CAP).toBe(5_000_000);
+    expect(parseTokenCap(undefined)).toBe(5_000_000);
+    expect(parseTokenCap("")).toBe(5_000_000);
+    expect(parseTokenCap("   ")).toBe(5_000_000);
+  });
+
+  it("reads whole numbers, with optional underscores, and 0 (which blocks every call)", () => {
+    expect(parseTokenCap("0")).toBe(0);
+    expect(parseTokenCap("250000")).toBe(250_000);
+    expect(parseTokenCap(" 1_000_000 ")).toBe(1_000_000);
+  });
+
+  it("refuses anything else instead of lifting the cap", () => {
+    for (const bad of ["-1", "1e6", "5,000,000", "off", "none", "false", "1.5", "Infinity", "99999999999999999999"]) {
+      expect(() => parseTokenCap(bad), bad).toThrow(/BRAIN_VOYAGE_DAILY_TOKEN_CAP must be a whole number of tokens/);
+    }
+  });
+
+  it("is what config uses", () => {
+    expect(config.voyageDailyTokenCap).toBe(parseTokenCap(process.env.BRAIN_VOYAGE_DAILY_TOKEN_CAP));
   });
 });

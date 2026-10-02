@@ -5,6 +5,23 @@ import { fileURLToPath } from "node:url";
 // quiet: dotenv 17 otherwise logs to stdout, which would corrupt an MCP stdio stream.
 dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)), quiet: true });
 
+export const DEFAULT_VOYAGE_DAILY_TOKEN_CAP = 5_000_000;
+
+/**
+ * BRAIN_VOYAGE_DAILY_TOKEN_CAP: whole tokens per UTC day (underscores allowed). Unset or empty means the default;
+ * 0 blocks every Voyage call. There is no value that turns the cap off, and anything unreadable stops the process
+ * at startup, so a typo can never lift the cap.
+ */
+export function parseTokenCap(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_VOYAGE_DAILY_TOKEN_CAP;
+  const s = raw.trim().replace(/_/g, "");
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isSafeInteger(n)) {
+    throw new Error(`BRAIN_VOYAGE_DAILY_TOKEN_CAP must be a whole number of tokens per UTC day (0 blocks every Voyage call); got "${raw}"`);
+  }
+  return n;
+}
+
 export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
@@ -16,6 +33,8 @@ export const config = {
   voyageApiKey: process.env.VOYAGE_API_KEY ?? "",
   voyageEmbedModel: process.env.VOYAGE_EMBED_MODEL ?? "voyage-4-large",
   voyageRerankModel: process.env.VOYAGE_RERANK_MODEL ?? "rerank-2.5",
+  /** Hard cap on Voyage tokens per UTC day, enforced before every request by src/llm/ledger.ts. */
+  voyageDailyTokenCap: parseTokenCap(process.env.BRAIN_VOYAGE_DAILY_TOKEN_CAP),
   obsidianVaultPath: process.env.OBSIDIAN_VAULT_PATH ?? "/Users/frankfu/Documents/Obsidian/General",
   obsidianFolder: process.env.OBSIDIAN_FOLDER || "Brain", // empty means unset
   embeddingDimensions: 1024,
