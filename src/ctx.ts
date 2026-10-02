@@ -29,13 +29,19 @@ export interface MakeCtxOptions {
   databaseUrl?: string;
   /** False turns the Obsidian mirror off regardless of the environment; the eval database must never be mirrored. */
   obsidian?: boolean;
+  /** Stored on every Voyage ledger row: cli (default), mcp-stdio, mcp-http, eval. */
+  client?: string;
 }
 
 export function makeCtx(opts: MakeCtxOptions = {}): Ctx {
-  const voyage = new VoyageClient();
-  const queryVoyage = new VoyageClient({ maxRateLimitAttempts: 1, maxAttempts: 2 });
+  const sql = connect(opts.databaseUrl ?? config.databaseUrl);
+  // Both clients record every Voyage call in this database's brain.provider_usage and stop at the daily cap
+  // (src/llm/ledger.ts). The eval context gets brain_eval's ledger the same way.
+  const ledger = { sql, client: opts.client ?? "cli" };
+  const voyage = new VoyageClient({ ledger });
+  const queryVoyage = new VoyageClient({ ledger, maxRateLimitAttempts: 1, maxAttempts: 2 });
   const ctx: Ctx = {
-    sql: connect(opts.databaseUrl ?? config.databaseUrl),
+    sql,
     llm: makeLlm(),
     embedder: voyage,
     reranker: voyage,

@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { canonicalName } from "../text/normalize.js";
+import { reserveTokens, settleReservation, type MeteredCall, type Settlement, type VoyageLedger } from "./ledger.js";
 
 export type InputType = "query" | "document";
 
@@ -33,6 +34,12 @@ export interface VoyageOptions {
   maxRateLimitAttempts?: number;
   /** Total calls allowed across 5xx responses and network errors (default 4). */
   maxAttempts?: number;
+  /**
+   * The spend ledger and its daily cap (src/llm/ledger.ts). Every HTTP attempt is reserved before it is sent and
+   * settled after. Required unless fetchFn is injected (tests): a client that could reach Voyage unmetered is
+   * refused at construction.
+   */
+  ledger?: VoyageLedger;
 }
 
 const MAX_ATTEMPTS = 4;
@@ -51,8 +58,36 @@ function retryAfterMs(header: string | null): number | undefined {
   return Math.max(0, at - Date.now());
 }
 
+/** Tokens an embeddings request is reserved at: 4 characters per token, at least 1. */
+export function estimateEmbedTokens(texts: string[]): number {
+  const chars = texts.reduce((s, t) => s + t.length, 0);
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+/** Tokens a rerank request is reserved at: Voyage counts the query once per document plus every document. */
+export function estimateRerankTokens(query: string, documents: string[]): number {
+  const chars = query.length * documents.length + documents.reduce((s, d) => s + d.length, 0);
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+/** usage.total_tokens from an embeddings or rerank response, or null when it is missing or malformed. */
+export function usageTokens(body: unknown): number | null {
+  const t = (body as { usage?: { total_tokens?: unknown } } | null)?.usage?.total_tokens;
+  return typeof t === "number" && Number.isFinite(t) && t >= 0 ? Math.round(t) : null;
+}
+
 export class VoyageClient implements Embedder, Reranker {
-  constructor(private readonly opts: VoyageOptions = {}) {}
+  constructor(private readonly opts: VoyageOptions = {}) {
+    // Fail closed: only a test that injects fetchFn may run without the ledger and its daily cap.
+    if (!opts.ledger && !opts.fetchFn) {
+      throw new Error("VoyageClient needs a spend ledger ({ sql, client }) so every call counts against BRAIN_VOYAGE_DAILY_TOKEN_CAP");
+    }
+  }
+
+  /** The ledger this client records and caps its calls in, or null for an unmetered test client. */
+  get ledger(): VoyageLedger | null {
+    return this.opts.ledger ?? null;
+  }
 
   private get apiKey(): string {
     const key = this.opts.apiKey ?? config.voyageApiKey;
@@ -63,14 +98,14 @@ export class VoyageClient implements Embedder, Reranker {
   async embed(texts: string[], inputType: InputType): Promise<number[][]> {
     const out: number[][] = [];
     const size = this.opts.batchSize ?? 128;
+    const model = this.opts.embedModel ?? config.voyageEmbedModel;
     for (let i = 0; i < texts.length; i += size) {
       const batch = texts.slice(i, i + size);
-      const body = await this.post("/embeddings", {
-        input: batch,
-        model: this.opts.embedModel ?? config.voyageEmbedModel,
-        input_type: inputType,
-        output_dimension: config.embeddingDimensions,
-      });
+      const body = await this.post(
+        "/embeddings",
+        { input: batch, model, input_type: inputType, output_dimension: config.embeddingDimensions },
+        { operation: inputType === "query" ? "embed_query" : "embed_document", model, estimatedTokens: estimateEmbedTokens(batch) },
+      );
       const data = (body.data as { index: number; embedding: number[] }[]).slice().sort((a, b) => a.index - b.index);
       if (data.length !== batch.length) throw new Error(`Voyage returned ${data.length} embeddings for ${batch.length} inputs`);
       out.push(...data.map((d) => d.embedding));
@@ -80,31 +115,50 @@ export class VoyageClient implements Embedder, Reranker {
 
   async rerank(query: string, documents: string[], topK: number): Promise<RerankHit[]> {
     if (documents.length === 0) return [];
-    const body = await this.post("/rerank", {
-      query,
-      documents,
-      model: this.opts.rerankModel ?? config.voyageRerankModel,
-      top_k: Math.min(topK, documents.length),
-    });
+    const model = this.opts.rerankModel ?? config.voyageRerankModel;
+    const body = await this.post(
+      "/rerank",
+      { query, documents, model, top_k: Math.min(topK, documents.length) },
+      { operation: "rerank", model, estimatedTokens: estimateRerankTokens(query, documents) },
+    );
     return (body.data as { index: number; relevance_score: number }[]).map((d) => ({ index: d.index, score: d.relevance_score }));
   }
 
+  /** Reserves one attempt; throws SpendCapError when the cap refuses it. Null when unmetered (tests). */
+  private async reserve(call: MeteredCall): Promise<string | null> {
+    return this.opts.ledger ? reserveTokens(this.opts.ledger, call) : null;
+  }
+
+  /** A settle that fails leaves the row reserved, where it keeps counting at its estimate: the safe side. */
+  private async settle(id: string | null, outcome: Settlement): Promise<void> {
+    if (id === null || !this.opts.ledger) return;
+    try {
+      await settleReservation(this.opts.ledger.sql, id, outcome);
+    } catch (err) {
+      process.stderr.write(`brain: recording Voyage usage failed (row ${id} keeps counting at its estimate): ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async post(path: string, payload: unknown): Promise<any> {
+  private async post(path: string, payload: unknown, call: MeteredCall): Promise<any> {
     const fetchFn = this.opts.fetchFn ?? fetch;
     const sleep = this.opts.sleep ?? defaultSleep;
     const delay = this.opts.retryDelayMs ?? 500;
     const rateDelay = this.opts.rateLimitDelayMs ?? 20_000;
     const maxAttempts = this.opts.maxAttempts ?? MAX_ATTEMPTS;
     const maxRateLimitAttempts = this.opts.maxRateLimitAttempts ?? MAX_RATE_LIMIT_ATTEMPTS;
+    // Read before any reservation, so a missing key never leaves a reserved row behind.
+    const authorization = `Bearer ${this.apiKey}`;
     let lastError: Error | undefined;
     // 429s and other transient failures have separate budgets: rate limits need minute-scale waits.
     let failures = 0;
     let rateLimits = 0;
     for (;;) {
+      // Each attempt is its own reservation: a retry re-checks the cap, and a failed attempt settles at 0 tokens.
+      const reservation = await this.reserve(call);
       const init = {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+        headers: { "content-type": "application/json", authorization },
         body: JSON.stringify(payload),
       };
       let res: Response;
@@ -113,13 +167,31 @@ export class VoyageClient implements Embedder, Reranker {
       } catch (err) {
         // Network failure (DNS, reset, "fetch failed"): retry with backoff like a 5xx.
         lastError = err instanceof Error ? err : new Error(String(err));
+        await this.settle(reservation, { error: lastError.message });
         if (++failures >= maxAttempts) throw lastError;
         await sleep(delay * 2 ** (failures - 1));
         continue;
       }
-      if (res.ok) return res.json();
+      if (res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let body: any;
+        try {
+          body = await res.json();
+        } catch (err) {
+          // Voyage answered 200, so the call is billed: keep the row at its estimate.
+          await this.settle(reservation, { tokens: null, error: `unreadable response: ${err instanceof Error ? err.message : String(err)}` });
+          throw err;
+        }
+        const tokens = usageTokens(body);
+        if (tokens === null && reservation !== null) {
+          process.stderr.write(`brain: Voyage ${path} response had no usage.total_tokens; recorded at the estimate\n`);
+        }
+        await this.settle(reservation, { tokens });
+        return body;
+      }
       const text = await res.text();
       lastError = new Error(`Voyage ${path} returned ${res.status}: ${text.slice(0, 200)}`);
+      await this.settle(reservation, { error: lastError.message });
       if (res.status === 429) {
         if (++rateLimits >= maxRateLimitAttempts) throw lastError;
         const wait = Math.min(

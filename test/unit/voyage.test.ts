@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { VoyageClient, FakeEmbedder, FakeReranker, hashVector } from "../../src/llm/voyage.js";
+import { VoyageClient, FakeEmbedder, FakeReranker, hashVector, estimateEmbedTokens, estimateRerankTokens, usageTokens } from "../../src/llm/voyage.js";
 
 function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
   const calls: { url: string; body: any }[] = [];
@@ -208,5 +208,36 @@ describe("fakes", () => {
     expect(e.calls).toEqual([["x"]]);
     const hits = await new FakeReranker().rerank("red apple", ["green pear", "red apple pie"], 1);
     expect(hits[0].index).toBe(1);
+  });
+});
+
+describe("spend metering", () => {
+  it("estimates embeddings at 4 characters per token, at least 1", () => {
+    expect(estimateEmbedTokens(["aaaa", "bbbbbbbb"])).toBe(3);
+    expect(estimateEmbedTokens(["abcde"])).toBe(2);
+    expect(estimateEmbedTokens([""])).toBe(1);
+    expect(estimateEmbedTokens([])).toBe(1);
+  });
+
+  it("estimates a rerank as the query once per document plus every document", () => {
+    // (3 chars * 2 documents + 4 + 6) / 4 = 4
+    expect(estimateRerankTokens("abc", ["abcd", "abcdef"])).toBe(4);
+    expect(estimateRerankTokens("q", [])).toBe(1);
+  });
+
+  it("reads usage.total_tokens and nothing else", () => {
+    expect(usageTokens({ data: [], usage: { total_tokens: 42 } })).toBe(42);
+    expect(usageTokens({ data: [] })).toBeNull();
+    expect(usageTokens({ usage: { total_tokens: "42" } })).toBeNull();
+    expect(usageTokens({ usage: { total_tokens: -1 } })).toBeNull();
+    expect(usageTokens(null)).toBeNull();
+  });
+
+  it("refuses to build a client that could call Voyage without the ledger", () => {
+    expect(() => new VoyageClient()).toThrow(/needs a spend ledger/);
+    expect(() => new VoyageClient({ apiKey: "k", maxAttempts: 2 })).toThrow(/needs a spend ledger/);
+    // An injected fetch (tests) may run unmetered.
+    const fn = (async () => new Response("{}")) as unknown as typeof fetch;
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).ledger).toBeNull();
   });
 });
