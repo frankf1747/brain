@@ -18,10 +18,13 @@ export const VOYAGE_STAGES: readonly Stage[] = ["embedded", "resolved"];
 /** The job error of a document a batch stopped before a Voyage stage because an earlier document hit the cap. */
 export const DEFERRED_MESSAGE = `${SPEND_CAP_PREFIX}deferred: the Voyage daily cap was reached earlier in this run`;
 
-/** Printed by the CLI after a run in which the cap stopped any document. */
-export const SPEND_CAP_ADVICE =
-  "Voyage daily cap reached: documents stopped before the stages that call Voyage (embedding, resolving). " +
-  "`brain retry` finishes them after 00:00 UTC, or now if BRAIN_VOYAGE_DAILY_TOKEN_CAP is raised; `brain usage` shows today's spend.";
+/** Printed by the CLI after a run in which the cap stopped any document; `capName` is the context's cap variable. */
+export function spendCapAdvice(capName = "BRAIN_VOYAGE_DAILY_TOKEN_CAP"): string {
+  return (
+    "Voyage daily cap reached: documents stopped before the stages that call Voyage (embedding, resolving). " +
+    `\`brain retry\` finishes them after 00:00 UTC, or now if ${capName} is raised; \`brain usage\` shows today's spend.`
+  );
+}
 
 /** A stage may return a report (runResolve does); the pipeline ignores it. */
 type Runner = (ctx: Ctx, documentId: string) => Promise<unknown>;

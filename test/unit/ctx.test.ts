@@ -18,7 +18,8 @@ describe("makeCtx", () => {
         expect((c as VoyageClient).ledger?.sql).toBe(ctx.sql);
         expect((c as VoyageClient).ledger?.client).toBe("mcp-stdio");
         // The cap always comes from config in production.
-        expect((c as VoyageClient).ledger?.dailyTokenCap).toBeUndefined();
+        expect((c as VoyageClient).ledger?.dailyTokenCap).toBe(config.voyageDailyTokenCap);
+        expect((c as VoyageClient).ledger?.capName).toBe("BRAIN_VOYAGE_DAILY_TOKEN_CAP");
       }
     } finally {
       await ctx.sql.end();
@@ -28,9 +29,9 @@ describe("makeCtx", () => {
   it("gives the query clients the query budget and keeps the ingest budget", async () => {
     const ctx = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false });
     try {
-      expect((ctx.queryEmbedder as VoyageClient).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
-      expect((ctx.queryReranker as VoyageClient).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
-      expect((ctx.embedder as VoyageClient).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalWaitMs: Infinity });
+      expect((ctx.queryEmbedder as VoyageClient).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalAttempts: 3, maxTotalWaitMs: 10_000 });
+      expect((ctx.queryReranker as VoyageClient).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalAttempts: 3, maxTotalWaitMs: 10_000 });
+      expect((ctx.embedder as VoyageClient).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalAttempts: Infinity, maxTotalWaitMs: Infinity });
     } finally {
       await ctx.sql.end();
     }
@@ -64,10 +65,14 @@ describe("makeCtx", () => {
     }
   });
 
-  it("caps a context at the dailyTokenCap it is given, on every Voyage client", async () => {
-    const ctx = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false, dailyTokenCap: 1234 });
+  it("caps a context at the voyageCap it is given, on every Voyage client and on the context", async () => {
+    const ctx = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false, voyageCap: { tokens: 1234, name: "SOME_CAP" } });
     try {
-      for (const c of voyageClients(ctx)) expect((c as VoyageClient).ledger?.dailyTokenCap).toBe(1234);
+      expect(ctx.voyageCap).toEqual({ tokens: 1234, name: "SOME_CAP" });
+      for (const c of voyageClients(ctx)) {
+        expect((c as VoyageClient).ledger?.dailyTokenCap).toBe(1234);
+        expect((c as VoyageClient).ledger?.capName).toBe("SOME_CAP");
+      }
     } finally {
       await ctx.sql.end();
     }
@@ -77,9 +82,34 @@ describe("makeCtx", () => {
     const ev = makeEvalCtx();
     try {
       expect(config.evalVoyageDailyTokenCap).toEqual(expect.any(Number));
-      for (const c of voyageClients(ev)) expect((c as VoyageClient).ledger?.dailyTokenCap).toBe(config.evalVoyageDailyTokenCap);
+      expect(ev.voyageCap).toEqual({ tokens: config.evalVoyageDailyTokenCap, name: "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP" });
+      for (const c of voyageClients(ev)) {
+        expect((c as VoyageClient).ledger?.dailyTokenCap).toBe(config.evalVoyageDailyTokenCap);
+        expect((c as VoyageClient).ledger?.capName).toBe("BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP");
+      }
     } finally {
       await ev.sql.end();
+    }
+  });
+});
+
+describe("makeCtx on a database whose name ends in _eval", () => {
+  it("caps it at the eval cap whichever entry point opened it (brain usage with DATABASE_URL=.../brain_eval)", async () => {
+    const ctx = makeCtx({ databaseUrl: "postgresql://postgres:postgres@127.0.0.1:1/some_eval", obsidian: false });
+    try {
+      expect(ctx.voyageCap).toEqual({ tokens: config.evalVoyageDailyTokenCap, name: "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP" });
+      expect((ctx.embedder as VoyageClient).ledger?.dailyTokenCap).toBe(config.evalVoyageDailyTokenCap);
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
+  it("uses the real cap for any other database", async () => {
+    const ctx = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false });
+    try {
+      expect(ctx.voyageCap).toEqual({ tokens: config.voyageDailyTokenCap, name: "BRAIN_VOYAGE_DAILY_TOKEN_CAP" });
+    } finally {
+      await ctx.sql.end();
     }
   });
 });

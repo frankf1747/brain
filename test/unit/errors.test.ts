@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { spendCapAdvice } from "../../src/ingest/pipeline.js";
 import { z } from "zod";
 import { isSchemaFailure, isRefusal, SchemaFailure, ModelRefusal, SpendCapError, isSpendCap, SPEND_CAP_PREFIX } from "../../src/llm/errors.js";
 
@@ -46,5 +47,15 @@ describe("SpendCapError", () => {
 
   it("names the prefix pipeline jobs record", () => {
     expect(SPEND_CAP_PREFIX).toBe("spend_cap: ");
+  });
+});
+
+describe("spendCapAdvice", () => {
+  it("keeps the real base's text and names the eval's own variable on brain_eval", () => {
+    expect(spendCapAdvice()).toBe(
+      "Voyage daily cap reached: documents stopped before the stages that call Voyage (embedding, resolving). " +
+        "`brain retry` finishes them after 00:00 UTC, or now if BRAIN_VOYAGE_DAILY_TOKEN_CAP is raised; `brain usage` shows today's spend.",
+    );
+    expect(spendCapAdvice("BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP")).toContain("or now if BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP is raised");
   });
 });

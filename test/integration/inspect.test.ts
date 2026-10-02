@@ -79,3 +79,29 @@ describe("orient", () => {
     expect(o.pipeline.find((p) => p.stage === "done")?.count).toBe(2);
   });
 });
+
+describe("orient without the Voyage ledger (migration 010 not applied)", () => {
+  it("still answers, with voyage null", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await ingest(ctx, { text: "I applied to Acme Corp.", sourceKind: "note" });
+    // A database without brain.provider_usage: the ledger query fails as it would there; every other query runs.
+    const noLedger = new Proxy(sql, {
+      apply(target, thisArg, args: unknown[]) {
+        const strings = args[0];
+        if (Array.isArray(strings) && strings.join("").includes("provider_tokens_today")) {
+          return Promise.reject(Object.assign(new Error('function brain.provider_tokens_today(unknown) does not exist'), { code: "42883" }));
+        }
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    const o = await orient({ ...ctx, sql: noLedger });
+    expect(o.totalDocuments).toBe(1);
+    expect(o.voyage).toBeNull();
+  });
+
+  it("reports today's tokens and the context's cap when the ledger is there", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const o = await orient({ ...ctx, voyageCap: { tokens: 777, name: "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP" } });
+    expect(o.voyage).toEqual({ tokensToday: 0, cap: 777 });
+  });
+});

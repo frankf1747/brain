@@ -8,7 +8,11 @@ export interface UsageRow {
   operation: VoyageOperation;
   /** HTTP requests sent (refusals are not requests). */
   requests: number;
-  /** Counted the way the cap counts: ok at Voyage's count, reserved at the estimate, error and refused at 0. */
+  /**
+   * Counted exactly as the cap counts (brain.provider_tokens_today): ok at Voyage's count (the estimate if none was
+   * reported), reserved at the estimate, error at 0 for an HTTP error status or at the estimate when tokens is null
+   * (a timed-out or dropped request Voyage may have billed), refused at 0.
+   */
   tokens: number;
   refused: number;
   errors: number;
@@ -40,7 +44,7 @@ export async function usageByDay(sql: Db, days: number): Promise<UsageRow[]> {
     select to_char(created_at at time zone 'utc', 'YYYY-MM-DD') as day,
            operation,
            sum(requests)::int as requests,
-           coalesce(sum(case status when 'ok' then tokens when 'reserved' then estimated_tokens else 0 end), 0)::float8 as tokens,
+           coalesce(sum(case when status in ('ok', 'reserved', 'error') then coalesce(tokens, estimated_tokens) else 0 end), 0)::float8 as tokens,
            (count(*) filter (where status = 'refused'))::int as refused,
            (count(*) filter (where status = 'error'))::int as errors,
            (count(*) filter (where status = 'reserved'
@@ -116,7 +120,7 @@ export interface VoyageSpend {
 export async function voyageSpendSince(sql: Db, since: Date, client: string): Promise<VoyageSpend> {
   const [row] = await sql<VoyageSpend[]>`
     select coalesce(sum(requests), 0)::int as requests,
-           coalesce(sum(case status when 'ok' then tokens when 'reserved' then estimated_tokens else 0 end), 0)::float8 as tokens,
+           coalesce(sum(case when status in ('ok', 'reserved', 'error') then coalesce(tokens, estimated_tokens) else 0 end), 0)::float8 as tokens,
            (count(*) filter (where status = 'refused'))::int as refused
     from brain.provider_usage
     where provider = 'voyage' and client = ${client} and created_at >= ${since}`;

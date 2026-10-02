@@ -72,3 +72,18 @@ describe("voyageSpendSince", () => {
     expect(await voyageSpendSince(sql, new Date(), "eval")).toEqual({ requests: 0, tokens: 0, refused: 0 });
   });
 });
+
+describe("timed-out or dropped requests (error rows with tokens NULL)", () => {
+  it("count at their estimate in usage and the eval spend, exactly as the cap counts them", async () => {
+    await seed("embed_document", "ok", 100, 120);
+    await seed("rerank", "error", 300, null); // fetch threw: maybe billed
+    await seed("rerank", "error", 40, 0); // an HTTP error status: not billed
+    await seed("embed_query", "error", 9, null, "0 seconds", "eval");
+    const rows = await usageByDay(sql, 1);
+    const total = rows.reduce((s, r) => s + r.tokens, 0);
+    expect(total).toBe(429);
+    expect(total).toBe(await tokensToday(sql));
+    expect(rows.find((r) => r.operation === "rerank")).toMatchObject({ tokens: 300, errors: 2 });
+    expect(await voyageSpendSince(sql, new Date(Date.now() - 60_000), "eval")).toEqual({ requests: 1, tokens: 9, refused: 0 });
+  });
+});

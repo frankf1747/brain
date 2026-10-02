@@ -53,7 +53,7 @@ export function renderOrient(o: Orientation): string {
     `Documents by kind: ${o.documentsByKind.map((k) => `${k.kind}: ${k.count}`).join(", ") || "none"}.`,
     `Entities by type: ${o.nodesByType.map((t) => `${t.type}: ${t.count}`).join(", ") || "none"}.`,
     `Pipeline: ${o.pipeline.filter((p) => p.count).map((p) => `${p.stage} ${p.count}${p.failed ? ` (${p.failed} failed)` : ""}`).join(", ") || "idle"}.`,
-    voyageTodayLine(o.voyage.tokensToday, o.voyage.cap),
+    o.voyage ? voyageTodayLine(o.voyage.tokensToday, o.voyage.cap) : "Voyage ledger unavailable (migration 010 missing?)",
     "",
     "Most recent documents:",
     ...o.recent.map((d) => `- ${d.title ?? "(untitled)"} [${d.sourceKind}] ${day(d.occurredAt) ?? day(d.ingestedAt)} (document ${d.id})`),

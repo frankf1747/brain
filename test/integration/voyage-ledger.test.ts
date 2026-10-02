@@ -156,7 +156,7 @@ describe("VoyageClient with a ledger when fetch throws", () => {
 
 describe("makeCtx's dailyTokenCap", () => {
   it("is the cap its clients' ledger enforces in the context's database", async () => {
-    const ctx = makeCtx({ databaseUrl: TEST_DATABASE_URL, obsidian: false, client: "eval", dailyTokenCap: 10 });
+    const ctx = makeCtx({ databaseUrl: TEST_DATABASE_URL, obsidian: false, client: "eval", voyageCap: { tokens: 10, name: "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP" } });
     try {
       const metered = (ctx.queryEmbedder as VoyageClient).ledger!;
       await reserveTokens(metered, { operation: "embed_query", model: "voyage-test", estimatedTokens: 8 });

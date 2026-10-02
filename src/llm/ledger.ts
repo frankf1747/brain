@@ -1,5 +1,5 @@
 import type { Db } from "../db.js";
-import { config } from "../config.js";
+import { config, VOYAGE_CAP_NAME } from "../config.js";
 import { SpendCapError } from "./errors.js";
 
 /**
@@ -33,8 +33,10 @@ export interface VoyageLedger {
   sql: Db;
   /** Who is spending (cli, mcp-stdio, mcp-http, eval, test); stored on every row. */
   client: string;
-  /** Tokens per UTC day; defaults to config.voyageDailyTokenCap. makeEvalCtx sets config.evalVoyageDailyTokenCap; tests set their own. */
+  /** Tokens per UTC day; defaults to config.voyageDailyTokenCap. makeCtx sets the database's cap (VoyageCap). */
   dailyTokenCap?: number;
+  /** The .env variable that sets dailyTokenCap, named in refusals; defaults to BRAIN_VOYAGE_DAILY_TOKEN_CAP. */
+  capName?: string;
 }
 
 export interface MeteredCall {
@@ -55,9 +57,9 @@ export type Settlement = { tokens: number | null; error?: string } | { error: st
 /** A row still `reserved` after this long belongs to a process that died mid-call. It keeps counting at its estimate. */
 export const STALE_RESERVATION_MINUTES = 10;
 
-export function spendCapMessage(used: number, estimate: number, cap: number): string {
+export function spendCapMessage(used: number, estimate: number, cap: number, capName = VOYAGE_CAP_NAME): string {
   return cap === 0
-    ? "Voyage daily token cap reached: BRAIN_VOYAGE_DAILY_TOKEN_CAP is 0, which blocks every Voyage call"
+    ? `Voyage daily token cap reached: ${capName} is 0, which blocks every Voyage call`
     : `Voyage daily token cap reached: ${used} tokens counted today (UTC) + ${estimate} estimated for this call > cap ${cap}`;
 }
 
@@ -74,6 +76,7 @@ export async function tokensToday(sql: Db): Promise<number> {
  */
 export async function reserveTokens(ledger: VoyageLedger, call: MeteredCall): Promise<string> {
   const cap = ledger.dailyTokenCap ?? config.voyageDailyTokenCap;
+  const capName = ledger.capName ?? VOYAGE_CAP_NAME;
   const estimate = Math.max(1, Math.ceil(call.estimatedTokens));
   const outcome = await ledger.sql.begin(async (tx) => {
     // Must be the transaction's first statement. READ COMMITTED gives the sum below a snapshot taken after the lock.
@@ -81,7 +84,7 @@ export async function reserveTokens(ledger: VoyageLedger, call: MeteredCall): Pr
     await tx`select pg_advisory_xact_lock(hashtextextended('brain:voyage-spend', 0))`;
     const [{ used }] = await tx<{ used: number }[]>`select brain.provider_tokens_today('voyage')::float8 as used`;
     if (used + estimate > cap) {
-      const message = spendCapMessage(used, estimate, cap);
+      const message = spendCapMessage(used, estimate, cap, capName);
       await tx`
         insert into brain.provider_usage (provider, operation, model, requests, estimated_tokens, tokens, status, error, client, finished_at)
         values ('voyage', ${call.operation}, ${call.model}, 0, ${estimate}, 0, 'refused', ${message}, ${ledger.client}, now())`;
@@ -94,7 +97,7 @@ export async function reserveTokens(ledger: VoyageLedger, call: MeteredCall): Pr
     return { refused: false as const, id: row.id };
   });
   // Thrown after the commit, so the refused row is kept.
-  if (outcome.refused) throw new SpendCapError(outcome.message, { used: outcome.used, estimated: estimate, cap });
+  if (outcome.refused) throw new SpendCapError(outcome.message, { used: outcome.used, estimated: estimate, cap, capName });
   return outcome.id;
 }
 

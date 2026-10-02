@@ -3,7 +3,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import type { z } from "zod";
 import { config } from "../config.js";
 import type { Ctx } from "../ctx.js";
-import { runPipeline, SPEND_CAP_ADVICE } from "./pipeline.js";
+import { runPipeline, spendCapAdvice } from "./pipeline.js";
 import { SummarySchema, buildSummaryRequests, applySummary, applyStubSummary, type Summary } from "./stages/summarize.js";
 import { ExtractionSchema, buildExtractionRequests, applyExtraction, markExtractionSkipped, type ExtractionRequest, type Extraction } from "./stages/extract.js";
 
@@ -211,5 +211,5 @@ export async function backfill(ctx: Ctx, opts: { client?: Anthropic; limit?: num
     const r = await runPipeline(ctx, j.document_id, { voyageBlocked });
     if (r.spendCap) voyageBlocked = true;
   }
-  if (voyageBlocked) console.log(SPEND_CAP_ADVICE);
+  if (voyageBlocked) console.log(spendCapAdvice(ctx.voyageCap?.name));
 }

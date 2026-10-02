@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { makeCtx, type Ctx } from "./ctx.js";
 import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
-import { redoSkipped, retryFailed, stageCounts, STAGES, SPEND_CAP_ADVICE, type Stage } from "./ingest/pipeline.js";
+import { redoSkipped, retryFailed, stageCounts, STAGES, spendCapAdvice, type Stage } from "./ingest/pipeline.js";
 import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
@@ -78,7 +78,7 @@ program
           skip: logSkip,
         },
       );
-      if (ok.some((o) => o.result.spendCap)) console.error(SPEND_CAP_ADVICE);
+      if (ok.some((o) => o.result.spendCap)) console.error(spendCapAdvice(ctx.voyageCap?.name));
       if (failed.length) process.exitCode = 1;
     });
   });
@@ -114,7 +114,7 @@ program
       for (const r of results) {
         console.log(`${r.documentId} ${r.stage}${r.skipped ? " (busy, left alone)" : ""}${r.error ? " ERROR " + r.error : ""}`);
       }
-      if (results.some((r) => r.spendCap)) console.log(SPEND_CAP_ADVICE);
+      if (results.some((r) => r.spendCap)) console.log(spendCapAdvice(ctx.voyageCap?.name));
     });
   });
 
@@ -235,7 +235,7 @@ program
       const lines = formatUsage(await usageByDay(ctx.sql, days), {
         days,
         tokensToday: await tokensToday(ctx.sql),
-        cap: config.voyageDailyTokenCap,
+        cap: (ctx.voyageCap ?? { tokens: config.voyageDailyTokenCap }).tokens,
         prices: { embed: config.voyagePricePerMTokEmbed, rerank: config.voyagePricePerMTokRerank },
       });
       for (const l of lines) console.log(l);

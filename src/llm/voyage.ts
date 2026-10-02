@@ -32,6 +32,8 @@ export interface VoyageOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Total calls allowed while Voyage answers 429 (default 6). 1 means fail on the first 429 without waiting. */
   maxRateLimitAttempts?: number;
+  /** HTTP requests one call may send in all, 429s, 5xx and network errors together (default unlimited). */
+  maxTotalAttempts?: number;
   /** Total calls allowed across 5xx responses and network errors (default 4). */
   maxAttempts?: number;
   /**
@@ -61,12 +63,13 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 export const QUERY_REQUEST_TIMEOUT_MS = 8_000;
 
 /**
- * Query-time clients (src/ctx.ts): 3 attempts and at most 10 s of backoff in total, so a search degrades quickly
- * instead of waiting out a Voyage outage. With a paid tier that is enough; without one the search still fails fast.
+ * Query-time clients (src/ctx.ts): 3 HTTP requests in all (429s, 5xx and timeouts together) and at most 10 s of
+ * backoff, so a search degrades quickly instead of waiting out a Voyage outage. With a paid tier that is enough; without one the search still fails fast.
  */
 export const QUERY_RETRY_BUDGET = {
   maxAttempts: 3,
   maxRateLimitAttempts: 3,
+  maxTotalAttempts: 3,
   retryDelayMs: 500,
   rateLimitDelayMs: 2_000,
   maxTotalWaitMs: 10_000,
@@ -121,10 +124,11 @@ export class VoyageClient implements Embedder, Reranker {
   }
 
   /** The attempt and wait limits this client applies to one call. */
-  get retryBudget(): { maxAttempts: number; maxRateLimitAttempts: number; maxTotalWaitMs: number } {
+  get retryBudget(): { maxAttempts: number; maxRateLimitAttempts: number; maxTotalAttempts: number; maxTotalWaitMs: number } {
     return {
       maxAttempts: this.opts.maxAttempts ?? MAX_ATTEMPTS,
       maxRateLimitAttempts: this.opts.maxRateLimitAttempts ?? MAX_RATE_LIMIT_ATTEMPTS,
+      maxTotalAttempts: this.opts.maxTotalAttempts ?? Infinity,
       maxTotalWaitMs: this.opts.maxTotalWaitMs ?? Infinity,
     };
   }
@@ -185,7 +189,7 @@ export class VoyageClient implements Embedder, Reranker {
     const sleep = this.opts.sleep ?? defaultSleep;
     const delay = this.opts.retryDelayMs ?? 500;
     const rateDelay = this.opts.rateLimitDelayMs ?? 20_000;
-    const { maxAttempts, maxRateLimitAttempts, maxTotalWaitMs } = this.retryBudget;
+    const { maxAttempts, maxRateLimitAttempts, maxTotalAttempts, maxTotalWaitMs } = this.retryBudget;
     let waited = 0;
     /** Sleeps unless that would pass the total wait budget; false means give up now. */
     const pause = async (ms: number): Promise<boolean> => {
@@ -200,7 +204,10 @@ export class VoyageClient implements Embedder, Reranker {
     // 429s and other transient failures have separate budgets: rate limits need minute-scale waits.
     let failures = 0;
     let rateLimits = 0;
+    // Every request sent, whatever its outcome: the query budget caps the total at 3. Checked before each retry.
+    let sent = 0;
     for (;;) {
+      sent++;
       // Each attempt is its own reservation: a retry re-checks the cap. A 429 or 5xx settles at 0 tokens (Voyage
       // does not bill them); a thrown fetch keeps counting at its estimate.
       const reservation = await this.reserve(call);
@@ -219,7 +226,7 @@ export class VoyageClient implements Embedder, Reranker {
         // after processing), so the attempt keeps counting at its estimate.
         lastError = err instanceof Error ? err : new Error(String(err));
         await this.settle(reservation, { error: lastError.message, maybeBilled: true });
-        if (++failures >= maxAttempts) throw lastError;
+        if (++failures >= maxAttempts || sent >= maxTotalAttempts) throw lastError;
         if (!(await pause(delay * 2 ** (failures - 1)))) throw lastError;
         continue;
       }
@@ -245,7 +252,7 @@ export class VoyageClient implements Embedder, Reranker {
       lastError = new Error(`Voyage ${path} returned ${res.status}: ${text.slice(0, 200)}`);
       await this.settle(reservation, { error: lastError.message });
       if (res.status === 429) {
-        if (++rateLimits >= maxRateLimitAttempts) throw lastError;
+        if (++rateLimits >= maxRateLimitAttempts || sent >= maxTotalAttempts) throw lastError;
         const wait = Math.min(
           retryAfterMs(res.headers.get("retry-after")) ?? rateDelay * 2 ** (rateLimits - 1),
           MAX_RATE_LIMIT_WAIT_MS,
@@ -256,7 +263,7 @@ export class VoyageClient implements Embedder, Reranker {
         continue;
       }
       if (res.status < 500) throw lastError;
-      if (++failures >= maxAttempts) throw lastError;
+      if (++failures >= maxAttempts || sent >= maxTotalAttempts) throw lastError;
       if (!(await pause(delay * 2 ** (failures - 1)))) throw lastError;
     }
   }

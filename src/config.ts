@@ -37,6 +37,15 @@ export function parsePrice(name: string, raw: string | undefined): number {
   return Number(s);
 }
 
+export const VOYAGE_CAP_NAME = "BRAIN_VOYAGE_DAILY_TOKEN_CAP";
+export const EVAL_VOYAGE_CAP_NAME = "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP";
+
+/** The daily Voyage token cap a database is held to, and the .env variable that sets it (named in messages). */
+export interface VoyageCap {
+  tokens: number;
+  name: string;
+}
+
 export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
@@ -53,7 +62,7 @@ export const config = {
   /** brain_eval's own daily cap (makeEvalCtx). Voyage bills the account, so its daily ceiling is both caps together. */
   evalVoyageDailyTokenCap: parseTokenCap(
     process.env.BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP,
-    "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP",
+    EVAL_VOYAGE_CAP_NAME,
     DEFAULT_EVAL_VOYAGE_DAILY_TOKEN_CAP,
   ),
   /** US dollars per million tokens, copied from Voyage's pricing page into .env; 0 prints tokens only. */
@@ -83,3 +92,19 @@ export const config = {
   /** Predicates that hold one current value: a newer statement in an owner document supersedes the older (spec §4.4). */
   singleValuedPredicates: ["lives_in", "visa_status", "targeting_role", "pursuing_degree", "employment_status", "current_employer", "phone", "email"],
 } as const;
+
+/**
+ * The cap for the database at `databaseUrl`: a database whose name ends in _eval (brain_eval) is held to
+ * BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP whichever command opened it; every other database to BRAIN_VOYAGE_DAILY_TOKEN_CAP.
+ */
+export function voyageCapFor(databaseUrl: string): VoyageCap {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(databaseUrl).pathname.replace(/^\//, ""));
+  } catch {
+    // An unparseable URL fails at connect; it is never the eval database.
+  }
+  return name.endsWith("_eval")
+    ? { tokens: config.evalVoyageDailyTokenCap, name: EVAL_VOYAGE_CAP_NAME }
+    : { tokens: config.voyageDailyTokenCap, name: VOYAGE_CAP_NAME };
+}

@@ -265,7 +265,19 @@ describe("query-time retry budget", () => {
   const quiet = () => vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
   it("is 3 attempts with at most 10 s of backoff in total", () => {
-    expect(QUERY_RETRY_BUDGET).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, retryDelayMs: 500, rateLimitDelayMs: 2000, maxTotalWaitMs: 10_000 });
+    expect(QUERY_RETRY_BUDGET).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalAttempts: 3, retryDelayMs: 500, rateLimitDelayMs: 2000, maxTotalWaitMs: 10_000 });
+  });
+
+  it("sends at most 3 HTTP requests in total when 429s and 5xx alternate", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 503 }, { status: 429 }, { status: 503 }, { status: 429 }, { status: 503 }, { status: 200 }]);
+      const { c } = client(fn);
+      await expect(c.embed(["a"], "query")).rejects.toThrow(/503/);
+      expect(count()).toBe(3);
+    } finally {
+      err.mockRestore();
+    }
   });
 
   it("returns the result after two 429s, within the budget", async () => {
@@ -325,8 +337,8 @@ describe("query-time retry budget", () => {
 
   it("reports each client's budget; the ingest default has no total limit", () => {
     const fn = (async () => new Response("{}")) as unknown as typeof fetch;
-    expect(new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
-    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalWaitMs: Infinity });
+    expect(new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalAttempts: 3, maxTotalWaitMs: 10_000 });
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalAttempts: Infinity, maxTotalWaitMs: Infinity });
   });
 });
 

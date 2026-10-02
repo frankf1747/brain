@@ -1,5 +1,5 @@
 // Loads .env (dotenv) before EVAL_DATABASE_URL is read below.
-import { config } from "../config.js";
+import { config, EVAL_VOYAGE_CAP_NAME } from "../config.js";
 import { makeCtx, type Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
 
@@ -48,5 +48,5 @@ export const EVAL_CLIENT = "eval";
  */
 export function makeEvalCtx(): Ctx {
   assertEvalDatabase(EVAL_DATABASE_URL);
-  return makeCtx({ databaseUrl: EVAL_DATABASE_URL, obsidian: false, client: EVAL_CLIENT, dailyTokenCap: config.evalVoyageDailyTokenCap });
+  return makeCtx({ databaseUrl: EVAL_DATABASE_URL, obsidian: false, client: EVAL_CLIENT, voyageCap: { tokens: config.evalVoyageDailyTokenCap, name: EVAL_VOYAGE_CAP_NAME } });
 }

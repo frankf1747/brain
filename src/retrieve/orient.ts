@@ -1,5 +1,5 @@
 import type { Ctx } from "../ctx.js";
-import { config } from "../config.js";
+import { config, VOYAGE_CAP_NAME } from "../config.js";
 import { stageCounts } from "../ingest/pipeline.js";
 import { tokensToday } from "../llm/ledger.js";
 
@@ -10,8 +10,8 @@ export interface Orientation {
   recent: { id: string; title: string | null; sourceKind: string; occurredAt: Date | null; ingestedAt: Date }[];
   facts: { id: string; predicate: string; objectText: string; verified: boolean }[];
   pipeline: { stage: string; count: number; failed: number }[];
-  /** Tokens counted against today's (UTC) Voyage cap in this database, and the cap. */
-  voyage: { tokensToday: number; cap: number };
+  /** Tokens counted against today's (UTC) Voyage cap in this database, and the cap; null when the ledger is missing. */
+  voyage: { tokensToday: number; cap: number } | null;
 }
 
 export async function orient(ctx: Ctx): Promise<Orientation> {
@@ -29,8 +29,10 @@ export async function orient(ctx: Ctx): Promise<Orientation> {
         order by predicate, lower(object_text), verified desc, created_at
       ) d order by verified desc, predicate limit 50`,
     stageCounts(ctx),
-    tokensToday(sql),
+    // A database without migration 010 has no ledger; orient still answers and says so.
+    tokensToday(sql).catch(() => null),
   ]);
+  const cap = ctx.voyageCap ?? { tokens: config.voyageDailyTokenCap, name: VOYAGE_CAP_NAME };
   return {
     totalDocuments: kinds.reduce((s, k) => s + Number(k.count), 0),
     documentsByKind: kinds.map((k) => ({ kind: k.kind, count: Number(k.count) })),
@@ -38,6 +40,6 @@ export async function orient(ctx: Ctx): Promise<Orientation> {
     recent,
     facts: facts.map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, verified: f.verified })),
     pipeline,
-    voyage: { tokensToday: voyageTokens, cap: config.voyageDailyTokenCap },
+    voyage: voyageTokens === null ? null : { tokensToday: voyageTokens, cap: cap.tokens },
   };
 }

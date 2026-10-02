@@ -91,6 +91,7 @@ describe("reserveTokens and settleReservation", () => {
       "Voyage daily token cap reached: 950 tokens counted today (UTC) + 60 estimated for this call > cap 1000",
     );
     expect([(err as SpendCapError).used, (err as SpendCapError).estimated, (err as SpendCapError).cap]).toEqual([950, 60, 1000]);
+    expect((err as SpendCapError).capName).toBe("BRAIN_VOYAGE_DAILY_TOKEN_CAP");
     const refused = await sql<Record<string, unknown>[]>`
       select requests, estimated_tokens, tokens, error, finished_at is not null as finished
       from brain.provider_usage where status = 'refused'`;
@@ -122,6 +123,14 @@ describe("reserveTokens and settleReservation", () => {
       "Voyage daily token cap reached: BRAIN_VOYAGE_DAILY_TOKEN_CAP is 0, which blocks every Voyage call",
     );
     expect(await tokensToday(sql)).toBe(0);
+  });
+
+  it("names the ledger's cap variable when its cap is 0 (brain_eval's own cap)", async () => {
+    const err = await reserveTokens({ sql, client: "eval", dailyTokenCap: 0, capName: "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP" }, call(1)).catch((e: unknown) => e);
+    expect((err as SpendCapError).message).toBe(
+      "Voyage daily token cap reached: BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP is 0, which blocks every Voyage call",
+    );
+    expect((err as SpendCapError).capName).toBe("BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP");
   });
 
   it("uses config.voyageDailyTokenCap when the ledger sets no cap", async () => {

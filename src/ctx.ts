@@ -1,4 +1,4 @@
-import { config } from "./config.js";
+import { config, voyageCapFor, type VoyageCap } from "./config.js";
 import { connect, type Db } from "./db.js";
 import { AnthropicLlm, type Llm } from "./llm/llm.js";
 import { ClaudeCodeLlm } from "./llm/claude-code.js";
@@ -19,6 +19,8 @@ export interface Ctx {
   onDocumentChanged?: (documentId: string) => void;
   /** The Obsidian mirror refresher behind onDocumentChanged, so callers can flush it before exiting. */
   obsidian?: ObsidianAutoProjector;
+  /** The daily Voyage cap this context's ledger enforces (set by makeCtx); absent on test fakes, which mean the real cap. */
+  voyageCap?: VoyageCap;
 }
 
 export function makeLlm(): Llm {
@@ -32,16 +34,17 @@ export interface MakeCtxOptions {
   obsidian?: boolean;
   /** Stored on every Voyage ledger row: cli (default), mcp-stdio, mcp-http, eval. */
   client?: string;
-  /** Tokens per UTC day for this context's ledger; unset means config.voyageDailyTokenCap. makeEvalCtx passes the eval cap. */
-  dailyTokenCap?: number;
+  /** The cap this context's ledger enforces; unset means the database's own (voyageCapFor: the eval cap on *_eval). */
+  voyageCap?: VoyageCap;
 }
 
 export function makeCtx(opts: MakeCtxOptions = {}): Ctx {
-  const sql = connect(opts.databaseUrl ?? config.databaseUrl);
+  const databaseUrl = opts.databaseUrl ?? config.databaseUrl;
+  const sql = connect(databaseUrl);
+  const voyageCap = opts.voyageCap ?? voyageCapFor(databaseUrl);
   // Both clients record every Voyage call in this database's brain.provider_usage and stop at the daily cap
   // (src/llm/ledger.ts). The eval context gets brain_eval's ledger the same way.
-  const ledger: VoyageLedger = { sql, client: opts.client ?? "cli" };
-  if (opts.dailyTokenCap !== undefined) ledger.dailyTokenCap = opts.dailyTokenCap;
+  const ledger: VoyageLedger = { sql, client: opts.client ?? "cli", dailyTokenCap: voyageCap.tokens, capName: voyageCap.name };
   const voyage = new VoyageClient({ ledger });
   const queryVoyage = new VoyageClient({ ledger, ...QUERY_RETRY_BUDGET, requestTimeoutMs: QUERY_REQUEST_TIMEOUT_MS });
   const ctx: Ctx = {
@@ -51,6 +54,7 @@ export function makeCtx(opts: MakeCtxOptions = {}): Ctx {
     reranker: voyage,
     queryEmbedder: queryVoyage,
     queryReranker: queryVoyage,
+    voyageCap,
   };
   if (opts.obsidian === false) return ctx;
   if (autoProjectionEnabled(process.env, isDirectory)) {

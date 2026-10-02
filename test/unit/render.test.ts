@@ -78,6 +78,13 @@ describe("other renderers", () => {
     expect(t.split("\n")).toContain("Voyage today: 1,250,000 of 5,000,000 tokens (25.0%)");
     expect(t).toContain("brain_search");
   });
+  it("renderOrient says the Voyage ledger is unavailable instead of failing", () => {
+    const t = renderOrient({
+      totalDocuments: 0, documentsByKind: [], nodesByType: [], recent: [], facts: [], pipeline: [], voyage: null,
+    });
+    expect(t.split("\n")).toContain("Voyage ledger unavailable (migration 010 missing?)");
+    expect(t).toContain("brain_search");
+  });
   it("renderNode shows edges with direction and evidence", () => {
     const t = renderNode({
       id: "n1", type: "organization", name: "Acme", aliases: ["acme"], properties: {}, verified: false, isSelf: false,

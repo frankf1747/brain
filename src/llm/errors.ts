@@ -33,18 +33,22 @@ export function isRefusal(err: unknown): boolean {
 
 /**
  * A Voyage call was refused before it was sent: today's (UTC) counted tokens plus this call's estimate would pass
- * BRAIN_VOYAGE_DAILY_TOKEN_CAP. Retrying before 00:00 UTC (or before the cap is raised) cannot help.
+ * the database's daily cap (`capName`: BRAIN_VOYAGE_DAILY_TOKEN_CAP, or BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP on
+ * brain_eval). Retrying before 00:00 UTC (or before the cap is raised) cannot help.
  */
 export class SpendCapError extends Error {
   readonly used: number;
   readonly estimated: number;
   readonly cap: number;
-  constructor(message: string, detail: { used: number; estimated: number; cap: number }) {
+  /** The .env variable that sets the cap that refused the call. */
+  readonly capName: string;
+  constructor(message: string, detail: { used: number; estimated: number; cap: number; capName?: string }) {
     super(message);
     this.name = "SpendCapError";
     this.used = detail.used;
     this.estimated = detail.estimated;
     this.cap = detail.cap;
+    this.capName = detail.capName ?? "BRAIN_VOYAGE_DAILY_TOKEN_CAP";
   }
 }
 
