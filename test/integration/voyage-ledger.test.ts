@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { testDb, wipe, meteredVoyage } from "./helpers.js";
+import { testDb, wipe, meteredVoyage, TEST_DATABASE_URL } from "./helpers.js";
 import { VoyageClient, estimateEmbedTokens, estimateRerankTokens } from "../../src/llm/voyage.js";
 import { isSpendCap } from "../../src/llm/errors.js";
-import { tokensToday } from "../../src/llm/ledger.js";
+import { tokensToday, reserveTokens } from "../../src/llm/ledger.js";
+import { makeCtx } from "../../src/ctx.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -150,5 +151,19 @@ describe("VoyageClient with a ledger when fetch throws", () => {
     expect(timedOut.error).toMatch(/timeout|aborted/i);
     expect(busy).toMatchObject({ status: "error", tokens: 0 });
     expect(await tokensToday(sql)).toBe(estimateRerankTokens("q", ["abcd"]));
+  });
+});
+
+describe("makeCtx's dailyTokenCap", () => {
+  it("is the cap its clients' ledger enforces in the context's database", async () => {
+    const ctx = makeCtx({ databaseUrl: TEST_DATABASE_URL, obsidian: false, client: "eval", dailyTokenCap: 10 });
+    try {
+      const metered = (ctx.queryEmbedder as VoyageClient).ledger!;
+      await reserveTokens(metered, { operation: "embed_query", model: "voyage-test", estimatedTokens: 8 });
+      await expect(reserveTokens(metered, { operation: "embed_query", model: "voyage-test", estimatedTokens: 3 })).rejects.toThrow(/> cap 10/);
+      expect((await rows()).map((r) => [r.status, r.client])).toEqual([["reserved", "eval"], ["refused", "eval"]]);
+    } finally {
+      await ctx.sql.end();
+    }
   });
 });

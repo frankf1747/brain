@@ -36,7 +36,7 @@ export interface VoyageOptions {
   maxAttempts?: number;
   /**
    * Milliseconds one HTTP attempt may take before it is aborted (AbortSignal.timeout; default 120 s, query clients
-   * 30 s). A timed-out attempt is a thrown fetch: retried like a network error and counted at its estimate.
+   * 8 s). A timed-out attempt is a thrown fetch: retried like a network error and counted at its estimate.
    */
   requestTimeoutMs?: number;
   /** Most total time one call may sleep between attempts; a wait that would pass it gives up instead (default unlimited). */
@@ -54,8 +54,11 @@ const MAX_RATE_LIMIT_ATTEMPTS = 6;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 /** Ingest requests carry up to 128 chunks, so they get a generous timeout. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
-/** Query-time clients (src/ctx.ts): a single query or one rerank should never take 30 s. */
-export const QUERY_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Query-time clients (src/ctx.ts): a query embed or one rerank normally answers in under 2 s, so 8 s per attempt
+ * keeps a worst-case query embed or rerank at about 34 s (3 attempts of 8 s plus at most 10 s of backoff) instead of 100 s.
+ */
+export const QUERY_REQUEST_TIMEOUT_MS = 8_000;
 
 /**
  * Query-time clients (src/ctx.ts): 3 attempts and at most 10 s of backoff in total, so a search degrades quickly

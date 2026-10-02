@@ -331,11 +331,11 @@ describe("query-time retry budget", () => {
 });
 
 describe("request timeout", () => {
-  it("is 120 s by default (ingest) and 30 s for the query clients", () => {
+  it("is 120 s by default (ingest) and 8 s for the query clients", () => {
     const fn = (async () => new Response("{}")) as unknown as typeof fetch;
-    expect(QUERY_REQUEST_TIMEOUT_MS).toBe(30_000);
+    expect(QUERY_REQUEST_TIMEOUT_MS).toBe(8_000);
     expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).requestTimeoutMs).toBe(120_000);
-    expect(new VoyageClient({ apiKey: "k", fetchFn: fn, requestTimeoutMs: QUERY_REQUEST_TIMEOUT_MS }).requestTimeoutMs).toBe(30_000);
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn, requestTimeoutMs: QUERY_REQUEST_TIMEOUT_MS }).requestTimeoutMs).toBe(8_000);
   });
 
   it("sends every attempt with its own abort signal", async () => {

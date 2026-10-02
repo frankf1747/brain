@@ -3,6 +3,7 @@ import { connect, type Db } from "./db.js";
 import { AnthropicLlm, type Llm } from "./llm/llm.js";
 import { ClaudeCodeLlm } from "./llm/claude-code.js";
 import { VoyageClient, QUERY_RETRY_BUDGET, QUERY_REQUEST_TIMEOUT_MS, type Embedder, type Reranker } from "./llm/voyage.js";
+import type { VoyageLedger } from "./llm/ledger.js";
 import { statSync } from "node:fs";
 import { ObsidianAutoProjector, autoProjectionEnabled } from "./obsidian/auto.js";
 
@@ -11,7 +12,7 @@ export interface Ctx {
   llm: Llm;
   embedder: Embedder;
   reranker: Reranker;
-  /** Query-time clients: 3 attempts and at most 10 s of backoff per call (QUERY_RETRY_BUDGET) and a 30 s request timeout, so search degrades fast. */
+  /** Query-time clients: 3 attempts and at most 10 s of backoff per call (QUERY_RETRY_BUDGET) and an 8 s request timeout, so search degrades fast. */
   queryEmbedder?: Embedder;
   queryReranker?: Reranker;
   /** Called after a document reaches chunked and again at done; the pipeline ignores anything it throws. */
@@ -31,13 +32,16 @@ export interface MakeCtxOptions {
   obsidian?: boolean;
   /** Stored on every Voyage ledger row: cli (default), mcp-stdio, mcp-http, eval. */
   client?: string;
+  /** Tokens per UTC day for this context's ledger; unset means config.voyageDailyTokenCap. makeEvalCtx passes the eval cap. */
+  dailyTokenCap?: number;
 }
 
 export function makeCtx(opts: MakeCtxOptions = {}): Ctx {
   const sql = connect(opts.databaseUrl ?? config.databaseUrl);
   // Both clients record every Voyage call in this database's brain.provider_usage and stop at the daily cap
   // (src/llm/ledger.ts). The eval context gets brain_eval's ledger the same way.
-  const ledger = { sql, client: opts.client ?? "cli" };
+  const ledger: VoyageLedger = { sql, client: opts.client ?? "cli" };
+  if (opts.dailyTokenCap !== undefined) ledger.dailyTokenCap = opts.dailyTokenCap;
   const voyage = new VoyageClient({ ledger });
   const queryVoyage = new VoyageClient({ ledger, ...QUERY_RETRY_BUDGET, requestTimeoutMs: QUERY_REQUEST_TIMEOUT_MS });
   const ctx: Ctx = {

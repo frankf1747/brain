@@ -9,11 +9,21 @@ import { SpendCapError } from "./errors.js";
  * database shares, sum today's counted tokens (brain.provider_tokens_today), then insert either a `reserved` row
  * or a `refused` row. The lock makes check-and-insert atomic across connections and processes, and the sum runs
  * after the lock is granted, so it sees every reservation committed before it. At each admission, settled actual
- * tokens plus in-flight estimates stay within the cap; the day's total can pass the cap only by how far in-flight
- * calls' actual counts exceed their estimates.
+ * tokens plus in-flight estimates stay within the cap.
  *
- * The ledger is per database: the real knowledge base and brain_eval each count and cap their own calls. Voyage
- * bills per account, so the account's daily spend can reach the sum of the caps of every database using the key.
+ * How far past the cap a day can go: settled calls count their real tokens (Voyage's usage.total_tokens), so the
+ * only overshoot comes from calls in flight when the cap is reached, which were admitted at their characters / 4
+ * estimate. On measured data that estimate was within about 4% for English; for non-English or code-heavy text it
+ * can undercount 2-4x. The worst case is therefore roughly (concurrent callers) x (largest batch estimate) x
+ * (estimate error): tens of thousands of tokens for English, more for other text. It is bounded by what is in
+ * flight at one moment and never grows over the day, because every later reservation sees the settled totals.
+ * Requests time out (8 s for query clients, 120 s for ingest, src/llm/voyage.ts); a timed-out or dropped request
+ * (fetch threw) settles at null tokens and keeps counting at its estimate, since Voyage may have billed it. A row
+ * left `reserved` by a dead process counts at its estimate too.
+ *
+ * The ledger is per database: the real knowledge base and brain_eval each count and cap their own calls
+ * (BRAIN_VOYAGE_DAILY_TOKEN_CAP and BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP). Voyage bills per account, so the account's
+ * daily ceiling is the sum of the caps of every database using the key.
  */
 
 export type VoyageOperation = "embed_document" | "embed_query" | "rerank";
@@ -23,7 +33,7 @@ export interface VoyageLedger {
   sql: Db;
   /** Who is spending (cli, mcp-stdio, mcp-http, eval, test); stored on every row. */
   client: string;
-  /** Tokens per UTC day; defaults to config.voyageDailyTokenCap. Only tests set it. */
+  /** Tokens per UTC day; defaults to config.voyageDailyTokenCap. makeEvalCtx sets config.evalVoyageDailyTokenCap; tests set their own. */
   dailyTokenCap?: number;
 }
 
