@@ -7,7 +7,7 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
-import { renderSearch, renderExplain } from "./mcp/render.js";
+import { renderSearch, renderExplain, renderSources } from "./mcp/render.js";
 import { explain, explainNotFound } from "./retrieve/explain.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
@@ -164,8 +164,7 @@ program
     await withCtx(async (ctx) => {
       const { answer, result } = await ask(ctx, question, searchOptions(opts));
       console.log(answer + "\n");
-      result.passages.forEach((p, i) => console.log(`[P${i + 1}] ${p.sourceKind}${p.title ? " · " + p.title : ""} (${p.documentId})`));
-      result.facts.forEach((f, i) => console.log(`[F${i + 1}] ${f.predicate}: ${f.objectText}`));
+      console.log(renderSources(result));
     });
   });
 

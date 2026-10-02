@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
-  renderExplain, explainLine,
+  renderExplain, explainLine, renderSources,
 } from "../../src/mcp/render.js";
 import { toLoggedPassages } from "../../src/retrieve/contract.js";
 import type { Explanation } from "../../src/retrieve/explain.js";
@@ -124,6 +124,20 @@ describe("renderSearch", () => {
   it("factLine and searchHeader are what renderSearch prints", () => {
     expect(factLine(fact(), 0)).toBe("[F1] visa_status: F-1 OPT (unverified · from note d9)");
     expect(searchHeader(fixture)).toBe("retrieval r1 · mode: hybrid · 4 passages");
+  });
+});
+
+describe("renderSources", () => {
+  it("lists what a brain ask answer could cite, marked as the knowledge base's, with the explain hint", () => {
+    const r = searchResult({ passages: [passage()], facts: [fact()], degraded: { embedding: false, rerank: true, capReached: false }, mode: "fused-order" });
+    expect(renderSources(r).split("\n")).toEqual([
+      "Sources from the knowledge base (the answer above is the model's, written from these):",
+      "retrieval r1 · mode: fused-order · 1 passage",
+      "(reranking failed; results in fused order)",
+      '[P1] 0.76 rerank · vector#2 keyword#5 · news · author: other · "Doc" · 2026-09-29 (doc d1, chunk c1)',
+      "[F1] visa_status: F-1 OPT (unverified · from note d9)",
+      "brain explain r1 replays how these passages were ranked.",
+    ]);
   });
 });
 

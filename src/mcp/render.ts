@@ -80,6 +80,19 @@ export function renderSearch(r: SearchResult, opts: { brief?: boolean } = {}): s
   return out.join("\n");
 }
 
+/** Printed under a `brain ask` answer: what it could cite, with the same provenance lines as brain_search. */
+export function renderSources(r: SearchResult): string {
+  const note = degradedNote(r.degraded);
+  return [
+    "Sources from the knowledge base (the answer above is the model's, written from these):",
+    searchHeader(r),
+    ...(note ? [`(${note})`] : []),
+    ...r.passages.map((p, i) => passageLine(p, i)),
+    ...r.facts.map((f, i) => factLine(f, i)),
+    `brain explain ${r.retrievalId} replays how these passages were ranked.`,
+  ].join("\n");
+}
+
 const yesNo = (b: boolean) => (b ? "yes" : "no");
 const msText = (n: number) => `${n.toFixed(1)} ms`;
 
