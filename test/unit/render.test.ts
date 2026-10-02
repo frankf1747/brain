@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus } from "../../src/mcp/render.js";
+import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, degradedNote, searchMode } from "../../src/mcp/render.js";
 
 describe("renderSearch", () => {
   it("numbers passages with ids, lists entities, facts and the fallback notice", () => {
@@ -15,6 +15,8 @@ describe("renderSearch", () => {
       usedFallback: true,
       topScore: 0.8,
       degraded: false,
+      degradedReason: null,
+      capReached: false,
     });
     expect(text).toContain("[P1] hybrid · news · author: other · Doc (document d1, chunk c1)");
     expect(text).toContain("[P2] fallback · note · author: owner (document d2)");
@@ -23,14 +25,34 @@ describe("renderSearch", () => {
     expect(text).toContain("weak match");
     expect(text).not.toContain("embeddings unavailable");
   });
+  const empty = { query: "q", passages: [], documents: [], entities: [], facts: [], usedFallback: false, topScore: null };
+
   it("says so when nothing was found", () => {
-    expect(renderSearch({ query: "q", passages: [], documents: [], entities: [], facts: [], usedFallback: true, topScore: null, degraded: false })).toContain("No passages matched");
+    expect(renderSearch({ ...empty, usedFallback: true, degraded: false, degradedReason: null, capReached: false })).toContain("No passages matched");
   });
-  it("notes degraded (keyword-only) results on its own line near the top", () => {
-    const text = renderSearch({ query: "q", passages: [], documents: [], entities: [], facts: [], usedFallback: false, topScore: null, degraded: true });
-    const lines = text.split("\n");
-    expect(lines.indexOf("(embeddings unavailable: keyword-only results)")).toBeGreaterThanOrEqual(0);
-    expect(lines.indexOf("(embeddings unavailable: keyword-only results)")).toBeLessThan(3);
+
+  it("names which part of a degraded search fell back, on its own line near the top", () => {
+    const cases = [
+      { degradedReason: "cap" as const, capReached: true, note: "Voyage daily cap reached; keyword-only results" },
+      { degradedReason: "embedding" as const, capReached: false, note: "query embedding failed; keyword-only results" },
+      { degradedReason: "rerank" as const, capReached: true, note: "Voyage daily cap reached; results in fused order" },
+      { degradedReason: "rerank" as const, capReached: false, note: "reranking failed; results in fused order" },
+    ];
+    for (const c of cases) {
+      const r = { ...empty, degraded: true, degradedReason: c.degradedReason, capReached: c.capReached };
+      expect(degradedNote(r)).toBe(c.note);
+      expect(searchMode(r)).toBe(c.note);
+      const lines = renderSearch(r).split("\n");
+      expect(lines.indexOf(`(${c.note})`)).toBeGreaterThanOrEqual(0);
+      expect(lines.indexOf(`(${c.note})`)).toBeLessThan(3);
+      expect(renderSearch(r)).not.toContain("embeddings unavailable");
+    }
+  });
+
+  it("prints no note for a full hybrid search, and the CLI mode says so", () => {
+    const r = { ...empty, degraded: false, degradedReason: null, capReached: false };
+    expect(degradedNote(r)).toBeNull();
+    expect(searchMode(r)).toBe("hybrid (vector and keyword, reranked)");
   });
 });
 

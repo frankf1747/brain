@@ -131,6 +131,8 @@ program
     await withCtx(async (ctx) => {
       const res = await search(ctx, query, { ...searchOptions(opts), client: "cli" });
       if (opts.json) return void console.log(JSON.stringify(res, null, 2));
+      const { searchMode } = await import("./mcp/render.js");
+      console.log(`mode: ${searchMode(res)}\n`);
       if (res.usedFallback) console.log("(weak match: included raw substring hits)\n");
       res.passages.forEach((p, i) => {
         console.log(`[P${i + 1}] ${p.group} ${p.score.toFixed(3)} ${p.sourceKind}${p.documentTitle ? " · " + p.documentTitle : ""}`);

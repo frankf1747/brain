@@ -7,9 +7,29 @@ import type { SuppressedDocument } from "../ingest/set-author.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
+/** The one-line note for a degraded search, or null for a full hybrid search. */
+export function degradedNote(r: Pick<SearchResult, "degradedReason" | "capReached">): string | null {
+  switch (r.degradedReason) {
+    case "cap":
+      return "Voyage daily cap reached; keyword-only results";
+    case "embedding":
+      return "query embedding failed; keyword-only results";
+    case "rerank":
+      return r.capReached ? "Voyage daily cap reached; results in fused order" : "reranking failed; results in fused order";
+    default:
+      return null;
+  }
+}
+
+/** The search mode, as the CLI prints it on its `mode:` line. */
+export function searchMode(r: Pick<SearchResult, "degradedReason" | "capReached">): string {
+  return degradedNote(r) ?? "hybrid (vector and keyword, reranked)";
+}
+
 export function renderSearch(r: SearchResult): string {
   const out: string[] = [];
-  if (r.degraded) out.push("(embeddings unavailable: keyword-only results)");
+  const note = degradedNote(r);
+  if (note) out.push(`(${note})`);
   if (r.usedFallback) out.push("(weak match: results include raw substring hits)\n");
   if (r.passages.length === 0) out.push("No passages matched.");
   r.passages.forEach((p, i) => {
