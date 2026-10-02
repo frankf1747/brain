@@ -76,6 +76,16 @@ describe("loadBaseline", () => {
     expect(await loadBaseline(join(dir, "b.json"))).toEqual(base);
     expect(await loadBaseline(join(dir, "missing.json"))).toBeNull();
   });
+  it("loads a baseline with per-stage latency, and one recorded before Phase 4 without it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "baseline-"));
+    const p50p95 = { p50: 1, p95: 2 };
+    const withStages: Baseline = { ...base, report: report({}, { stageLatencyMs: { embed: p50p95, sql: p50p95, rerank: p50p95, graph: p50p95 } }) };
+    await saveBaseline(join(dir, "b.json"), withStages);
+    expect(await loadBaseline(join(dir, "b.json"))).toEqual(withStages);
+    const committed = await loadBaseline("eval/baseline.json");
+    expect(committed).not.toBeNull();
+    expect(committed!.report.stageLatencyMs).toBeUndefined();
+  });
   it("throws a clear error on a malformed file", async () => {
     const dir = await mkdtemp(join(tmpdir(), "baseline-"));
     const p = join(dir, "bad.json");

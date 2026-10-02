@@ -7,7 +7,8 @@ const exp = (...origins: string[]) => origins.map((origin) => ({ origin: `${orig
 function result(partial: Partial<QuestionResult>): QuestionResult {
   return {
     id: "q", kind: "keyword", negative: false, expected: [], ranked: [], totalRelevant: 0, topScore: 0.9, hasGraphPassage: false,
-    degraded: false, totalMs: 10, paraphraseRanked: [], paraphraseDegraded: [], ...partial,
+    degraded: false, totalMs: 10, timings: { embedMs: 1, sqlMs: 2, rerankMs: 3, graphMs: 0, totalMs: 10 },
+    paraphraseRanked: [], paraphraseDegraded: [], ...partial,
   };
 }
 
@@ -101,6 +102,20 @@ describe("summarize", () => {
       result({ id: "1", expected: quoted, ranked: [{ documentId: "a", origin: "/c/a.md", containsQuote: true }], totalRelevant: 3 }),
     ], 0.3);
     expect(r.overall.ndcgAt10).toBeLessThan(1);
+  });
+  it("reports p50 and p95 per search stage", () => {
+    const t = (embedMs: number, sqlMs: number, rerankMs: number, graphMs: number) => ({ embedMs, sqlMs, rerankMs, graphMs, totalMs: embedMs + sqlMs + rerankMs + graphMs });
+    const r = summarize([
+      result({ id: "1", timings: t(100, 10, 200, 1) }),
+      result({ id: "2", timings: t(120, 30, 250, 2) }),
+      result({ id: "3", timings: t(400, 20, 220, 0) }),
+    ], 0.3);
+    expect(r.stageLatencyMs).toEqual({
+      embed: { p50: 120, p95: 400 },
+      sql: { p50: 20, p95: 30 },
+      rerank: { p50: 220, p95: 250 },
+      graph: { p50: 1, p95: 2 },
+    });
   });
   it("counts paraphrase searches in the degraded fraction", () => {
     const r = summarize([

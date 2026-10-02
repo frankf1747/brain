@@ -1,4 +1,5 @@
 import type { Expected, GoldenKind } from "./golden.js";
+import type { Timings } from "../retrieve/contract.js";
 
 export interface RankedDoc {
   documentId: string;
@@ -22,7 +23,10 @@ export interface QuestionResult {
   topScore: number | null;
   hasGraphPassage: boolean;
   degraded: boolean;
+  /** The search's own total (timings.totalMs), not wall-clock around the call. */
   totalMs: number;
+  /** The search's stage timings. */
+  timings: Timings;
   paraphraseRanked: RankedDoc[][];
   /** Whether each paraphrase search ran degraded, parallel to paraphraseRanked. */
   paraphraseDegraded: boolean[];
@@ -48,7 +52,21 @@ export interface Report {
   paraphrase: { n: number; consistency: number; meanRecallDelta: number };
   /** Share of all searches (originals and paraphrases) that ran degraded. */
   degradedFraction: number;
-  latencyMs: { p50: number; p95: number };
+  latencyMs: Percentiles;
+  /** p50/p95 of each search stage over the main questions. Optional: baselines recorded before Phase 4 have none. */
+  stageLatencyMs?: StageLatency;
+}
+
+export interface Percentiles {
+  p50: number;
+  p95: number;
+}
+
+export interface StageLatency {
+  embed: Percentiles;
+  sql: Percentiles;
+  rerank: Percentiles;
+  graph: Percentiles;
 }
 
 /** By document id, exact origin, or origin ending in "/" + the expected origin (a path-segment suffix). */
@@ -172,6 +190,10 @@ export function summarize(results: QuestionResult[], threshold: number): Report 
   const byKind: Record<string, RankMetrics> = {};
   for (const kind of new Set(positives.map((r) => r.kind))) byKind[kind] = rankMetrics(positives.filter((r) => r.kind === kind));
   const latencies = results.map((r) => r.totalMs);
+  const stage = (pick: (t: Timings) => number): Percentiles => {
+    const xs = results.map((r) => pick(r.timings));
+    return { p50: percentile(xs, 50), p95: percentile(xs, 95) };
+  };
   const searches = results.flatMap((r) => [r.degraded, ...r.paraphraseDegraded]);
   const rate = (pred: (r: QuestionResult) => boolean) => (negatives.length ? negatives.filter(pred).length / negatives.length : 0);
   return {
@@ -186,5 +208,6 @@ export function summarize(results: QuestionResult[], threshold: number): Report 
     paraphrase: paraphraseStats(positives),
     degradedFraction: searches.length ? searches.filter(Boolean).length / searches.length : 0,
     latencyMs: { p50: percentile(latencies, 50), p95: percentile(latencies, 95) },
+    stageLatencyMs: { embed: stage((t) => t.embedMs), sql: stage((t) => t.sqlMs), rerank: stage((t) => t.rerankMs), graph: stage((t) => t.graphMs) },
   };
 }
