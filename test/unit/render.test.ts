@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
-  renderExplain,
+  renderExplain, explainLine,
 } from "../../src/mcp/render.js";
 import { toLoggedPassages } from "../../src/retrieve/contract.js";
 import type { Explanation } from "../../src/retrieve/explain.js";
@@ -34,8 +34,9 @@ const fixture = searchResult({
   entities: [{ id: "n1", type: "organization", name: "Acme", matchedSpan: "acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
   facts: [
     fact(),
-    fact({ id: "f2", predicate: "lives_in", objectText: "Austin", verified: true, verifiedBy: "agent:claude-code", sourceChunkId: null, sourceDocumentId: null, sourceKind: null }),
+    fact({ id: "f2", predicate: "lives_in", objectText: "Austin", verified: true, verifiedBy: "frank", sourceChunkId: null, sourceDocumentId: null, sourceKind: null }),
     fact({ id: "f3", predicate: "prefers", objectText: "tea", sourceChunkId: null, sourceDocumentId: null, sourceKind: null }),
+    fact({ id: "f4", predicate: "works_at", objectText: "Acme", verifiedBy: "agent:claude-code", sourceChunkId: null, sourceDocumentId: null, sourceKind: null }),
   ],
 });
 
@@ -63,8 +64,9 @@ describe("renderSearch", () => {
         'Entity organization: Acme (node n1, matched "acme") — Austin (place)',
         "Facts about the owner:",
         "[F1] visa_status: F-1 OPT (unverified · from note d9)",
-        "[F2] lives_in: Austin (verified · stated by owner)",
+        "[F2] lives_in: Austin (verified · confirmed by owner)",
         "[F3] prefers: tea (unverified · extracted; source passage no longer stored)",
+        "[F4] works_at: Acme (unverified · stated by owner)",
       ].join("\n"),
     );
   });
@@ -107,6 +109,16 @@ describe("renderSearch", () => {
     expect(scoreText(graphPassage)).toBe("-");
     expect(foundBy(graphPassage)).toBe("graph via Acme");
     expect(foundBy(fallbackPassage)).toBe('fallback "X-90"');
+  });
+
+  it("a hybrid passage the graph also reached keeps its ranks and score and adds the entity", () => {
+    const both = passage({ layers: ["vector", "keyword", "graph"], viaEntity: { id: "n1", name: "Acme Corp" } });
+    expect(foundBy(both)).toBe("vector#2 keyword#5 graph via Acme Corp");
+    expect(scoreText(both)).toBe("0.76 rerank");
+    expect(passageLine(both, 0)).toBe('[P1] 0.76 rerank · vector#2 keyword#5 graph via Acme Corp · news · author: other · "Doc" · 2026-09-29 (doc d1, chunk c1)');
+    expect(explainLine(both, 0)).toBe(
+      '#1 [P1] score 0.76 (rerank) · layers vector+keyword+graph via Acme Corp · vector 2 · keyword 5 · rerank 1 · "Doc" · author: other · news (doc d1, chunk c1)',
+    );
   });
 
   it("factLine and searchHeader are what renderSearch prints", () => {

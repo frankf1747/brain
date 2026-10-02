@@ -29,10 +29,13 @@ export interface SearchOptions {
   client?: string;
 }
 
-/** Milliseconds since `start` (a performance.now() value), to one decimal. */
+/** Milliseconds since `start` (a performance.now() value), unrounded so sums carry no rounding error. */
 function elapsed(start: number): number {
-  return Math.round((performance.now() - start) * 10) / 10;
+  return performance.now() - start;
 }
+
+/** One decimal, applied once per timing after every stage has been added up. */
+const tenth = (ms: number) => Math.round(ms * 10) / 10;
 
 type HowFound = Pick<Passage, "score" | "scoreKind" | "layers" | "vectorRank" | "keywordRank" | "rerankRank" | "viaEntity">;
 
@@ -157,22 +160,29 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   );
   timings.sqlMs += elapsed(t);
 
-  // Layer 4: graph expansion from entities named in the query, with budgets (spec §3.5).
+  // Layer 4: graph expansion from entities named in the query, with budgets (spec §3.5). A mention that is already
+  // listed (found by hybrid search, or by an earlier entity) stays at its place with its score and ranks: it gains
+  // the graph layer and, if it has none yet, the entity; the first entity to reach a passage is the one it keeps.
   t = performance.now();
-  const seen = new Set(passages.map((p) => p.chunkId));
+  const byChunk = new Map(passages.map((p) => [p.chunkId as string, p]));
   const entities: EntityHit[] = [];
   for (const ref of entityRefs) {
     entities.push({ id: ref.id, type: ref.type, name: ref.name, matchedSpan: ref.matchedSpan, neighbors: await entityNeighbors(sql, ref.id, filters.verifiedOnly) });
-    const newIds = (await mentionedChunkIds(sql, ref.id, filters)).filter((id) => !seen.has(id));
-    const extra = await loadChunks(sql, newIds);
-    for (const id of newIds) {
+    const via = { id: ref.id, name: ref.name };
+    const mentioned = await mentionedChunkIds(sql, ref.id, filters);
+    const extra = await loadChunks(sql, mentioned.filter((id) => !byChunk.has(id)));
+    for (const id of mentioned) {
+      const listed = byChunk.get(id);
+      if (listed) {
+        if (!listed.layers.includes("graph")) listed.layers.push("graph");
+        if (listed.viaEntity === null) listed.viaEntity = via;
+        continue;
+      }
       const row = extra.get(id);
       if (!row) continue;
-      passages.push(chunkPassage(row, {
-        score: null, scoreKind: "none", layers: ["graph"], vectorRank: null, keywordRank: null, rerankRank: null,
-        viaEntity: { id: ref.id, name: ref.name },
-      }));
-      seen.add(id);
+      const p = chunkPassage(row, { score: null, scoreKind: "none", layers: ["graph"], vectorRank: null, keywordRank: null, rerankRank: null, viaEntity: via });
+      passages.push(p);
+      byChunk.set(id, p);
     }
   }
   timings.graphMs = elapsed(t);
@@ -231,7 +241,11 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   ];
   const logFilters = { sourceKinds: filters.kinds, since: filters.since, until: filters.until, verifiedOnly: filters.verifiedOnly };
   const json = (v: unknown) => sql.json(v as postgres.JSONValue);
-  timings.totalMs = elapsed(started);
+  timings.embedMs = tenth(timings.embedMs);
+  timings.sqlMs = tenth(timings.sqlMs);
+  timings.rerankMs = tenth(timings.rerankMs);
+  timings.graphMs = tenth(timings.graphMs);
+  timings.totalMs = tenth(elapsed(started));
   const [logged] = await sql<{ id: string }[]>`
     insert into brain.retrieval_log
       (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client, results, degraded, candidates, timings, k, mode)

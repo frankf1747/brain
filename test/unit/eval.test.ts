@@ -55,6 +55,12 @@ describe("toQuestionResult", () => {
     const q = toQuestionResult(item, res, new Map([["d2", "/c/note--fairness-in-ml.md"]]), 1, [], 1, []);
     expect(q.ranked[0].containsQuote).toBe(false);
   });
+  it("counts only a passage the graph alone found as a graph passage, as before a ranked passage could carry graph", () => {
+    const ranked = searchResult([{ documentId: "d1", layers: ["vector", "keyword", "graph"], content: "x", score: 0.1 }]);
+    expect(toQuestionResult(item, ranked, new Map([["d1", "/c/z.md"]]), 1, [], 0, []).hasGraphPassage).toBe(false);
+    const graphOnly = searchResult([{ documentId: "d1", layers: ["graph"], content: "x", score: 0 }]);
+    expect(toQuestionResult(item, graphOnly, new Map([["d1", "/c/z.md"]]), 1, [], 0, []).hasGraphPassage).toBe(true);
+  });
   it("rank is null on a miss", () => {
     const q = toQuestionResult(item, searchResult([{ documentId: "d9", layers: ["vector"], content: "x", score: 0.9 }]), new Map([["d9", "/c/z.md"]]), 1, [], 0, []);
     expect(firstExpectedRank(q)).toBeNull();

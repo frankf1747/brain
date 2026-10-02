@@ -30,8 +30,8 @@ export const PassageSchema = z.object({
   /** Who wrote the document: owner, other or unknown. */
   author: z.string(),
   origin: z.string().nullable(),
-  /** The date the document is about (ISO 8601), or null when it has none. */
-  occurredAt: z.string().nullable(),
+  /** The date the document is about (ISO 8601 date-time, as toISOString writes it), or null when it has none. */
+  occurredAt: z.string().datetime({ offset: true }).nullable(),
   headingPath: z.array(z.string()),
   content: z.string(),
   /** The passage's character window in the document's raw text. */
@@ -41,15 +41,18 @@ export const PassageSchema = z.object({
   score: z.number().nullable(),
   scoreKind: ScoreKindSchema,
   layers: z.array(LayerSchema),
-  /** 1-based rank among the vector branch's candidates; hybrid passages only. */
+  /** 1-based rank among the vector branch's candidates; null unless the vector branch found the passage. */
   vectorRank: z.number().int().nullable(),
-  /** 1-based rank among the keyword branch's candidates; hybrid passages only. */
+  /** 1-based rank among the keyword branch's candidates; null unless the keyword branch found the passage. */
   keywordRank: z.number().int().nullable(),
   /** 1-based position in the reranker's output; null when the rerank did not run. */
   rerankRank: z.number().int().nullable(),
   /** The trigger term the literal scan matched; fallback passages only. */
   fallbackTerm: z.string().nullable(),
-  /** The entity named in the query whose mentions brought this passage in; graph passages only. */
+  /**
+   * The entity named in the query whose mentions include this passage (the first one, if several do); set exactly
+   * when layers includes "graph". A hybrid passage the graph also reached keeps its hybrid score and ranks.
+   */
   viaEntity: z.object({ id: z.string(), name: z.string() }).nullable(),
 });
 
@@ -188,15 +191,19 @@ export function toLoggedPassages(passages: Passage[]): LoggedPassage[] {
 export type FactSource =
   | { kind: "document"; sourceKind: string; documentId: string }
   | { kind: "owner" }
+  | { kind: "confirmed" }
   | { kind: "unlinked" };
 
 /**
- * Where a fact came from. "document": the extractor read it from a passage that is still stored. "owner": no source
- * passage and not written by the extractor (brain_add_fact, or set by hand). "unlinked": written by the extractor,
- * but its source passage is gone (re-chunked).
+ * Where a fact came from. "document": the extractor read it from a passage that is still stored. "confirmed": no
+ * stored source passage, and the owner verified it; verified is set only by verifyFact (`brain verify-fact`), which
+ * also overwrites verified_by with the verifier's name, so who first wrote it is no longer known. "owner": no source
+ * passage, unverified, and not written by the extractor (brain_add_fact, or set by hand). "unlinked": written by the
+ * extractor, unverified, and its source passage is gone (re-chunked or deleted).
  */
-export function factSource(f: Pick<FactRow, "sourceChunkId" | "sourceDocumentId" | "sourceKind" | "verifiedBy">): FactSource {
+export function factSource(f: Pick<FactRow, "sourceChunkId" | "sourceDocumentId" | "sourceKind" | "verified" | "verifiedBy">): FactSource {
   if (f.sourceChunkId && f.sourceDocumentId && f.sourceKind) return { kind: "document", sourceKind: f.sourceKind, documentId: f.sourceDocumentId };
+  if (f.verified) return { kind: "confirmed" };
   if (!(f.verifiedBy ?? "").startsWith(EXTRACTOR_BY_PREFIX)) return { kind: "owner" };
   return { kind: "unlinked" };
 }

@@ -17,10 +17,13 @@ export function scoreText(p: Pick<LoggedPassage, "score" | "scoreKind">): string
 
 /** How a passage was found: its rank in each branch, the entity it came through, or the literal term it contains. */
 export function foundBy(p: Pick<LoggedPassage, "layers" | "vectorRank" | "keywordRank" | "viaEntity" | "fallbackTerm">): string {
-  if (p.layers.includes("graph")) return `graph via ${p.viaEntity?.name ?? "an entity"}`;
-  if (p.layers.includes("fallback")) return `fallback "${p.fallbackTerm ?? ""}"`;
-  const ranks = [p.vectorRank !== null ? `vector#${p.vectorRank}` : null, p.keywordRank !== null ? `keyword#${p.keywordRank}` : null];
-  return ranks.filter((x): x is string => x !== null).join(" ");
+  const parts = [
+    p.vectorRank !== null ? `vector#${p.vectorRank}` : null,
+    p.keywordRank !== null ? `keyword#${p.keywordRank}` : null,
+    p.layers.includes("graph") ? `graph via ${p.viaEntity?.name ?? "an entity"}` : null,
+    p.layers.includes("fallback") ? `fallback "${p.fallbackTerm ?? ""}"` : null,
+  ];
+  return parts.filter((x): x is string => x !== null).join(" ");
 }
 
 /**
@@ -34,12 +37,13 @@ export function passageLine(p: LoggedPassage, index: number): string {
   return `[P${index + 1}] ${scoreText(p)} · ${foundBy(p)} · ${p.sourceKind} · author: ${p.author} · ${title} · ${date} ${where}`;
 }
 
-/** One fact: verification state, and whether the extractor read it from a document or the owner stated it. */
+/** One fact: verification state, and where it came from (a document, the owner's word, the owner's confirmation, or a passage now gone). */
 export function factLine(f: FactRow, index: number): string {
   const src = factSource(f);
   const from =
     src.kind === "document" ? `from ${src.sourceKind} ${src.documentId}`
     : src.kind === "owner" ? "stated by owner"
+    : src.kind === "confirmed" ? "confirmed by owner"
     : "extracted; source passage no longer stored";
   return `[F${index + 1}] ${f.predicate}: ${f.objectText} (${f.verified ? "verified" : "unverified"} · ${from})`;
 }

@@ -59,6 +59,15 @@ describe("factSource", () => {
     // Verified by the owner after extraction: still from its document.
     expect(factSource(fact({ verified: true, verifiedBy: "frank" }))).toEqual({ kind: "document", sourceKind: "note", documentId: "d9" });
   });
+
+  it("calls a verified fact with no stored source passage confirmed by the owner, whoever first wrote it", () => {
+    const unlinked = { sourceChunkId: null, sourceDocumentId: null, sourceKind: null };
+    // verifyFact overwrites verified_by with the verifier's name, so an agent's or the extractor's fact reads the same once verified.
+    expect(factSource(fact({ ...unlinked, verified: true, verifiedBy: "frank" }))).toEqual({ kind: "confirmed" });
+    expect(factSource(fact({ ...unlinked, verified: true, verifiedBy: "agent:claude-code" }))).toEqual({ kind: "confirmed" });
+    expect(factSource(fact({ ...unlinked, verified: false, verifiedBy: "agent:claude-code" }))).toEqual({ kind: "owner" });
+    expect(factSource(fact({ ...unlinked, verified: false, verifiedBy: "extractor:claude-test" }))).toEqual({ kind: "unlinked" });
+  });
 });
 
 describe("SearchResultSchema", () => {
@@ -69,5 +78,16 @@ describe("SearchResultSchema", () => {
     expect(SearchResultSchema.safeParse(withDate).success).toBe(false);
     expect(SearchResultSchema.safeParse({ ...r, mode: "full" }).success).toBe(false);
     expect(SearchResultSchema.safeParse({ ...r, passages: [passage({ layers: ["hybrid" as never] })] }).success).toBe(false);
+  });
+
+  it("requires occurredAt to be an ISO 8601 date-time, as toISOString writes it", () => {
+    const at = (occurredAt: string | null) => SearchResultSchema.safeParse(searchResult({ passages: [passage({ occurredAt })] })).success;
+    expect(at(new Date("2026-09-29").toISOString())).toBe(true);
+    expect(at(new Date(Date.UTC(2026, 0, 25, 13, 5, 7, 12)).toISOString())).toBe(true);
+    expect(at("2026-09-29T00:00:00+02:00")).toBe(true);
+    expect(at(null)).toBe(true);
+    expect(at("2026-09-29")).toBe(false);
+    expect(at("Sep 29 2026")).toBe(false);
+    expect(at("")).toBe(false);
   });
 });

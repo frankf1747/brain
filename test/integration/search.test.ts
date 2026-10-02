@@ -6,8 +6,9 @@ import { search } from "../../src/retrieve/search.js";
 import { FakeReranker, estimateEmbedTokens, type RerankHit } from "../../src/llm/voyage.js";
 import { renderSearch } from "../../src/mcp/render.js";
 import { reciprocalRankFusion } from "../../src/retrieve/fuse.js";
-import { isHybrid, factSource, type LoggedPassage } from "../../src/retrieve/contract.js";
-import { addFact } from "../../src/graph/facts.js";
+import { isHybrid, factSource, SearchResultSchema, type LoggedPassage } from "../../src/retrieve/contract.js";
+import { addFact, verifyFact } from "../../src/graph/facts.js";
+import { factLine } from "../../src/mcp/render.js";
 import { toVector } from "../../src/db.js";
 import { config } from "../../src/config.js";
 
@@ -209,7 +210,9 @@ describe("search", () => {
       const hybrid = res.passages.filter(isHybrid);
       expect(hybrid.length).toBeGreaterThan(0);
       for (const p of hybrid) {
-        expect(p).toMatchObject({ layers: ["keyword"], vectorRank: null, scoreKind: "rrf", rerankRank: null });
+        // The query names Zorblax Industries, so the graph also reaches its passage; no passage has a vector layer.
+        expect(p.layers.filter((l) => l !== "graph")).toEqual(["keyword"]);
+        expect(p).toMatchObject({ vectorRank: null, scoreKind: "rrf", rerankRank: null });
         expect(p.keywordRank).toBeGreaterThan(0);
       }
       expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: query embedding failed, keyword search only: voyage 503");
@@ -348,13 +351,15 @@ describe("search", () => {
     expect(hybrid.length).toBeGreaterThan(1);
     // Only the Zorblax passage shares a term with the query, so it is the one passage both branches found.
     const both = hybrid.find((p) => p.content.includes("ZX-9000"))!;
-    expect(both.layers).toEqual(["vector", "keyword"]);
+    // The query names Zorblax Industries, whose mention is this same passage: graph is added, the branch ranks stay.
+    expect(both.layers).toEqual(["vector", "keyword", "graph"]);
     expect(both.vectorRank).toBeGreaterThan(0);
     expect(both.keywordRank).toBe(1);
     const vectorOnly = hybrid.find((p) => !p.content.includes("ZX-9000"))!;
     expect(vectorOnly).toMatchObject({ layers: ["vector"], keywordRank: null });
     expect(hybrid.map((p) => p.rerankRank)).toEqual(hybrid.map((_p, i) => i + 1));
-    expect(hybrid.every((p) => p.scoreKind === "rerank" && p.fallbackTerm === null && p.viaEntity === null)).toBe(true);
+    expect(hybrid.every((p) => p.scoreKind === "rerank" && p.fallbackTerm === null)).toBe(true);
+    expect(vectorOnly.viaEntity).toBeNull();
     expect(res.topScore).toBe(Math.max(...hybrid.map((p) => p.score as number)));
     expect(res.candidates.keyword).toBe(1);
     expect(res.candidates.fused).toBeGreaterThanOrEqual(res.candidates.vector);
@@ -370,6 +375,43 @@ describe("search", () => {
     expect(timings.totalMs).toBeGreaterThan(0);
     // Each stage is rounded to 0.1 ms, so allow 0.05 ms per stage.
     expect(timings.embedMs + timings.sqlMs + timings.rerankMs + timings.graphMs).toBeLessThanOrEqual(timings.totalMs + 0.25);
+    // At most one decimal: sqlMs sums several stages and must not carry float error such as 21.099999999999998.
+    for (const v of Object.values(timings)) expect(String(v)).toMatch(/^\d+(\.\d)?$/);
+  });
+
+  it("a passage found by hybrid search and by the graph keeps its ranks and score and gains graph and the entity", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "Zorblax Industries drill", { includeFacts: false });
+    const entity = res.entities.find((e) => e.name === "Zorblax Industries")!;
+    const zorblax = res.passages.filter((p) => p.content.includes("ZX-9000"));
+    expect(zorblax).toHaveLength(1); // listed once, at its hybrid rank
+    expect(zorblax[0]).toMatchObject({ layers: ["vector", "keyword", "graph"], scoreKind: "rerank", keywordRank: 1, rerankRank: 1, viaEntity: { id: entity.id, name: entity.name } });
+    expect(zorblax[0].score).toBe(res.topScore);
+    expect(zorblax[0].vectorRank).toBeGreaterThan(0);
+    expect(isHybrid(zorblax[0])).toBe(true);
+    expect(renderSearch(res)).toContain(`vector#${zorblax[0].vectorRank} keyword#1 graph via Zorblax Industries · news`);
+    const [log] = await sql<{ results: LoggedPassage[] }[]>`select results from brain.retrieval_log where id = ${res.retrievalId}`;
+    expect(log.results.find((p) => p.chunkId === zorblax[0].chunkId)!.layers).toEqual(["vector", "keyword", "graph"]);
+  });
+
+  it("a graph passage mentioned by two named entities is listed once, through the first", async () => {
+    const ctx = await seed();
+    ctx.reranker = { rerank: async () => [] };
+    const res = await search(ctx, "Zorblax Industries Austin", { includeFacts: false });
+    expect(res.entities.map((e) => e.name).sort()).toEqual(["Austin", "Zorblax Industries"]);
+    const graph = res.passages.filter((p) => p.layers.includes("graph"));
+    expect(graph).toHaveLength(1);
+    expect(graph[0]).toMatchObject({ layers: ["graph"], score: null, viaEntity: { id: res.entities[0].id, name: res.entities[0].name } });
+  });
+
+  it("returns occurredAt as an ISO 8601 date-time that the contract schema accepts", async () => {
+    const ctx = await seed();
+    await sql`update brain.documents set occurred_at = '2026-01-25T13:05:07.012+02:00' where title = 'Zorblax news'`;
+    const res = await search(ctx, "Zorblax drill X-90");
+    const dated = res.passages.filter((p) => p.title === "Zorblax news");
+    expect(dated.length).toBeGreaterThan(0);
+    expect(dated.every((p) => p.occurredAt === "2026-01-25T11:05:07.012Z")).toBe(true);
+    expect(() => SearchResultSchema.parse(res)).not.toThrow();
   });
 
   it("reports a graph passage with layers graph, no score, no ranks, and the entity that brought it in", async () => {
@@ -410,6 +452,22 @@ describe("search", () => {
     const lives = (await search(ctx, "where do I live", { k: 3 })).facts.find((f) => f.predicate === "lives_in")!;
     expect(lives).toMatchObject({ verifiedBy: "agent:test", sourceChunkId: null, sourceDocumentId: null, sourceKind: null, confidence: 1 });
     expect(factSource(lives)).toEqual({ kind: "owner" });
+  });
+
+  it("an extracted fact whose passage is gone is unlinked, and once the owner verifies it, confirmed by owner", async () => {
+    const ctx = await seed();
+    const [visa] = await sql<{ id: string; source_chunk_id: string }[]>`select id, source_chunk_id from brain.facts where predicate = 'visa_status'`;
+    await sql`delete from brain.chunks where id = ${visa.source_chunk_id}`;
+    const before = (await search(ctx, "visa status")).facts.find((f) => f.id === visa.id)!;
+    expect(before).toMatchObject({ sourceChunkId: null, sourceDocumentId: null, sourceKind: null, verified: false });
+    expect(before.verifiedBy).toMatch(/^extractor:/);
+    expect(factSource(before)).toEqual({ kind: "unlinked" });
+    expect(factLine(before, 0)).toBe("[F1] visa_status: F-1 OPT (unverified · extracted; source passage no longer stored)");
+    expect(await verifyFact(sql, visa.id)).toBe(true);
+    const after = (await search(ctx, "visa status")).facts.find((f) => f.id === visa.id)!;
+    expect(after).toMatchObject({ verified: true, verifiedBy: "frank", sourceChunkId: null });
+    expect(factSource(after)).toEqual({ kind: "confirmed" });
+    expect(factLine(after, 0)).toBe("[F1] visa_status: F-1 OPT (verified · confirmed by owner)");
   });
 
   it("logs each passage without its text, the degraded flags, candidates, timings, k and mode, and returns the log id", async () => {

@@ -6,7 +6,7 @@ import { config } from "../config.js";
 import { readInput } from "../ingest/readers.js";
 import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
-import { isDegraded } from "../retrieve/contract.js";
+import { isDegraded, isHybrid } from "../retrieve/contract.js";
 import { parseGolden, type Expected, type GoldenItem } from "./golden.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
 import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
@@ -136,7 +136,9 @@ export function toQuestionResult(
     ranked,
     totalRelevant,
     topScore: res.topScore,
-    hasGraphPassage: res.passages.some((p) => p.layers.includes("graph")),
+    // A passage only the graph found: the entity has material ranking missed. A ranked passage that the graph also
+    // reached is judged by its score, as it was before passages could carry both (keeps abstention comparable).
+    hasGraphPassage: res.passages.some((p) => p.layers.includes("graph") && !isHybrid(p)),
     degraded: isDegraded(res.degraded),
     totalMs,
     paraphraseRanked,
