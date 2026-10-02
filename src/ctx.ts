@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import { connect, type Db } from "./db.js";
 import { AnthropicLlm, type Llm } from "./llm/llm.js";
 import { ClaudeCodeLlm } from "./llm/claude-code.js";
-import { VoyageClient, type Embedder, type Reranker } from "./llm/voyage.js";
+import { VoyageClient, QUERY_RETRY_BUDGET, type Embedder, type Reranker } from "./llm/voyage.js";
 import { statSync } from "node:fs";
 import { ObsidianAutoProjector, autoProjectionEnabled } from "./obsidian/auto.js";
 
@@ -11,7 +11,7 @@ export interface Ctx {
   llm: Llm;
   embedder: Embedder;
   reranker: Reranker;
-  /** Query-time clients with small retry budgets, so search degrades fast instead of waiting out a Voyage outage. */
+  /** Query-time clients: 3 attempts and at most 10 s of backoff per call (QUERY_RETRY_BUDGET), so search degrades fast. */
   queryEmbedder?: Embedder;
   queryReranker?: Reranker;
   /** Called after a document reaches chunked and again at done; the pipeline ignores anything it throws. */
@@ -39,7 +39,7 @@ export function makeCtx(opts: MakeCtxOptions = {}): Ctx {
   // (src/llm/ledger.ts). The eval context gets brain_eval's ledger the same way.
   const ledger = { sql, client: opts.client ?? "cli" };
   const voyage = new VoyageClient({ ledger });
-  const queryVoyage = new VoyageClient({ ledger, maxRateLimitAttempts: 1, maxAttempts: 2 });
+  const queryVoyage = new VoyageClient({ ledger, ...QUERY_RETRY_BUDGET });
   const ctx: Ctx = {
     sql,
     llm: makeLlm(),

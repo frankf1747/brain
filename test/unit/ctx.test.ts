@@ -24,6 +24,17 @@ describe("makeCtx", () => {
     }
   });
 
+  it("gives the query clients the query budget and keeps the ingest budget", async () => {
+    const ctx = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false });
+    try {
+      expect((ctx.queryEmbedder as VoyageClient).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
+      expect((ctx.queryReranker as VoyageClient).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
+      expect((ctx.embedder as VoyageClient).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalWaitMs: Infinity });
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
   it("labels CLI spend cli by default, and the eval's spend eval in brain_eval's ledger", async () => {
     const cli = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false });
     const ev = makeEvalCtx();

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { VoyageClient, FakeEmbedder, FakeReranker, hashVector, estimateEmbedTokens, estimateRerankTokens, usageTokens } from "../../src/llm/voyage.js";
+import { VoyageClient, FakeEmbedder, FakeReranker, hashVector, estimateEmbedTokens, estimateRerankTokens, usageTokens, QUERY_RETRY_BUDGET } from "../../src/llm/voyage.js";
 
 function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
   const calls: { url: string; body: any }[] = [];
@@ -239,5 +239,93 @@ describe("spend metering", () => {
     // An injected fetch (tests) may run unmetered.
     const fn = (async () => new Response("{}")) as unknown as typeof fetch;
     expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).ledger).toBeNull();
+  });
+});
+
+describe("query-time retry budget", () => {
+  const ok = { data: [{ index: 0, embedding: [1] }] };
+
+  function seq(responses: Array<{ status: number; headers?: Record<string, string> }>) {
+    let n = 0;
+    const fn = (async () => {
+      const r = responses[Math.min(n, responses.length - 1)];
+      n++;
+      return new Response(JSON.stringify(r.status === 200 ? ok : { detail: "x" }), { status: r.status, headers: r.headers });
+    }) as unknown as typeof fetch;
+    return { fn, count: () => n };
+  }
+
+  function client(fn: typeof fetch) {
+    const waits: number[] = [];
+    const c = new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn, sleep: async (ms) => void waits.push(ms) });
+    return { c, waits };
+  }
+
+  // The rate-limit message goes to stderr; keep test output clean.
+  const quiet = () => vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+  it("is 3 attempts with at most 10 s of backoff in total", () => {
+    expect(QUERY_RETRY_BUDGET).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, retryDelayMs: 500, rateLimitDelayMs: 2000, maxTotalWaitMs: 10_000 });
+  });
+
+  it("returns the result after two 429s, within the budget", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 429 }, { status: 429 }, { status: 200 }]);
+      const { c, waits } = client(fn);
+      expect(await c.embed(["a"], "query")).toEqual([[1]]);
+      expect(count()).toBe(3);
+      expect(waits).toEqual([2000, 4000]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("throws after three 429s", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 429 }]);
+      const { c, waits } = client(fn);
+      await expect(c.embed(["a"], "query")).rejects.toThrow(/429/);
+      expect(count()).toBe(3);
+      expect(waits).toEqual([2000, 4000]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("gives up at once when Retry-After asks for more than the budget", async () => {
+    const { fn, count } = seq([{ status: 429, headers: { "retry-after": "30" } }, { status: 200 }]);
+    const { c, waits } = client(fn);
+    await expect(c.embed(["a"], "query")).rejects.toThrow(/429/);
+    expect(count()).toBe(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("never sleeps more than 10 s in total across retries", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 429, headers: { "retry-after": "6" } }, { status: 429, headers: { "retry-after": "6" } }, { status: 200 }]);
+      const { c, waits } = client(fn);
+      await expect(c.embed(["a"], "query")).rejects.toThrow(/429/);
+      expect(count()).toBe(2);
+      expect(waits).toEqual([6000]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("allows 3 attempts for 5xx with short backoff", async () => {
+    const { fn, count } = seq([{ status: 503 }]);
+    const { c, waits } = client(fn);
+    await expect(c.rerank("q", ["a"], 1)).rejects.toThrow(/503/);
+    expect(count()).toBe(3);
+    expect(waits).toEqual([500, 1000]);
+  });
+
+  it("reports each client's budget; the ingest default has no total limit", () => {
+    const fn = (async () => new Response("{}")) as unknown as typeof fetch;
+    expect(new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalWaitMs: Infinity });
   });
 });

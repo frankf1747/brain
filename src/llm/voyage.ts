@@ -34,6 +34,8 @@ export interface VoyageOptions {
   maxRateLimitAttempts?: number;
   /** Total calls allowed across 5xx responses and network errors (default 4). */
   maxAttempts?: number;
+  /** Most total time one call may sleep between attempts; a wait that would pass it gives up instead (default unlimited). */
+  maxTotalWaitMs?: number;
   /**
    * The spend ledger and its daily cap (src/llm/ledger.ts). Every HTTP attempt is reserved before it is sent and
    * settled after. Required unless fetchFn is injected (tests): a client that could reach Voyage unmetered is
@@ -45,6 +47,18 @@ export interface VoyageOptions {
 const MAX_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_ATTEMPTS = 6;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
+
+/**
+ * Query-time clients (src/ctx.ts): 3 attempts and at most 10 s of backoff in total, so a search degrades quickly
+ * instead of waiting out a Voyage outage. With a paid tier that is enough; without one the search still fails fast.
+ */
+export const QUERY_RETRY_BUDGET = {
+  maxAttempts: 3,
+  maxRateLimitAttempts: 3,
+  retryDelayMs: 500,
+  rateLimitDelayMs: 2_000,
+  maxTotalWaitMs: 10_000,
+} as const;
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -87,6 +101,15 @@ export class VoyageClient implements Embedder, Reranker {
   /** The ledger this client records and caps its calls in, or null for an unmetered test client. */
   get ledger(): VoyageLedger | null {
     return this.opts.ledger ?? null;
+  }
+
+  /** The attempt and wait limits this client applies to one call. */
+  get retryBudget(): { maxAttempts: number; maxRateLimitAttempts: number; maxTotalWaitMs: number } {
+    return {
+      maxAttempts: this.opts.maxAttempts ?? MAX_ATTEMPTS,
+      maxRateLimitAttempts: this.opts.maxRateLimitAttempts ?? MAX_RATE_LIMIT_ATTEMPTS,
+      maxTotalWaitMs: this.opts.maxTotalWaitMs ?? Infinity,
+    };
   }
 
   private get apiKey(): string {
@@ -145,8 +168,15 @@ export class VoyageClient implements Embedder, Reranker {
     const sleep = this.opts.sleep ?? defaultSleep;
     const delay = this.opts.retryDelayMs ?? 500;
     const rateDelay = this.opts.rateLimitDelayMs ?? 20_000;
-    const maxAttempts = this.opts.maxAttempts ?? MAX_ATTEMPTS;
-    const maxRateLimitAttempts = this.opts.maxRateLimitAttempts ?? MAX_RATE_LIMIT_ATTEMPTS;
+    const { maxAttempts, maxRateLimitAttempts, maxTotalWaitMs } = this.retryBudget;
+    let waited = 0;
+    /** Sleeps unless that would pass the total wait budget; false means give up now. */
+    const pause = async (ms: number): Promise<boolean> => {
+      if (waited + ms > maxTotalWaitMs) return false;
+      waited += ms;
+      await sleep(ms);
+      return true;
+    };
     // Read before any reservation, so a missing key never leaves a reserved row behind.
     const authorization = `Bearer ${this.apiKey}`;
     let lastError: Error | undefined;
@@ -169,7 +199,7 @@ export class VoyageClient implements Embedder, Reranker {
         lastError = err instanceof Error ? err : new Error(String(err));
         await this.settle(reservation, { error: lastError.message });
         if (++failures >= maxAttempts) throw lastError;
-        await sleep(delay * 2 ** (failures - 1));
+        if (!(await pause(delay * 2 ** (failures - 1)))) throw lastError;
         continue;
       }
       if (res.ok) {
@@ -198,13 +228,14 @@ export class VoyageClient implements Embedder, Reranker {
           retryAfterMs(res.headers.get("retry-after")) ?? rateDelay * 2 ** (rateLimits - 1),
           MAX_RATE_LIMIT_WAIT_MS,
         );
+        if (waited + wait > maxTotalWaitMs) throw lastError;
         process.stderr.write(`brain: Voyage rate limited, waiting ${Math.ceil(wait / 1000)}s\n`);
-        await sleep(wait);
+        await pause(wait);
         continue;
       }
       if (res.status < 500) throw lastError;
       if (++failures >= maxAttempts) throw lastError;
-      await sleep(delay * 2 ** (failures - 1));
+      if (!(await pause(delay * 2 ** (failures - 1)))) throw lastError;
     }
   }
 }
