@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { readInput } from "../ingest/readers.js";
 import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
+import { isDegraded, isHybrid } from "../retrieve/contract.js";
 import { parseGolden, type Expected, type GoldenItem } from "./golden.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
 import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
@@ -74,6 +75,14 @@ export function evalVoyageLine(v: VoyageSpend): string {
   return v.refused ? `${base}  (brain_eval's daily cap refused calls; those searches ran degraded)` : base;
 }
 
+/** The eval output line for per-stage latency, or null for a report recorded before Phase 4. */
+export function stageLatencyLine(report: Report): string | null {
+  const s = report.stageLatencyMs;
+  if (!s) return null;
+  const part = (name: string, p: { p50: number; p95: number }) => `${name} p50=${p.p50}ms p95=${p.p95}ms`;
+  return `stages  ${part("embed", s.embed)}  ${part("sql", s.sql)}  ${part("rerank", s.rerank)}  ${part("graph", s.graph)}`;
+}
+
 /** 1-based rank of the first expected document among distinct ranked documents, or null. */
 export function firstExpectedRank(q: QuestionResult): number | null {
   const m = mrr(q.expected, q.ranked);
@@ -113,7 +122,6 @@ export function toQuestionResult(
   item: GoldenItem,
   res: SearchResult,
   originById: Map<string, string | null>,
-  totalMs: number,
   paraphraseRanked: RankedDoc[][],
   totalRelevant: number,
   paraphraseDegraded: boolean[],
@@ -135,9 +143,12 @@ export function toQuestionResult(
     ranked,
     totalRelevant,
     topScore: res.topScore,
-    hasGraphPassage: res.passages.some((p) => p.group === "graph"),
-    degraded: res.degraded,
-    totalMs,
+    // A passage only the graph found: the entity has material ranking missed. A ranked passage that the graph also
+    // reached is judged by its score, as it was before passages could carry both (keeps abstention comparable).
+    hasGraphPassage: res.passages.some((p) => p.layers.includes("graph") && !isHybrid(p)),
+    degraded: isDegraded(res.degraded),
+    totalMs: res.timings.totalMs,
+    timings: res.timings,
     paraphraseRanked,
     paraphraseDegraded,
   };
@@ -174,12 +185,6 @@ async function originsFor(ctx: Ctx, results: SearchResult[]): Promise<Map<string
   return new Map(rows.map((r) => [r.id, r.origin]));
 }
 
-async function timedSearch(ctx: Ctx, question: string, opts: SearchOptions): Promise<{ res: SearchResult; ms: number }> {
-  const t0 = Date.now();
-  const res = await search(ctx, question, opts);
-  return { res, ms: Date.now() - t0 };
-}
-
 export interface EvalRun {
   results: QuestionResult[];
   report: Report;
@@ -199,15 +204,15 @@ export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
   const results: QuestionResult[] = [];
   for (const g of golden) {
     const opts: SearchOptions = { sourceKinds: g.filters?.sourceKinds, client: "eval", includeFacts: false, k: 10 };
-    const main = await timedSearch(ctx, g.question, opts);
+    const main = await search(ctx, g.question, opts);
     const paras: SearchResult[] = [];
-    for (const p of g.paraphrases ?? []) paras.push((await timedSearch(ctx, p, opts)).res);
-    const origins = await originsFor(ctx, [main.res, ...paras]);
+    for (const p of g.paraphrases ?? []) paras.push(await search(ctx, p, opts));
+    const origins = await originsFor(ctx, [main, ...paras]);
     const paraphraseRanked: RankedDoc[][] = paras.map((r) => r.passages.map((p) => ({ documentId: p.documentId, origin: origins.get(p.documentId) ?? null, containsQuote: false })));
     const totalRelevant = await countRelevantPassages(ctx.sql, g.expected);
     const warning = missingQuoteWarning(g, totalRelevant);
     if (warning) console.error(warning);
-    results.push(toQuestionResult(g, main.res, origins, main.ms, paraphraseRanked, totalRelevant, paras.map((r) => r.degraded)));
+    results.push(toQuestionResult(g, main, origins, paraphraseRanked, totalRelevant, paras.map((r) => isDegraded(r.degraded))));
   }
   const ranks: Record<string, number | null> = {};
   for (const r of results) if (!r.negative) ranks[r.id] = firstExpectedRank(r);

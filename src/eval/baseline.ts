@@ -21,6 +21,8 @@ const RankMetricsSchema = z.object({
   ndcgAt10: z.number().nullable(),
 });
 
+const PercentilesSchema = z.object({ p50: z.number(), p95: z.number() });
+
 const ReportSchema = z.object({
   n: z.number(),
   overall: RankMetricsSchema,
@@ -28,7 +30,9 @@ const ReportSchema = z.object({
   negatives: z.object({ n: z.number(), abstentionRate: z.number(), falseAnswerRate: z.number() }),
   paraphrase: z.object({ n: z.number(), consistency: z.number(), meanRecallDelta: z.number() }),
   degradedFraction: z.number(),
-  latencyMs: z.object({ p50: z.number(), p95: z.number() }),
+  latencyMs: PercentilesSchema,
+  // Added in Phase 4; baselines recorded before it have none and still load.
+  stageLatencyMs: z.object({ embed: PercentilesSchema, sql: PercentilesSchema, rerank: PercentilesSchema, graph: PercentilesSchema }).optional(),
 });
 
 const BaselineSchema = z.object({

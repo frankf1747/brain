@@ -6,13 +6,15 @@ import { AUTHORS, keptAuthorNote } from "../ingest/author.js";
 import { suppressedDocuments } from "../ingest/set-author.js";
 import { runPipeline, stageCounts } from "../ingest/pipeline.js";
 import { search } from "../retrieve/search.js";
+import { SearchResultSchema } from "../retrieve/contract.js";
 import { orient } from "../retrieve/orient.js";
 import { getDocument } from "../retrieve/documents.js";
+import { explain, explainNotFound } from "../retrieve/explain.js";
 import { describeNode } from "../graph/inspect.js";
 import { addFact, supersedeFact, listFacts } from "../graph/facts.js";
 import { refreshMirror } from "../obsidian/auto.js";
 import { JobManager } from "./jobs.js";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus } from "./render.js";
+import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, renderExplain } from "./render.js";
 
 export interface ServerOptions {
   client: string;
@@ -20,7 +22,7 @@ export interface ServerOptions {
   readOnly?: boolean;
 }
 
-type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+type ToolResult = { content: { type: "text"; text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
 const text = (t: string): ToolResult => ({ content: [{ type: "text", text: t }] });
 const fail = (err: unknown): ToolResult => ({ content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true });
 const dateOrUndefined = (s?: string) => (s ? new Date(s) : undefined);
@@ -40,7 +42,8 @@ function instructions(readOnly: boolean): string {
     "1. Call brain_orient once per session to see what is stored and which source_kinds exist.",
     "2. Call brain_search with the user's question in plain words. Do not add names or terms the user did not mention. Narrow with source_kinds or dates when orient shows it helps.",
     "3. For a named person, organization, or project, call brain_get_node. For the full text of a result, call brain_get_document with its document id.",
-    "4. Answer from the returned passages and cite them as [P1], [F1]. If nothing relevant comes back, say so rather than answering from elsewhere, and name any other source you use.",
+    "4. Answer from the returned passages and cite them as [P1], [F1]. Make clear which parts of the answer come from the knowledge base and which are your own. If nothing relevant comes back, say so rather than answering from elsewhere, and name any other source you use.",
+    "Every brain_search result starts with `retrieval <id> · mode: <mode>`. Mode hybrid is a full search; keyword-only and fused-order mean part of it fell back, so treat its ranking as weaker. Each passage shows its score and score kind (rerank: 0 to 1, higher is stronger; rrf: reranking was skipped; -: found through a named entity or a literal match, unscored), the search branches that found it with their ranks, and who wrote it, so you can tell strong evidence from weak. brain_explain with the retrieval id replays how that search ranked its passages.",
   ];
   if (!readOnly) {
     lines.push(
@@ -89,7 +92,10 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     "brain_search",
     {
       title: "Search the knowledge base",
-      description: "Hybrid keyword and semantic search over everything the owner has saved. Expands entities named in the query (neighbours and up to 5 passages that mention each), and returns up to 10 of the owner's facts that share a term with the query or point at a named entity; use brain_get_facts or brain_orient for the full fact list. Returns numbered passages and facts with document and chunk ids.",
+      description:
+        "Hybrid keyword and semantic search over everything the owner has saved. Expands entities named in the query (neighbours and up to 5 passages that mention each), and returns up to 10 of the owner's facts that share a term with the query or point at a named entity; use brain_get_facts or brain_orient for the full fact list. " +
+        "The first line is `retrieval <id> · mode: hybrid | keyword-only | fused-order · <n> passages`. Each passage line reads `[P1] <score> <score kind> · <how found> · <source kind> · author: <owner|other|unknown> · \"<title>\" · <date> (doc <id>, chunk <id>)`: score kind rerank is 0 to 1 (higher is stronger), rrf means reranking was skipped, and - marks a passage found through a named entity (graph via <entity>) or a literal match (fallback \"<term>\"); how found lists vector#<rank> and keyword#<rank>, plus graph via <entity> when the graph also reached a ranked passage. Each fact says verified or unverified and where it came from: read from a document (from <kind> <doc id>), stated by owner, confirmed by owner (verified, no stored source passage), or extracted from a passage no longer stored. " +
+        "Pass the retrieval id to brain_explain to see how the passages were ranked. The same result is returned as structuredContent.",
       inputSchema: {
         query: z.string().min(1),
         k: z.number().int().min(1).max(30).optional().describe("Number of passages, default 10"),
@@ -98,18 +104,19 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         until: isoDate.optional().describe("ISO date upper bound, e.g. 2026-09-30"),
         verified_only: z.boolean().optional().describe("Only return facts and neighbour nodes marked verified. Passages are never filtered: documents have no verification state."),
       },
+      outputSchema: SearchResultSchema,
     },
     async (a) => {
       try {
         const r = await search(ctx, a.query, { k: a.k, sourceKinds: a.source_kinds, since: dateOrUndefined(a.since), until: dateOrUndefined(a.until), verifiedOnly: a.verified_only, client: opts.client });
-        return text(renderSearch(r));
+        return { content: [{ type: "text", text: renderSearch(r) }], structuredContent: r };
       } catch (e) { return fail(e); }
     },
   );
 
   register(
     "brain_get_document",
-    { title: "Read a document", description: "Metadata and a slice of the raw text of one document by id. Use offset to page.", inputSchema: { document_id: z.string().describe("UUID shown as 'document <id>' in brain_search results"), offset: z.number().int().min(0).optional(), length: z.number().int().min(1).max(20000).optional() } },
+    { title: "Read a document", description: "Metadata and a slice of the raw text of one document by id. Use offset to page.", inputSchema: { document_id: z.string().describe("UUID shown as 'doc <id>' in brain_search results"), offset: z.number().int().min(0).optional(), length: z.number().int().min(1).max(20000).optional() } },
     async (a) => {
       try {
         const d = await getDocument(ctx.sql, a.document_id, a.offset ?? 0, a.length ?? 4000);
@@ -145,6 +152,22 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         const failures = await ctx.sql<{ document_id: string; stage: string; error: string }[]>`
           select document_id, stage, error from brain.ingest_jobs where error is not null order by updated_at desc limit 10`;
         return text(renderStatus(await stageCounts(ctx), jobs.pending, failures, await suppressedDocuments(ctx.sql)));
+      } catch (e) { return fail(e); }
+    },
+  );
+
+  register(
+    "brain_explain",
+    {
+      title: "Explain a search",
+      description:
+        "Replays a logged brain_search from its retrieval id (the id on the result's first line) without searching again: the query, filters, client and time, the mode and which parts fell back, how many candidates each branch produced, stage timings, and for every returned passage its rank and label, score and score kind, layers, vector, keyword and rerank ranks, title and author. Reads the log only.",
+      inputSchema: { retrieval_id: z.string().min(1).describe("The id after 'retrieval' on the first line of a brain_search result") },
+    },
+    async (a) => {
+      try {
+        const e = await explain(ctx.sql, a.retrieval_id);
+        return e ? text(renderExplain(e)) : fail(new Error(explainNotFound(a.retrieval_id)));
       } catch (e) { return fail(e); }
     },
   );

@@ -21,6 +21,9 @@ describe("ask", () => {
     const call = ctx.llm.calls.find((c) => c.kind === "text")!;
     expect(call.user).toContain("[P1]");
     expect(call.user).toContain("[F1] visa_status: F-1 OPT");
+    expect(call.user).toContain("Search mode: hybrid");
+    expect(call.user).toMatch(/\[P1\] \d\.\d\d rerank · [^\n]*· author: owner · /);
+    expect(result.retrievalId).toMatch(/^[0-9a-f-]{36}$/);
     expect(result.passages.length).toBeGreaterThan(0);
   });
 });

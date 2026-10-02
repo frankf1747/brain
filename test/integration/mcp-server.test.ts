@@ -8,6 +8,8 @@ import { buildServer } from "../../src/mcp/server.js";
 import { JobManager } from "../../src/mcp/jobs.js";
 import { storeDocument } from "../../src/ingest/store.js";
 import type { ObsidianAutoProjector } from "../../src/obsidian/auto.js";
+import { SearchResultSchema } from "../../src/retrieve/contract.js";
+import { renderSearch } from "../../src/mcp/render.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -70,15 +72,38 @@ describe("brain MCP server", () => {
     await s.close();
   });
 
-  it("lists nine tools, or six when read-only", async () => {
+  it("lists ten tools, or seven when read-only (brain_explain is read-only)", async () => {
     const a = await connect();
     expect((await a.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
-      "brain_add_fact", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_ingest", "brain_orient", "brain_search", "brain_status", "brain_supersede_fact",
+      "brain_add_fact", "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_ingest", "brain_orient", "brain_search", "brain_status", "brain_supersede_fact",
     ]);
     await a.close();
     const b = await connect(true);
-    expect((await b.client.listTools()).tools.length).toBe(6);
+    expect((await b.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
+      "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_orient", "brain_search", "brain_status",
+    ]);
     await b.close();
+  });
+
+  it("brain_explain replays a brain_search from its retrieval id, also read-only, and says when the id is unknown", async () => {
+    const s = await connect();
+    await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note" });
+    await s.jobs.drain();
+    const found = await s.call("brain_search", { query: "Acme Corp visa", k: 5 });
+    const id = /^retrieval ([0-9a-f-]{36}) · mode: hybrid/.exec(found.text)![1];
+    await s.close();
+    const ro = await connect(true);
+    const ex = await ro.call("brain_explain", { retrieval_id: id });
+    expect(ex.isError).toBe(false);
+    expect(ex.text.split("\n")[0]).toMatch(new RegExp(`^retrieval ${id} · logged \\S+ · client test$`));
+    expect(ex.text).toContain('query: "Acme Corp visa"');
+    expect(ex.text).toContain("mode: hybrid · k 5");
+    expect(ex.text).toMatch(/#1 \[P1\] score \d\.\d\d \(rerank\) · layers /);
+    const missing = await ro.call("brain_explain", { retrieval_id: "00000000-0000-0000-0000-000000000000" });
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toContain('No logged search has retrieval id "00000000-0000-0000-0000-000000000000"');
+    expect((await sql`select id from brain.retrieval_log`).length).toBe(1);
+    await ro.close();
   });
 
   it("tells clients to route questions about the owner through orient then search", async () => {
@@ -86,6 +111,45 @@ describe("brain MCP server", () => {
     const instructions = s.client.getInstructions() ?? "";
     expect(instructions).toContain("source of truth");
     expect(instructions.indexOf("brain_orient")).toBeLessThan(instructions.indexOf("brain_search"));
+    await s.close();
+  });
+
+  it("tells clients how to read modes and scores, and to keep their own words apart from the knowledge base", async () => {
+    const s = await connect(true);
+    const instructions = s.client.getInstructions() ?? "";
+    expect(instructions).toContain("Every brain_search result starts with `retrieval <id> · mode: <mode>`");
+    expect(instructions).toContain("so you can tell strong evidence from weak");
+    expect(instructions).toContain("Make clear which parts of the answer come from the knowledge base and which are your own");
+    const searchTool = (await s.client.listTools()).tools.find((t) => t.name === "brain_search")!;
+    expect(searchTool.description).toContain("score kind rerank is 0 to 1");
+    expect(searchTool.description).toContain("structuredContent");
+    expect(searchTool.description).toContain("brain_explain");
+    expect(instructions).toContain("brain_explain with the retrieval id replays how that search ranked its passages");
+    expect(searchTool.outputSchema).toBeDefined();
+    await s.close();
+  });
+
+  it("brain_search starts with the retrieval id and mode, shows each passage's provenance, and returns the contract as structuredContent", async () => {
+    const s = await connect();
+    const ing = await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note" });
+    const id = /document ([0-9a-f-]{36})/.exec(ing.text)![1];
+    await s.jobs.drain();
+    await s.client.listTools(); // the client validates structuredContent against the advertised outputSchema
+    const res = await s.client.callTool({ name: "brain_search", arguments: { query: "Acme Corp visa", k: 5 } });
+    expect(res.isError).toBeFalsy();
+    const text = (res.content as { type: string; text: string }[]).map((c) => c.text).join("\n");
+    const sc = SearchResultSchema.parse(res.structuredContent);
+    expect(sc.passages.length).toBeGreaterThan(0);
+    expect(text.split("\n")[0]).toBe(`retrieval ${sc.retrievalId} · mode: hybrid · ${sc.passages.length} passage${sc.passages.length === 1 ? "" : "s"}`);
+    expect(text).toContain(`[P1] ${(sc.passages[0].score as number).toFixed(2)} rerank · `);
+    expect(text).toContain(`(doc ${id}, chunk ${sc.passages[0].chunkId})`);
+    expect(text).toContain("author: owner");
+    expect(text).toContain(`[F1] visa_status: F-1 OPT (unverified · from note ${id})`);
+    // The text is generated from the structure alone, and the structure carries every passage's text.
+    expect(renderSearch(sc)).toBe(text);
+    expect(sc.passages.every((p) => text.includes(p.content.trim()))).toBe(true);
+    const [log] = await sql<{ client: string; mode: string }[]>`select client, mode from brain.retrieval_log where id = ${sc.retrievalId}`;
+    expect(log).toEqual({ client: "test", mode: "hybrid" });
     await s.close();
   });
 
@@ -120,7 +184,7 @@ describe("brain MCP server", () => {
 
     const search = await s.call("brain_search", { query: "Acme Corp visa", k: 5 });
     expect(search.text).toContain("[P1]");
-    expect(search.text).toContain(`document ${id}`);
+    expect(search.text).toContain(`doc ${id}`);
     expect(search.text).toContain("Entity organization: Acme Corp");
     expect(search.text).toContain("visa_status: F-1 OPT"); // facts come back only when they share a term with the query
 

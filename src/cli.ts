@@ -7,6 +7,8 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
+import { renderSearch, renderExplain, renderSources } from "./mcp/render.js";
+import { explain, explainNotFound } from "./retrieve/explain.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -131,16 +133,23 @@ program
     await withCtx(async (ctx) => {
       const res = await search(ctx, query, { ...searchOptions(opts), client: "cli" });
       if (opts.json) return void console.log(JSON.stringify(res, null, 2));
-      const { searchMode } = await import("./mcp/render.js");
-      console.log(`mode: ${searchMode(res)}\n`);
-      if (res.usedFallback) console.log("(weak match: included raw substring hits)\n");
-      res.passages.forEach((p, i) => {
-        console.log(`[P${i + 1}] ${p.group} ${p.score.toFixed(3)} ${p.sourceKind}${p.documentTitle ? " · " + p.documentTitle : ""}`);
-        console.log(`     ${p.content.replace(/\s+/g, " ").slice(0, 240)}\n`);
-      });
-      if (res.documents.length) console.log("Documents: " + res.documents.map((d) => d.title ?? d.documentId).join(" | "));
-      for (const e of res.entities) console.log(`Entity ${e.type}: ${e.name} -> ${e.neighbors.map((n) => `${n.name} (${n.type})`).join(", ") || "no neighbors"}`);
-      if (res.facts.length) console.log("Facts: " + res.facts.map((f) => `${f.predicate}=${f.objectText}`).join("; "));
+      console.log(renderSearch(res, { brief: true }));
+      console.log(`\nbrain explain ${res.retrievalId} replays how these passages were ranked.`);
+    });
+  });
+
+program
+  .command("explain <retrievalId>")
+  .description("Replay a logged search from its retrieval id: mode, candidates, timings, and each passage's ranks and score")
+  .action(async (retrievalId: string) => {
+    await withCtx(async (ctx) => {
+      const e = await explain(ctx.sql, retrievalId);
+      if (!e) {
+        console.error(explainNotFound(retrievalId));
+        process.exitCode = 1;
+        return;
+      }
+      console.log(renderExplain(e));
     });
   });
 
@@ -155,8 +164,7 @@ program
     await withCtx(async (ctx) => {
       const { answer, result } = await ask(ctx, question, searchOptions(opts));
       console.log(answer + "\n");
-      result.passages.forEach((p, i) => console.log(`[P${i + 1}] ${p.sourceKind}${p.documentTitle ? " · " + p.documentTitle : ""} (${p.documentId})`));
-      result.facts.forEach((f, i) => console.log(`[F${i + 1}] ${f.predicate}: ${f.objectText}`));
+      console.log(renderSources(result));
     });
   });
 
@@ -269,7 +277,7 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx } = await import("./eval/db.js");
-    const { runEval, attributionGate, evalVoyageLine } = await import("./eval/run.js");
+    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine } = await import("./eval/run.js");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { execSync } = await import("node:child_process");
@@ -299,6 +307,8 @@ evalCmd
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
         console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
+        const stages = stageLatencyLine(run.report);
+        if (stages) console.log(stages);
         console.log(`attribution  self-facts-from-others=${run.attribution.selfFacts}  self-edges-from-others=${run.attribution.selfEdges}`);
         console.log(evalVoyageLine(run.voyage));
         if (comparison) {
