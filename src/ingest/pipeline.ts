@@ -1,5 +1,7 @@
 import type { Ctx } from "../ctx.js";
 import { storeDocument, type StoreInput } from "./store.js";
+import { withDocumentLock } from "./lock.js";
+import type { Author } from "./author.js";
 import { runChunk } from "./stages/chunk.js";
 import { runSummarize } from "./stages/summarize.js";
 import { runEmbed } from "./stages/embed.js";
@@ -9,7 +11,8 @@ import { runResolve } from "./stages/resolve.js";
 export const STAGES = ["stored", "chunked", "summarized", "embedded", "extracted", "resolved", "done"] as const;
 export type Stage = (typeof STAGES)[number];
 
-type Runner = (ctx: Ctx, documentId: string) => Promise<void>;
+/** A stage may return a report (runResolve does); the pipeline ignores it. */
+type Runner = (ctx: Ctx, documentId: string) => Promise<unknown>;
 const RUNNERS: Record<Exclude<Stage, "stored">, Runner> = {
   chunked: runChunk,
   summarized: runSummarize,
@@ -76,19 +79,8 @@ export async function runPipeline(ctx: Ctx, documentId: string, opts: { until?: 
 }
 
 async function runLocked(ctx: Ctx, documentId: string, until: Stage): Promise<PipelineResult> {
-  const reserved = await ctx.sql.reserve();
-  try {
-    const [{ locked }] = await reserved<{ locked: boolean }[]>`
-      select pg_try_advisory_lock(hashtextextended(${documentId}::text, 0)) as locked`;
-    if (!locked) return { documentId, stage: await currentStage(ctx, documentId), error: null, skipped: true };
-    try {
-      return await advance(ctx, documentId, until);
-    } finally {
-      await reserved`select pg_advisory_unlock(hashtextextended(${documentId}::text, 0))`;
-    }
-  } finally {
-    reserved.release();
-  }
+  const r = await withDocumentLock(ctx.sql, documentId, () => advance(ctx, documentId, until));
+  return r.locked ? r.value : { documentId, stage: await currentStage(ctx, documentId), error: null, skipped: true };
 }
 
 async function advance(ctx: Ctx, documentId: string, target: Stage): Promise<PipelineResult> {
@@ -127,10 +119,10 @@ export async function ingest(
   ctx: Ctx,
   input: StoreInput,
   opts: { until?: Stage } = {},
-): Promise<PipelineResult & { created: boolean; id: string }> {
-  const { id, created } = await storeDocument(ctx.sql, input);
+): Promise<PipelineResult & { created: boolean; id: string; author: Author }> {
+  const { id, created, author } = await storeDocument(ctx.sql, input);
   const result = await runPipeline(ctx, id, opts);
-  return { ...result, created, id: result.documentId };
+  return { ...result, created, id: result.documentId, author };
 }
 
 /** Re-runs every job that is not done, oldest first. */
@@ -172,37 +164,27 @@ export async function redoSkipped(ctx: Ctx, opts: { limit?: number } = {}): Prom
 
 /** Resets one document's stage and skip flags under its advisory lock. False when another runner holds the lock. */
 async function resetSkipped(ctx: Ctx, documentId: string): Promise<boolean> {
-  const reserved = await ctx.sql.reserve();
-  try {
-    const [{ locked }] = await reserved<{ locked: boolean }[]>`
-      select pg_try_advisory_lock(hashtextextended(${documentId}::text, 0)) as locked`;
-    if (!locked) return false;
-    try {
-      await ctx.sql.begin(async (tx) => {
-        const [doc] = await tx<{ summary: string | null; extraction: string | null }[]>`
-          select metadata->>'summary' as summary, metadata->>'extraction' as extraction
-          from brain.documents where id = ${documentId} for update`;
-        if (!doc) return;
-        const redoSummary = doc.summary === "skipped";
-        if (!redoSummary && doc.extraction !== "skipped") return;
-        // Redoing the summary redoes extraction too, so both flags go; otherwise only the extraction flag.
-        await tx`
-          update brain.documents
-          set metadata = metadata - ${redoSummary ? ["summary", "extraction"] : ["extraction"]}::text[]
-          where id = ${documentId}`;
-        const to: Stage = redoSummary ? "chunked" : "embedded";
-        const later = redoSummary ? AFTER_CHUNKED : AFTER_EMBEDDED;
-        await tx`
-          update brain.ingest_jobs set stage = ${to}, error = null, updated_at = now()
-          where document_id = ${documentId} and stage = any(${later}::text[])`;
-      });
-    } finally {
-      await reserved`select pg_advisory_unlock(hashtextextended(${documentId}::text, 0))`;
-    }
-    return true;
-  } finally {
-    reserved.release();
-  }
+  const r = await withDocumentLock(ctx.sql, documentId, () =>
+    ctx.sql.begin(async (tx) => {
+      const [doc] = await tx<{ summary: string | null; extraction: string | null }[]>`
+        select metadata->>'summary' as summary, metadata->>'extraction' as extraction
+        from brain.documents where id = ${documentId} for update`;
+      if (!doc) return;
+      const redoSummary = doc.summary === "skipped";
+      if (!redoSummary && doc.extraction !== "skipped") return;
+      // Redoing the summary redoes extraction too, so both flags go; otherwise only the extraction flag.
+      await tx`
+        update brain.documents
+        set metadata = metadata - ${redoSummary ? ["summary", "extraction"] : ["extraction"]}::text[]
+        where id = ${documentId}`;
+      const to: Stage = redoSummary ? "chunked" : "embedded";
+      const later = redoSummary ? AFTER_CHUNKED : AFTER_EMBEDDED;
+      await tx`
+        update brain.ingest_jobs set stage = ${to}, error = null, updated_at = now()
+        where document_id = ${documentId} and stage = any(${later}::text[])`;
+    }),
+  );
+  return r.locked;
 }
 
 export async function stageCounts(ctx: Ctx): Promise<{ stage: string; count: number; failed: number }[]> {

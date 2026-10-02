@@ -28,6 +28,12 @@ Rules that apply to every phase:
 | 8b | Place aliases: a place node named "City, Region" also gets the text before the comma as an alias ("Toronto, Canada" → "toronto"), so a query naming only the city resolves it; backfill existing place nodes | `src/ingest/stages/resolve.ts`, migration | integration: "tell me about my time in toronto" detects the Toronto, Canada node (found in the Phase 1 Task 3 review) |
 | 9 | Real-base cleanup: migration backfill, `brain set-author <databricks doc> other`, verify facts F11/F18/F4 and the self→cost-governance edge are gone; `brain_orient` shows the remaining facts | manual, documented in README | `brain facts` output pasted in the PR description |
 
+Follow-ups found in the Phase 2 reviews (not blocking):
+- Edges have no supersession: an owner can end up `located_in` two cities. Apply the single-valued rule to `lives_in`-like edge types, or derive the edge from the current fact.
+- `ingestCorpus` front matter: an unclosed `---` fence is stored as body text with the kind's default author; throw instead.
+- Attribution golden items test retrieval of the fixture; add items that misattribution would break (e.g. "How many years have I built data platforms?" must not be answered from a third-party post).
+- §8.6 superseding fixture: no older fixture states `lives_in`, so supersession is proven only by `supersession.test.ts`.
+
 Done when: attribution fixtures produce 0 self facts and 0 self edges; the real base no longer attributes the Databricks post to the owner; `npm run eval:gate` passes.
 
 ---

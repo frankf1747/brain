@@ -12,3 +12,8 @@
 {"id":"q12","question":"Chouldechova","kind":"keyword","expected":[{"origin":"note--fairness-in-ml.md"}],"source":"fixture","approved_at":"2026-09-30"}
 {"id":"q13","question":"X-90","kind":"fallback","expected":[{"origin":"news--acme-series-b.md"},{"origin":"job_description--acme-senior-data-analyst.md"},{"origin":"conversation--interview-prep-with-priya.md"}],"source":"fixture","approved_at":"2026-09-30"}
 {"id":"q14","question":"$115k","kind":"fallback","expected":[{"origin":"email--recruiter-followup-beta-ventures.md"}],"source":"fixture","approved_at":"2026-09-30"}
+{"id":"a01","question":"Why did the Databricks bill in the saved post go up so much?","kind":"attribution","expected":[{"origin":"note--databricks-cost-governance.md","quote":"Each squad created its own interactive cluster"}],"source":"fixture","approved_at":"2026-10-01"}
+{"id":"a02","question":"Who introduced Frank for the analytics lead role at Northwind Robotics?","kind":"attribution","expected":[{"origin":"email--recruiter-intro.md","quote":"He is one of three finalists for the position"}],"source":"fixture","approved_at":"2026-10-01"}
+{"id":"a03","question":"What does the post recommend for Databricks cost governance?","kind":"attribution","expected":[{"origin":"note--databricks-cost-governance.md","quote":"make idle clusters terminate after 20 minutes"}],"source":"fixture","approved_at":"2026-10-01"}
+{"id":"q15","question":"Where do I live now?","kind":"semantic","expected":[{"origin":"note--moved-to-denver.md","quote":"I now live in Denver for good"}],"source":"fixture","approved_at":"2026-10-01"}
+{"id":"n01","question":"How much did I pay for the sushi dinner in Kyoto?","kind":"negative","expected":[],"negative":true,"source":"fixture","approved_at":"2026-10-01"}

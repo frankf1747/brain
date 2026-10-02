@@ -40,6 +40,7 @@ export interface GDocument {
   id: string;
   title: string | null;
   sourceKind: string;
+  author: string;
   origin: string | null;
   occurredAt: Date | null;
   ingestedAt: Date;
@@ -81,7 +82,7 @@ export async function loadGraph(sql: Db): Promise<Graph> {
         order by f.subject_id, f.predicate, lower(f.object_text), f.verified desc, f.created_at
       ) d order by predicate, "createdAt"`,
     sql<GDocument[]>`
-      select id, title, source_kind as "sourceKind", origin, occurred_at as "occurredAt", ingested_at as "ingestedAt", summary, raw_content as raw
+      select id, title, source_kind as "sourceKind", author, origin, occurred_at as "occurredAt", ingested_at as "ingestedAt", summary, raw_content as raw
       from brain.documents order by ingested_at`,
   ]);
   return { nodes, self: nodes.find((n) => n.isSelf) ?? null, edges, mentions, facts: facts.map(({ createdAt: _c, ...f }) => f), documents };

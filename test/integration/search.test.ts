@@ -35,13 +35,25 @@ function weakRerank<T extends { reranker: unknown }>(ctx: T): T {
 
 async function seed() {
   const ctx = fakeCtx(sql, handler);
-  await ingest(ctx, { text: "Zorblax Industries in Austin released the ZX-9000 drill. I am on F-1 OPT.", sourceKind: "news", title: "Zorblax news" });
+  // Owner-written so its first-person visa fact is kept: resolve drops facts about the owner from documents
+  // the owner did not write, and news defaults to author other.
+  await ingest(ctx, { text: "Zorblax Industries in Austin released the ZX-9000 drill. I am on F-1 OPT.", sourceKind: "news", title: "Zorblax news", author: "owner" });
   await ingest(ctx, { text: "Gardening notes: tomatoes need full sun and deep watering.", sourceKind: "note", title: "Garden" });
   await ingest(ctx, { text: "Interview prep: practice SQL window functions and case studies.", sourceKind: "conversation", title: "Prep" });
   return ctx;
 }
 
 describe("search", () => {
+  it("reports each passage's document author", async () => {
+    const ctx = fakeCtx(sql, handler);
+    await ingest(ctx, { text: "Lonestar Capital closed a new fund for robotics startups.", sourceKind: "news", title: "Fund news" });
+    await ingest(ctx, { text: "My tomatoes finally ripened this week.", sourceKind: "note", title: "Tomatoes" });
+    const news = (await search(ctx, "Lonestar Capital robotics fund", { includeFacts: false })).passages.find((p) => p.documentTitle === "Fund news")!;
+    expect(news.author).toBe("other");
+    const note = (await search(ctx, "tomatoes ripened", { includeFacts: false })).passages.find((p) => p.documentTitle === "Tomatoes")!;
+    expect(note.author).toBe("owner");
+  });
+
   it("finds a keyword hit, resolves the entity with its neighbors, and loads facts", async () => {
     const ctx = await seed();
     const res = await search(ctx, "What did Zorblax Industries release?");

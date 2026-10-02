@@ -1,5 +1,6 @@
 import type { Ctx } from "../../ctx.js";
 import { chunkDocument } from "../chunk.js";
+import { undoResolution } from "./resolve.js";
 
 /** Stage 2. Replaces all chunks of the document. */
 export async function runChunk(ctx: Ctx, documentId: string): Promise<void> {
@@ -7,6 +8,10 @@ export async function runChunk(ctx: Ctx, documentId: string): Promise<void> {
   const [doc] = await sql<{ raw_content: string }[]>`select raw_content from brain.documents where id = ${documentId}`;
   if (!doc) throw new Error(`Document ${documentId} not found`);
   const drafts = chunkDocument(doc.raw_content);
+
+  // Facts and edges cite chunks with ON DELETE SET NULL, so replacing the chunks would orphan what this
+  // document's resolution produced. Remove it first; resolving again re-creates it. A no-op on first chunking.
+  await undoResolution(sql, documentId, { by: "rechunk" });
 
   await sql.begin(async (tx) => {
     await tx`delete from brain.chunks where document_id = ${documentId}`;

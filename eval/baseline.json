@@ -1,7 +1,11 @@
 {
-  "recordedAt": "2026-10-01T17:56:56.551Z",
-  "commit": "8cb4540",
+  "recordedAt": "2026-10-01T22:20:52.159Z",
+  "commit": "b861965",
   "goldenIds": [
+    "a01",
+    "a02",
+    "a03",
+    "n01",
     "q01",
     "q02",
     "q03",
@@ -15,13 +19,14 @@
     "q11",
     "q12",
     "q13",
-    "q14"
+    "q14",
+    "q15"
   ],
   "report": {
-    "n": 14,
+    "n": 19,
     "overall": {
-      "n": 14,
-      "recallAt1": 0.7857142857142858,
+      "n": 18,
+      "recallAt1": 0.8333333333333335,
       "recallAt5": 1,
       "recallAt10": 1,
       "mrr": 1,
@@ -37,8 +42,8 @@
         "ndcgAt10": null
       },
       "semantic": {
-        "n": 4,
-        "recallAt1": 0.8333333333333333,
+        "n": 5,
+        "recallAt1": 0.8666666666666666,
         "recallAt5": 1,
         "recallAt10": 1,
         "mrr": 1,
@@ -67,11 +72,19 @@
         "recallAt10": 1,
         "mrr": 1,
         "ndcgAt10": null
+      },
+      "attribution": {
+        "n": 3,
+        "recallAt1": 1,
+        "recallAt5": 1,
+        "recallAt10": 1,
+        "mrr": 1,
+        "ndcgAt10": 1
       }
     },
     "negatives": {
-      "n": 0,
-      "abstentionRate": 0,
+      "n": 1,
+      "abstentionRate": 1,
       "falseAnswerRate": 0
     },
     "paraphrase": {
@@ -81,8 +94,8 @@
     },
     "degradedFraction": 0,
     "latencyMs": {
-      "p50": 263,
-      "p95": 858
+      "p50": 285,
+      "p95": 772
     }
   },
   "ranks": {
@@ -99,6 +112,10 @@
     "q11": 1,
     "q12": 1,
     "q13": 1,
-    "q14": 1
+    "q14": 1,
+    "a01": 1,
+    "a02": 1,
+    "a03": 1,
+    "q15": 1
   }
 }

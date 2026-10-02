@@ -81,6 +81,8 @@ export interface DocView {
   noteName: string;
   title: string | null;
   kind: string;
+  /** owner, other or unknown. */
+  author: string;
   origin: string | null;
   occurredAt: Date | null;
   ingestedAt: Date;
@@ -89,15 +91,18 @@ export interface DocView {
   raw: string;
 }
 
+const AUTHOR_LABELS: Record<string, string> = { owner: "the owner", other: "someone else, not the owner", unknown: "unknown" };
+
 export function renderDocument(d: DocView, maxChars = 200_000): string {
   const body = d.raw.length > maxChars
     ? d.raw.slice(0, maxChars) + `\n\n> (truncated at ${maxChars} characters; the full ${d.raw.length}-character text is in the knowledge base as document ${d.id})\n`
     : d.raw;
   return [
-    frontmatter({ brain_id: d.id, brain_kind: d.kind, brain_managed: true, origin: d.origin ?? undefined, occurred_at: d.occurredAt ?? undefined, ingested_at: d.ingestedAt, tags: [`brain/document/${d.kind}`] }),
+    frontmatter({ brain_id: d.id, brain_kind: d.kind, brain_author: d.author, brain_managed: true, origin: d.origin ?? undefined, occurred_at: d.occurredAt ?? undefined, ingested_at: d.ingestedAt, tags: [`brain/document/${d.kind}`] }),
     `# ${d.title ?? "(untitled)"}`,
     "",
     NOTICE,
+    `**Author.** ${AUTHOR_LABELS[d.author] ?? d.author}\n`,
     d.summary ? `**Summary.** ${d.summary}\n` : "",
     d.entityNoteNames.length ? `**Entities.** ${d.entityNoteNames.map(link).join(" · ")}\n` : "",
     "---",

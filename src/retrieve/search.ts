@@ -23,6 +23,8 @@ export interface Passage {
   documentId: string;
   documentTitle: string | null;
   sourceKind: string;
+  /** Who wrote the passage's document: owner, other or unknown. */
+  author: string;
   content: string;
   parentContent: string | null;
   headingPath: string[];
@@ -83,13 +85,14 @@ interface ChunkRow {
   parent_content: string | null;
   document_title: string | null;
   source_kind: string;
+  author: string;
 }
 
 async function loadChunks(sql: Db, ids: string[]): Promise<Map<string, ChunkRow>> {
   if (ids.length === 0) return new Map();
   const rows = await sql<ChunkRow[]>`
     select c.id, c.document_id, c.content, c.heading_path, c.context_prefix, c.char_start, c.char_end,
-           p.content as parent_content, d.title as document_title, d.source_kind
+           p.content as parent_content, d.title as document_title, d.source_kind, d.author
     from brain.chunks c
     left join brain.chunks p on p.id = c.parent_id
     join brain.documents d on d.id = c.document_id
@@ -103,6 +106,7 @@ function toPassage(row: ChunkRow, score: number, group: PassageGroup): Passage {
     documentId: row.document_id,
     documentTitle: row.document_title,
     sourceKind: row.source_kind,
+    author: row.author,
     content: row.content,
     parentContent: row.parent_content,
     headingPath: row.heading_path,
@@ -262,8 +266,8 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   const terms = triggerTerms(query);
   const weak = degraded || topScore === null || topScore < config.retrieval.fallbackThreshold;
   if (terms.length && weak) {
-    const hits = await sql<{ id: string; title: string | null; source_kind: string; raw_content: string; matched: string[]; n: number }[]>`
-      select d.id, d.title, d.source_kind, d.raw_content,
+    const hits = await sql<{ id: string; title: string | null; source_kind: string; author: string; raw_content: string; matched: string[]; n: number }[]>`
+      select d.id, d.title, d.source_kind, d.author, d.raw_content,
              array(select t from unnest(${terms}::text[]) with ordinality u(t, o)
                    where d.raw_content ilike '%' || brain.like_literal(t) || '%' order by o) as matched,
              (select count(*)::int from unnest(${terms}::text[]) t where d.raw_content ilike '%' || brain.like_literal(t) || '%') as n
@@ -284,6 +288,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
         documentId: h.id,
         documentTitle: h.title,
         sourceKind: h.source_kind,
+        author: h.author,
         content: h.raw_content.slice(start, end),
         parentContent: null,
         headingPath: [],

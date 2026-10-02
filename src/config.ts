@@ -23,4 +23,20 @@ export const config = {
   resolution: { matchThreshold: 0.92, flagThreshold: 0.85, lexicalThreshold: 0.6 },
   retrieval: { candidateK: 60, defaultK: 10, fallbackThreshold: 0.3 },
   graph: { maxEntities: 5, maxNeighbors: 20, maxPassagesPerEntity: 5, maxFacts: 10 },
+  /**
+   * Author of a document saved without one, by source kind; any other kind is "unknown".
+   * KEEP IN SYNC with brain.default_author in supabase/migrations/20261001000009_author.sql.
+   */
+  authorDefaults: {
+    resume: "owner",
+    note: "owner",
+    conversation: "owner",
+    paste: "owner",
+    news: "other",
+    paper: "other",
+    job_description: "other",
+    email: "other",
+  },
+  /** Predicates that hold one current value: a newer statement in an owner document supersedes the older (spec §4.4). */
+  singleValuedPredicates: ["lives_in", "visa_status", "targeting_role", "pursuing_degree", "employment_status", "current_employer", "phone", "email"],
 } as const;

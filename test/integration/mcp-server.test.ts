@@ -33,6 +33,33 @@ async function connect(readOnly = false, llmHandler: (args: { system: string; us
 }
 
 describe("brain MCP server", () => {
+  it("tells clients to pass author other for text the owner did not write", async () => {
+    const s = await connect();
+    const instructions = s.client.getInstructions() ?? "";
+    expect(instructions).toContain('author: "other"');
+    const tools = (await s.client.listTools()).tools;
+    const ingestTool = tools.find((t) => t.name === "brain_ingest")!;
+    expect(ingestTool.description).toContain('author: "other"');
+    await s.close();
+    const ro = await connect(true);
+    expect(ro.client.getInstructions() ?? "").not.toContain("brain_ingest");
+    await ro.close();
+  });
+
+  it("records who wrote a saved document and shows it when reading it", async () => {
+    const s = await connect();
+    const other = await s.call("brain_ingest", { text: "I think Databricks costs too much.", source_kind: "note", author: "other" });
+    const mine = await s.call("brain_ingest", { text: "I moved to Denver last week.", source_kind: "note" });
+    await s.jobs.drain();
+    const otherId = /document ([0-9a-f-]{36})/.exec(other.text)![1];
+    const mineId = /document ([0-9a-f-]{36})/.exec(mine.text)![1];
+    expect((await s.call("brain_get_document", { document_id: otherId })).text).toContain("author: other");
+    expect((await s.call("brain_get_document", { document_id: mineId })).text).toContain("author: owner");
+    const bad = await s.call("brain_ingest", { text: "x", author: "someone" });
+    expect(bad.isError).toBe(true);
+    await s.close();
+  });
+
   it("lists nine tools, or six when read-only", async () => {
     const a = await connect();
     expect((await a.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
@@ -95,6 +122,37 @@ describe("brain MCP server", () => {
     expect(orient.text).toContain("1 documents");
     const status = await s.call("brain_status");
     expect(status.text).toContain("done: 1");
+    await s.close();
+  });
+
+  it("shows suppressed items about the owner in brain_status", async () => {
+    const s = await connect();
+    const ing = await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note", author: "other" });
+    const id = /document ([0-9a-f-]{36})/.exec(ing.text)![1];
+    await s.jobs.drain();
+    const status = await s.call("brain_status");
+    expect(status.text).toContain(`- ${id} Acme note [author other]: 2`);
+    await s.close();
+  });
+
+  it("says when brain_ingest keeps the stored author of text that is already present", async () => {
+    const s = await connect();
+    const text = "I think Databricks costs too much.";
+    const first = await s.call("brain_ingest", { text, source_kind: "note", author: "other" });
+    const id = /document ([0-9a-f-]{36})/.exec(first.text)![1];
+    expect(first.text).not.toContain("author stays");
+    await s.jobs.drain();
+    const again = await s.call("brain_ingest", { text, source_kind: "note", author: "owner" });
+    expect(again.isError).toBe(false);
+    expect(again.text).toContain("Already present");
+    expect(again.text).toContain(`author stays other; use \`brain set-author ${id} owner\` to change it`);
+    const same = await s.call("brain_ingest", { text, source_kind: "note", author: "other" });
+    expect(same.text).not.toContain("author stays");
+    const omitted = await s.call("brain_ingest", { text, source_kind: "note" });
+    expect(omitted.text).not.toContain("author stays");
+    const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${id}`;
+    expect(doc.author).toBe("other");
+    await s.jobs.drain();
     await s.close();
   });
 

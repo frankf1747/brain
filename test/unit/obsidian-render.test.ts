@@ -69,12 +69,14 @@ describe("renderNode evidence", () => {
 
 describe("renderDocument", () => {
   const doc: DocView = {
-    id: "3f2a0000-0000-0000-0000-000000000000", noteName: "Acme raises Series B", title: "Acme raises Series B", kind: "news", origin: "https://x.test/a",
+    id: "3f2a0000-0000-0000-0000-000000000000", noteName: "Acme raises Series B", title: "Acme raises Series B", kind: "news", author: "other", origin: "https://x.test/a",
     occurredAt: new Date("2026-03-12T00:00:00Z"), ingestedAt: new Date("2026-09-27T00:00:00Z"), summary: "Acme raised $40M.", entityNoteNames: ["Acme Corp", "Beta Ventures"], raw: "Full text here.",
   };
   it("renders metadata, summary, entity links and the raw text", () => {
     const t = renderDocument(doc);
     expect(t).toContain('brain_kind: "news"');
+    expect(t).toContain('brain_author: "other"');
+    expect(t).toContain("**Author.** someone else, not the owner");
     expect(t).toContain("occurred_at: 2026-03-12");
     expect(t).toContain("**Entities.** [[Acme Corp]] · [[Beta Ventures]]");
     expect(t.trim().endsWith("Full text here.")).toBe(true);

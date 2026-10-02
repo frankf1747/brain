@@ -67,6 +67,17 @@ describe("backfill", () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
 
+  it("builds batch extraction requests with the same author header and rule as the online path", async () => {
+    const ctx = fakeCtx(sql);
+    await storeDocument(sql, { text: "I cut our Databricks bill in half. Cost governance matters.", sourceKind: "note", author: "other", origin: "https://example.test/post" });
+    const { client, submitted } = fakeClient(good);
+    await backfill(ctx, { client, pollMs: 1 });
+    const extraction = submitted.find((r) => r.params.system !== SUMMARY_SYSTEM)!;
+    expect(extraction.params.messages[0].content).toContain("Author: other");
+    expect(extraction.params.messages[0].content).toContain("Origin: https://example.test/post");
+    expect(extraction.params.system).toContain("who is not the owner");
+  });
+
   it("submits valid custom ids and takes documents to done", async () => {
     const ctx = fakeCtx(sql);
     const a = await storeDocument(sql, { text: "I applied to Acme Corp. I am on F-1 OPT.", sourceKind: "note" });

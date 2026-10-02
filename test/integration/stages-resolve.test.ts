@@ -3,7 +3,8 @@ import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { storeDocument } from "../../src/ingest/store.js";
 import { runChunk } from "../../src/ingest/stages/chunk.js";
 import { runExtract } from "../../src/ingest/stages/extract.js";
-import { runResolve } from "../../src/ingest/stages/resolve.js";
+import { runResolve, placeShortAlias } from "../../src/ingest/stages/resolve.js";
+import { detectEntities } from "../../src/retrieve/entities.js";
 import { fakeExtraction } from "./fixtures.js";
 import { fakeVector } from "./helpers.js";
 import type { Embedder } from "../../src/llm/voyage.js";
@@ -94,6 +95,73 @@ describe("runResolve", () => {
     expect(Number(n)).toBe(1);
     const [{ f }] = await sql<{ f: string }[]>`select count(*)::text as f from brain.facts`;
     expect(Number(f)).toBe(1);
+  });
+});
+
+async function ingestAs(author: "owner" | "other" | "unknown", payload: unknown, body = text) {
+  const ctx = fakeCtx(sql, () => payload);
+  const { id } = await storeDocument(sql, { text: body, sourceKind: "note", author });
+  await runChunk(ctx, id);
+  await runExtract(ctx, id);
+  const report = await runResolve(ctx, id);
+  return { ctx, id, report };
+}
+
+const selfEdges = () => sql<{ type: string }[]>`
+  select e.type from brain.edges e join brain.nodes n on n.id = e.from_node where n.is_self`;
+const suppressedOf = async (id: string) =>
+  (await sql<{ n: number | null }[]>`select (metadata->>'suppressed_self_items')::int as n from brain.documents where id = ${id}`)[0].n;
+
+describe("runResolve author gate", () => {
+  it("writes no facts about the owner and no edges from the owner for a document someone else wrote", async () => {
+    const { id, report } = await ingestAs("other", fakeExtraction);
+    expect(report.suppressedSelfItems).toBe(2);
+    expect(await sql`select id from brain.facts`).toHaveLength(0);
+    expect(await selfEdges()).toHaveLength(0);
+    expect(await suppressedOf(id)).toBe(2);
+    // The model's output is kept as it was, so a later set-author owner can re-apply it.
+    const [ex] = await sql<{ facts: unknown[]; relations: unknown[] }[]>`
+      select payload->'facts_about_self' as facts, payload->'relations' as relations from brain.extractions where document_id = ${id}`;
+    expect(ex.facts).toHaveLength(1);
+    expect(ex.relations).toHaveLength(1);
+    // Entities and mentions are still written: Acme Corp is in the graph.
+    expect(await sql`select id from brain.nodes where canonical_name = 'acme corp'`).toHaveLength(1);
+  });
+
+  it("treats an unknown author the same way", async () => {
+    const { report } = await ingestAs("unknown", fakeExtraction);
+    expect(report.suppressedSelfItems).toBe(2);
+    expect(await sql`select id from brain.facts`).toHaveLength(0);
+  });
+
+  it("writes both for a document the owner wrote", async () => {
+    const { id, report } = await ingestAs("owner", fakeExtraction);
+    expect(report.suppressedSelfItems).toBe(0);
+    expect(await sql`select id from brain.facts`).toHaveLength(1);
+    expect((await selfEdges()).map((e) => e.type)).toEqual(["applied_to"]);
+    expect(await suppressedOf(id)).toBeNull();
+  });
+
+  it("still writes relations between other entities in someone else's document", async () => {
+    const payload = {
+      ...fakeExtraction,
+      entities: [...fakeExtraction.entities, { key: "e3", type: "place", name: "Austin", aliases: [], untyped_hint: null, quote: "Austin" }],
+      relations: [...fakeExtraction.relations, { from_key: "e2", to_key: "e3", type: "located_in", confidence: 0.9, valid_from: null, valid_to: null, quote: "Acme Corp in Austin" }],
+    };
+    const { report } = await ingestAs("other", payload, "I applied to Acme Corp in Austin. I am on F-1 OPT.");
+    expect(report.suppressedSelfItems).toBe(2);
+    expect((await sql<{ type: string }[]>`select type from brain.edges`).map((e) => e.type)).toEqual(["located_in"]);
+  });
+
+  it("suppresses a relation that points from the owner only after its direction is corrected", async () => {
+    const payload = {
+      entities: fakeExtraction.entities,
+      relations: [{ from_key: "e2", to_key: "e1", type: "applied_to", confidence: 0.9, valid_from: null, valid_to: null, quote: "applied to Acme Corp" }],
+      facts_about_self: [],
+    };
+    const { report } = await ingestAs("other", payload);
+    expect(report.suppressedSelfItems).toBe(1);
+    expect(await sql`select id from brain.edges`).toHaveLength(0);
   });
 });
 
@@ -269,5 +337,53 @@ describe("runResolve relation quotes", () => {
     const edges = await edgeEndpoints();
     expect(edges.find((e) => e.type === "works_at")!.properties).toEqual({ direction_unverified: true, quote: "Jane Smith works at Robert Chen." });
     expect(edges.find((e) => e.type === "related_to")!.properties).toEqual({ original_type: "funded_by", quote: "Ann Lee funded Jane Smith." });
+  });
+});
+
+describe("runResolve place aliases", () => {
+  it("gives a place named 'City, Region' the city as an alias, so a query naming only the city finds it", async () => {
+    await ingestWith({ entities: [entity("t", "place", "Toronto, Canada")], relations: [], facts_about_self: [] }, "I lived in Toronto, Canada for two years.");
+    const [node] = await sql<{ aliases: string[] }[]>`select aliases from brain.nodes where canonical_name = 'toronto canada'`;
+    expect(node.aliases).toEqual(["toronto"]);
+    const found = await detectEntities(sql, "tell me about my time in toronto");
+    expect(found.map((e) => e.name)).toContain("Toronto, Canada");
+  });
+
+  it("adds the alias once to an existing place matched by its full name", async () => {
+    await sql`insert into brain.nodes (type, name, canonical_name) values ('place', 'Toronto, Canada', 'toronto canada')`;
+    await ingestWith({ entities: [entity("t", "place", "Toronto, Canada")], relations: [], facts_about_self: [] }, "Toronto, Canada again.");
+    await ingestWith({ entities: [entity("t", "place", "Toronto, Canada")], relations: [], facts_about_self: [] }, "And Toronto, Canada once more.");
+    const [node] = await sql<{ aliases: string[] }[]>`select aliases from brain.nodes where canonical_name = 'toronto canada'`;
+    expect(node.aliases).toEqual(["toronto"]);
+  });
+
+  it("stores the alias in canonical form and gives a place without a comma no alias", async () => {
+    await ingestWith(
+      { entities: [entity("j", "place", "St. John's, Newfoundland"), entity("t", "place", "Toronto")], relations: [], facts_about_self: [] },
+      "From St. John's, Newfoundland to Toronto.",
+    );
+    const rows = await sql<{ canonical_name: string; aliases: string[] }[]>`
+      select canonical_name, aliases from brain.nodes where type = 'place' order by canonical_name`;
+    expect(rows).toEqual([
+      { canonical_name: "st johns newfoundland", aliases: ["st johns"] },
+      { canonical_name: "toronto", aliases: [] },
+    ]);
+  });
+
+  it("does not add the alias to other node types", async () => {
+    await ingestWith({ entities: [entity("o", "organization", "Acme, Inc.")], relations: [], facts_about_self: [] }, "Acme, Inc. is a company.");
+    const [node] = await sql<{ aliases: string[] }[]>`select aliases from brain.nodes where canonical_name = 'acme inc'`;
+    expect(node.aliases).toEqual([]);
+  });
+
+  it("agrees with brain.place_short_alias, which backfills existing place nodes", async () => {
+    const names = ["Toronto, Canada", "Austin, TX", "Washington, D.C., USA", "St. John's, Newfoundland", "Paris", ", France", "Toronto,", "TORONTO , toronto"];
+    for (const name of names) {
+      const [row] = await sql<{ a: string | null }[]>`select brain.place_short_alias(${name}) as a`;
+      expect([name, row.a]).toEqual([name, placeShortAlias(name)]);
+    }
+    expect(placeShortAlias("Toronto, Canada")).toBe("toronto");
+    expect(placeShortAlias("Paris")).toBeNull();
+    expect(placeShortAlias("Toronto,")).toBeNull();
   });
 });

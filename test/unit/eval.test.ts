@@ -13,7 +13,7 @@ type P = { documentId: string; group: "hybrid" | "graph" | "fallback"; content: 
 function searchResult(passages: P[], degraded = false): SearchResult {
   return {
     query: "Why?",
-    passages: passages.map((p, i) => ({ chunkId: p.chunkId === undefined ? `c${i}` : p.chunkId, documentId: p.documentId, documentTitle: null, sourceKind: "note", content: p.content, parentContent: null, headingPath: [], charStart: 0, charEnd: 0, score: p.score, group: p.group })),
+    passages: passages.map((p, i) => ({ chunkId: p.chunkId === undefined ? `c${i}` : p.chunkId, documentId: p.documentId, documentTitle: null, sourceKind: "note", author: "owner", content: p.content, parentContent: null, headingPath: [], charStart: 0, charEnd: 0, score: p.score, group: p.group })),
     documents: [], entities: [], facts: [], usedFallback: false, topScore: passages[0]?.score ?? null, degraded,
   };
 }

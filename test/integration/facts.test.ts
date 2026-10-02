@@ -75,6 +75,15 @@ describe("facts", () => {
     expect(current.map((f) => [f.id, f.supersededBy])).toEqual([[a, null]]);
   });
 
+  it("logs a supersession by the owner to fact_events", async () => {
+    const { id: a } = await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "frank" });
+    const b = await supersedeFact(sql, a, { objectText: "Denver", by: "agent:test" });
+    const rows = await sql<{ fact_id: string; event: string; by: string; document_id: string | null; superseded_by: string; previous: string | null }[]>`
+      select fact_id, event, by, document_id, detail->>'superseded_by' as superseded_by, detail->>'previous_valid_to' as previous
+      from brain.fact_events`;
+    expect(rows).toEqual([{ fact_id: a, event: "superseded", by: "agent:test", document_id: null, superseded_by: b, previous: null }]);
+  });
+
   it("rejects empty predicates and values", async () => {
     await expect(addFact(sql, { predicate: "!!!", objectText: "x", by: "t" })).rejects.toThrow(/predicate must contain letters or digits/);
     await expect(addFact(sql, { predicate: "住在", objectText: "x", by: "t" })).rejects.toThrow(/predicate must contain letters or digits/);

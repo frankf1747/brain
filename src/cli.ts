@@ -3,7 +3,8 @@ import { makeCtx, type Ctx } from "./ctx.js";
 import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
 import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
-import { ingestAll, logSkip } from "./ingest/batch.js";
+import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
+import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
 
@@ -46,12 +47,14 @@ program
   .command("ingest <input>")
   .description("Ingest a file, directory, URL, or - for stdin")
   .option("--kind <kind>", "source kind label (note, conversation, news, job_description, ...)", "paste")
+  .option("--author <author>", "who wrote it: owner, other or unknown (default by kind: note, paste, conversation, resume → owner; news, paper, job_description, email → other; else unknown)")
   .option("--title <title>", "override the detected title")
   .option("--occurred-at <date>", "date the content is about (ISO 8601)")
   .option("--meta <k=v...>", "extra metadata pairs")
   .option("--until <stage>", `stop after this stage (${STAGES.join(", ")})`)
   .action(async (input: string, opts) => {
     if (opts.until && !STAGES.includes(opts.until)) throw new Error(`Unknown stage ${opts.until}`);
+    const author = opts.author === undefined ? undefined : parseAuthor(opts.author);
     await withCtx(async (ctx) => {
       const meta = parseMeta(opts.meta);
       const { failed } = await ingestAll(
@@ -63,6 +66,7 @@ program
             text: r.text,
             title: opts.title ?? r.title,
             sourceKind: opts.kind,
+            author,
             origin: r.origin,
             mimeType: r.mimeType,
             metadata: { ...r.metadata, ...meta },
@@ -70,7 +74,7 @@ program
           }),
         },
         {
-          done: (r, res) => console.log(`${res.created ? "new " : "dup "} ${res.id} ${res.stage.padEnd(10)} ${res.error ? "ERROR " + res.error + " " : ""}${r.origin}`),
+          done: (r, res) => console.log(ingestLine(r, res, author)),
           skip: logSkip,
         },
       );
@@ -80,13 +84,19 @@ program
 
 program
   .command("status")
-  .description("Pipeline stage counts and failures")
+  .description("Pipeline stage counts, failures, and documents whose items about the owner were suppressed")
   .action(async () => {
+    const { suppressedDocuments } = await import("./ingest/set-author.js");
     await withCtx(async (ctx) => {
       for (const s of await stageCounts(ctx)) console.log(`${s.stage.padEnd(10)} ${String(s.count).padStart(6)} ${s.failed ? `(${s.failed} failed)` : ""}`);
       const failed = await ctx.sql<{ document_id: string; stage: string; error: string; attempts: number }[]>`
         select document_id, stage, error, attempts from brain.ingest_jobs where error is not null order by updated_at desc limit 20`;
       for (const f of failed) console.log(`  ${f.document_id} at ${f.stage} (${f.attempts} attempts): ${f.error}`);
+      const suppressed = await suppressedDocuments(ctx.sql);
+      if (suppressed.length) {
+        console.log("suppressed facts/relations about the owner (the owner did not write the document):");
+        for (const s of suppressed) console.log(`  ${s.documentId} ${String(s.count).padStart(3)}  ${s.title ?? "(untitled)"} [${s.author}]`);
+      }
     });
   });
 
@@ -197,6 +207,17 @@ program
     });
   });
 
+program
+  .command("set-author <documentId> <author>")
+  .description("Change who wrote a document (owner, other, unknown) and redo the facts and relationships it produced")
+  .action(async (documentId: string, authorArg: string) => {
+    const { setAuthor, setAuthorLines } = await import("./ingest/set-author.js");
+    const author = parseAuthor(authorArg);
+    await withCtx(async (ctx) => {
+      for (const line of setAuthorLines(await setAuthor(ctx, documentId, author))) console.log(line);
+    });
+  });
+
 const evalCmd = program.command("eval").description("Retrieval eval against the brain_eval database (never the real one)");
 
 evalCmd
@@ -224,7 +245,7 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx } = await import("./eval/db.js");
-    const { runEval } = await import("./eval/run.js");
+    const { runEval, attributionGate } = await import("./eval/run.js");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { execSync } = await import("node:child_process");
@@ -235,6 +256,7 @@ evalCmd
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
       const failures = gateFailures(comparison, { gate: !!opts.gate, accept: !!opts.accept, baselinePath: opts.baseline });
+      if (opts.gate) failures.push(...attributionGate(run.attribution));
       if (opts.json) {
         console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
       } else {
@@ -253,6 +275,7 @@ evalCmd
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
         console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
+        console.log(`attribution  self-facts-from-others=${run.attribution.selfFacts}  self-edges-from-others=${run.attribution.selfEdges}`);
         if (comparison) {
           const d = comparison.deltas;
           console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);

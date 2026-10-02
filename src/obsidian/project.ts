@@ -90,7 +90,7 @@ export async function projectObsidian(ctx: Ctx, opts: ProjectOptions = {}): Prom
 
   for (const d of g.documents) {
     const entityNoteNames = [...new Set(g.mentions.filter((m) => m.documentId === d.id && nodeIds.has(m.nodeId)).map((m) => nodeNames.get(m.nodeId)!))].sort();
-    const view: DocView = { id: d.id, noteName: docNames.get(d.id)!, title: d.title, kind: d.sourceKind, origin: d.origin, occurredAt: d.occurredAt, ingestedAt: d.ingestedAt, summary: d.summary, entityNoteNames, raw: d.raw };
+    const view: DocView = { id: d.id, noteName: docNames.get(d.id)!, title: d.title, kind: d.sourceKind, author: d.author, origin: d.origin, occurredAt: d.occurredAt, ingestedAt: d.ingestedAt, summary: d.summary, entityNoteNames, raw: d.raw };
     const year = (d.occurredAt ?? d.ingestedAt).getUTCFullYear();
     files.set(join("documents", String(year), `${view.noteName}.md`), renderDocument(view));
   }

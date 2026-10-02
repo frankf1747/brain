@@ -23,7 +23,7 @@ describe("loadGraph", () => {
     expect(g.edges[0].evidence).toContain("Acme Corp");
     expect(g.mentions.some((m) => m.documentId === id)).toBe(true);
     expect(g.facts).toEqual([expect.objectContaining({ predicate: "visa_status", documentId: id, verifiedBy: "extractor:fake" })]);
-    expect(g.documents[0]).toEqual(expect.objectContaining({ id, title: "Acme note", sourceKind: "note" }));
+    expect(g.documents[0]).toEqual(expect.objectContaining({ id, title: "Acme note", sourceKind: "note", author: "owner" }));
     expect(g.documents[0].raw).toContain("F-1 OPT");
   });
 

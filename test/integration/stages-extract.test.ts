@@ -63,6 +63,26 @@ describe("runExtract", () => {
     await runChunk(ctx, id);
     await expect(runExtract(ctx, id)).rejects.toThrow("network down");
   });
+
+  it("tells the extractor who wrote the document and where it came from", async () => {
+    const ctx = fakeCtx(sql, () => fakeExtraction);
+    const { id } = await storeDocument(sql, { text, title: "Post", sourceKind: "note", author: "other", origin: "https://example.test/post" });
+    await runChunk(ctx, id);
+    await runExtract(ctx, id);
+    expect(ctx.llm.calls[0].user).toContain("Author: other");
+    expect(ctx.llm.calls[0].user).toContain("Origin: https://example.test/post");
+    expect(ctx.llm.calls[0].system).toContain("who is not the owner");
+  });
+
+  it("keeps the owner pronoun rule for a document the owner wrote", async () => {
+    const ctx = fakeCtx(sql, () => fakeExtraction);
+    const { id } = await storeDocument(sql, { text, sourceKind: "note" });
+    await runChunk(ctx, id);
+    await runExtract(ctx, id);
+    expect(ctx.llm.calls[0].user).toContain("Author: owner");
+    expect(ctx.llm.calls[0].user).toContain("Origin: (none)");
+    expect(ctx.llm.calls[0].system).toContain('may appear as "I", "me", "my" or by name');
+  });
 });
 
 describe("runExtract with no sections", () => {

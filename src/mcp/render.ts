@@ -3,6 +3,7 @@ import type { Orientation } from "../retrieve/orient.js";
 import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
 import type { FactDetail } from "../graph/facts.js";
+import type { SuppressedDocument } from "../ingest/set-author.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
@@ -14,7 +15,7 @@ export function renderSearch(r: SearchResult): string {
   r.passages.forEach((p, i) => {
     const where = p.chunkId ? `(document ${p.documentId}, chunk ${p.chunkId})` : `(document ${p.documentId})`;
     const title = p.documentTitle ? ` · ${p.documentTitle}` : "";
-    out.push(`[P${i + 1}] ${p.group} · ${p.sourceKind}${title} ${where}${p.headingPath.length ? `\n  ${p.headingPath.join(" > ")}` : ""}\n${p.content.trim()}\n`);
+    out.push(`[P${i + 1}] ${p.group} · ${p.sourceKind} · author: ${p.author}${title} ${where}${p.headingPath.length ? `\n  ${p.headingPath.join(" > ")}` : ""}\n${p.content.trim()}\n`);
   });
   if (r.documents.length) out.push("Documents by summary: " + r.documents.map((d) => `${d.title ?? "(untitled)"} [${d.sourceKind}] (document ${d.documentId})`).join("; "));
   for (const e of r.entities) {
@@ -62,7 +63,7 @@ export function renderDocument(d: DocumentSlice): string {
   const end = d.offset + d.text.length;
   return [
     `${d.title ?? "(untitled)"} [${d.sourceKind}] (document ${d.id})`,
-    `origin: ${d.origin ?? "n/a"} · about: ${day(d.occurredAt) ?? "unknown"} · ingested: ${day(d.ingestedAt)}`,
+    `origin: ${d.origin ?? "n/a"} · author: ${d.author} · about: ${day(d.occurredAt) ?? "unknown"} · ingested: ${day(d.ingestedAt)}`,
     d.summary ? `summary: ${d.summary}` : "",
     `--- characters ${d.offset}–${end} of ${d.totalLength}${end < d.totalLength ? ` (call again with offset ${end} for more)` : ""} ---`,
     d.text,
@@ -80,9 +81,18 @@ export function renderFacts(facts: FactDetail[]): string {
     .join("\n");
 }
 
-export function renderStatus(pipeline: { stage: string; count: number; failed: number }[], inflight: string[], failures: { document_id: string; stage: string; error: string }[]): string {
+export function renderStatus(
+  pipeline: { stage: string; count: number; failed: number }[],
+  inflight: string[],
+  failures: { document_id: string; stage: string; error: string }[],
+  suppressed: SuppressedDocument[] = [],
+): string {
   const out = [pipeline.map((p) => `${p.stage}: ${p.count}${p.failed ? ` (${p.failed} failed)` : ""}`).join(", ")];
   out.push(inflight.length ? `Processing in this server: ${inflight.join(", ")}` : "Nothing processing in this server.");
   for (const f of failures) out.push(`- ${f.document_id} stuck after ${f.stage}: ${f.error}`);
+  if (suppressed.length) {
+    out.push("Facts and relations about the owner suppressed because the owner did not write the document:");
+    for (const s of suppressed) out.push(`- ${s.documentId} ${s.title ?? "(untitled)"} [author ${s.author}]: ${s.count}`);
+  }
   return out.join("\n");
 }
