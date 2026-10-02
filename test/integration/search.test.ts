@@ -6,6 +6,8 @@ import { search } from "../../src/retrieve/search.js";
 import { FakeReranker, estimateEmbedTokens, type RerankHit } from "../../src/llm/voyage.js";
 import { renderSearch } from "../../src/mcp/render.js";
 import { reciprocalRankFusion } from "../../src/retrieve/fuse.js";
+import { isHybrid, factSource, type LoggedPassage } from "../../src/retrieve/contract.js";
+import { addFact } from "../../src/graph/facts.js";
 import { toVector } from "../../src/db.js";
 import { config } from "../../src/config.js";
 
@@ -49,9 +51,9 @@ describe("search", () => {
     const ctx = fakeCtx(sql, handler);
     await ingest(ctx, { text: "Lonestar Capital closed a new fund for robotics startups.", sourceKind: "news", title: "Fund news" });
     await ingest(ctx, { text: "My tomatoes finally ripened this week.", sourceKind: "note", title: "Tomatoes" });
-    const news = (await search(ctx, "Lonestar Capital robotics fund", { includeFacts: false })).passages.find((p) => p.documentTitle === "Fund news")!;
+    const news = (await search(ctx, "Lonestar Capital robotics fund", { includeFacts: false })).passages.find((p) => p.title === "Fund news")!;
     expect(news.author).toBe("other");
-    const note = (await search(ctx, "tomatoes ripened", { includeFacts: false })).passages.find((p) => p.documentTitle === "Tomatoes")!;
+    const note = (await search(ctx, "tomatoes ripened", { includeFacts: false })).passages.find((p) => p.title === "Tomatoes")!;
     expect(note.author).toBe("owner");
   });
 
@@ -59,12 +61,12 @@ describe("search", () => {
     const ctx = await seed();
     const res = await search(ctx, "What did Zorblax Industries release?");
     expect(res.passages.some((p) => p.content.includes("ZX-9000"))).toBe(true);
-    expect(res.passages[0].documentTitle).toBe("Zorblax news");
+    expect(res.passages[0].title).toBe("Zorblax news");
     expect(res.entities.map((e) => e.name)).toContain("Zorblax Industries");
     expect(res.entities[0].neighbors.map((n) => n.name)).toContain("Austin");
     // visa_status shares no term with the query and has no object node, so it is not returned here.
     expect(res.facts).toEqual([]);
-    expect(res.usedFallback).toBe(false);
+    expect(res.fallbackUsed).toBe(false);
     const [log] = await sql<{ query: string; used_fallback: boolean; node_ids: string[] }[]>`select query, used_fallback, node_ids from brain.retrieval_log`;
     expect(log.query).toContain("Zorblax");
     expect(log.node_ids.length).toBe(1);
@@ -75,7 +77,7 @@ describe("search", () => {
   it("applies the source_kind filter inside retrieval", async () => {
     const ctx = await seed();
     const res = await search(ctx, "Zorblax Industries", { sourceKinds: ["note"], includeFacts: false });
-    expect(res.passages.filter((p) => p.group === "hybrid").every((p) => p.sourceKind === "note")).toBe(true);
+    expect(res.passages.filter((p) => isHybrid(p)).every((p) => p.sourceKind === "note")).toBe(true);
     expect(res.facts).toEqual([]);
   });
 
@@ -86,8 +88,8 @@ describe("search", () => {
     try {
       // "Texas" and "year" appear nowhere; the old AND query returned nothing.
       const res = await search(ctx, "What did Zorblax release in Texas this year?");
-      // Hybrid group only: entity detection also brings the passage in as a graph passage.
-      expect(res.passages.some((p) => p.group === "hybrid" && p.content.includes("ZX-9000"))).toBe(true);
+      // Hybrid passages only: entity detection also brings the passage in as a graph passage.
+      expect(res.passages.some((p) => isHybrid(p) && p.content.includes("ZX-9000"))).toBe(true);
     } finally {
       err.mockRestore();
     }
@@ -96,9 +98,9 @@ describe("search", () => {
   it("falls back to a raw substring scan when nothing ranks well", async () => {
     const ctx = await seed();
     const res = await search(ctx, "X-90");
-    expect(res.usedFallback).toBe(true);
-    const fb = res.passages.find((p) => p.group === "fallback")!;
-    expect(fb.documentTitle).toBe("Zorblax news");
+    expect(res.fallbackUsed).toBe(true);
+    const fb = res.passages.find((p) => p.layers.includes("fallback"))!;
+    expect(fb.title).toBe("Zorblax news");
     expect(fb.content).toContain("ZX-9000");
   });
 
@@ -106,15 +108,15 @@ describe("search", () => {
     const ctx = await seed();
     ctx.reranker = { rerank: async (_q, docs, k) => docs.slice(0, k).map((_d, index) => ({ index, score: 0.01 })) };
     const res = await search(ctx, "tell me about gardening in winter");
-    expect(res.usedFallback).toBe(false);
-    expect(res.passages.filter((p) => p.group === "fallback")).toEqual([]);
+    expect(res.fallbackUsed).toBe(false);
+    expect(res.passages.filter((p) => p.layers.includes("fallback"))).toEqual([]);
   });
 
   it("treats LIKE metacharacters inside a trigger term literally", async () => {
     const ctx = await seed();
     for (const q of ["100%", "a_b-1", "100%_1", "a\\b-1"]) {
       const res = await search(ctx, q);
-      expect(res.passages.filter((p) => p.group === "fallback")).toEqual([]);
+      expect(res.passages.filter((p) => p.layers.includes("fallback"))).toEqual([]);
     }
     // Near-misses that an unescaped pattern would match: "%" spans anything, "_" matches one character.
     await ingest(ctx, { text: "Revenue grew 1000 points; the code axb-1 shipped.", sourceKind: "note", title: "Near miss" });
@@ -123,7 +125,7 @@ describe("search", () => {
     weakRerank(ctx);
     for (const q of ["100%", "a_b-1", "a\\b-1"]) {
       const res = await search(ctx, q);
-      expect(res.passages.filter((p) => p.group === "fallback").map((p) => p.documentTitle)).toEqual(["Exact"]);
+      expect(res.passages.filter((p) => p.layers.includes("fallback")).map((p) => p.title)).toEqual(["Exact"]);
     }
   });
 
@@ -132,8 +134,8 @@ describe("search", () => {
     await ingest(ctx, { text: "Order X-90 and ZX-9000 together.", sourceKind: "note", title: "Both" });
     await ingest(ctx, { text: "Only the X-90 here.", sourceKind: "note", title: "One" });
     const res = await search(ctx, "X-90 ZX-9000");
-    const fb = res.passages.filter((p) => p.group === "fallback");
-    expect(fb.map((p) => p.documentTitle)).toEqual(["Both", "One"]);
+    const fb = res.passages.filter((p) => p.layers.includes("fallback"));
+    expect(fb.map((p) => p.title)).toEqual(["Both", "One"]);
   });
 
   it("returns one fallback passage per document, matches case-insensitively, and windows at document edges", async () => {
@@ -142,12 +144,12 @@ describe("search", () => {
     await ingest(ctx, { text: `ZX-90 ${long} zx-90 ${long} Zx-90 end`, sourceKind: "note", title: "Repeats" });
     await ingest(ctx, { text: `${long} the code Q-77 closes`, sourceKind: "note", title: "Tail" });
     const rep = await search(ctx, "zx-90");
-    const fbRep = rep.passages.filter((p) => p.group === "fallback");
+    const fbRep = rep.passages.filter((p) => p.layers.includes("fallback"));
     expect(fbRep).toHaveLength(1);
     expect(fbRep[0].charStart).toBe(0);
     expect(fbRep[0].content.startsWith("ZX-90")).toBe(true);
     const tail = await search(ctx, "q-77");
-    const fbTail = tail.passages.filter((p) => p.group === "fallback");
+    const fbTail = tail.passages.filter((p) => p.layers.includes("fallback"));
     expect(fbTail).toHaveLength(1);
     expect(fbTail[0].content.endsWith("closes")).toBe(true);
     expect(fbTail[0].charEnd - fbTail[0].charStart).toBeLessThan(500);
@@ -157,7 +159,7 @@ describe("search", () => {
     const ctx = weakRerank(fakeCtx(sql, handler));
     await ingest(ctx, { text: "Old build K-42 passed.", sourceKind: "news", title: "Old", occurredAt: new Date("2020-01-01T00:00:00Z") });
     await ingest(ctx, { text: "New build K-42 passed.", sourceKind: "note", title: "New", occurredAt: new Date("2026-01-01T00:00:00Z") });
-    const titles = async (o = {}) => (await search(ctx, "K-42", o)).passages.filter((p) => p.group === "fallback").map((p) => p.documentTitle).sort();
+    const titles = async (o = {}) => (await search(ctx, "K-42", o)).passages.filter((p) => p.layers.includes("fallback")).map((p) => p.title).sort();
     expect(await titles()).toEqual(["New", "Old"]);
     expect(await titles({ since: new Date("2025-01-01T00:00:00Z") })).toEqual(["New"]);
     expect(await titles({ until: new Date("2021-01-01T00:00:00Z") })).toEqual(["Old"]);
@@ -172,7 +174,7 @@ describe("search", () => {
     expect(unfiltered.passages.some((p) => p.documentId === old.documentId)).toBe(true);
     // With since, hybrid search drops the old document; the graph (mentions) and fallback (substring) layers must too.
     const res = await search(ctx, "Zorblax Industries", { since: new Date("2025-01-01T00:00:00Z") });
-    expect(res.passages.filter((p) => p.documentId === old.documentId).map((p) => p.group)).toEqual([]);
+    expect(res.passages.filter((p) => p.documentId === old.documentId).map((p) => p.layers)).toEqual([]);
     expect(res.entities.map((e) => e.name)).toContain("Zorblax Industries");
   });
 
@@ -188,7 +190,7 @@ describe("search", () => {
     };
     const res = await search(ctx, "What did Zorblax Industries release?");
     expect(seen.some((d) => d.startsWith("Zorblax news\nA note.\n\n") && d.includes("ZX-9000"))).toBe(true);
-    const hit = res.passages.find((p) => p.group === "hybrid" && p.content.includes("ZX-9000"))!;
+    const hit = res.passages.find((p) => isHybrid(p) && p.content.includes("ZX-9000"))!;
     expect(hit.content.startsWith("Zorblax news")).toBe(false);
   });
 
@@ -198,10 +200,18 @@ describe("search", () => {
     const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const res = await search(ctx, "What did Zorblax Industries release?");
-      expect(res.degraded).toBe(true);
-      expect(res.degradedReason).toBe("embedding");
-      expect(res.capReached).toBe(false);
+      expect(res.degraded).toEqual({ embedding: true, rerank: true, capReached: false });
+      expect(res.mode).toBe("keyword-only");
+      expect(res.topScore).toBeNull();
+      expect(res.candidates.vector).toBe(0);
       expect(res.passages.some((p) => p.content.includes("ZX-9000"))).toBe(true);
+      // No vectors: every hybrid passage was found by the keyword branch alone, in RRF order, unreranked.
+      const hybrid = res.passages.filter(isHybrid);
+      expect(hybrid.length).toBeGreaterThan(0);
+      for (const p of hybrid) {
+        expect(p).toMatchObject({ layers: ["keyword"], vectorRank: null, scoreKind: "rrf", rerankRank: null });
+        expect(p.keywordRank).toBeGreaterThan(0);
+      }
       expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: query embedding failed, keyword search only: voyage 503");
     } finally {
       err.mockRestore();
@@ -218,9 +228,9 @@ describe("search", () => {
     const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const res = await search(ctx, "Zorblax Industries drill");
-      expect(res.degraded).toBe(true);
+      expect(res.degraded).toEqual({ embedding: true, rerank: true, capReached: false });
       expect(rerankCalls).toEqual([]);
-      const hybrid = res.passages.filter((p) => p.group === "hybrid");
+      const hybrid = res.passages.filter((p) => isHybrid(p));
       expect(hybrid.length).toBeGreaterThan(0);
       expect(hybrid[0].content).toContain("ZX-9000");
     } finally {
@@ -237,7 +247,7 @@ describe("search", () => {
     ctx.embedder = { embed: async () => { throw new Error("ingest embedder must not be used"); } } as unknown as typeof ctx.embedder;
     ctx.reranker = { rerank: async () => { throw new Error("ingest reranker must not be used"); } };
     const res = await search(ctx, "What did Zorblax Industries release?");
-    expect(res.degraded).toBe(false);
+    expect(res.mode).toBe("hybrid");
     expect(used).toEqual(["embed", "rerank"]);
   });
 
@@ -251,13 +261,17 @@ describe("search", () => {
     const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const res = await search(ctx, "Zorblax Industries drill");
-      expect(res.degraded).toBe(true);
-      expect(res.degradedReason).toBe("rerank");
-      expect(res.capReached).toBe(false);
-      const hybrid = res.passages.filter((p) => p.group === "hybrid");
+      expect(res.degraded).toEqual({ embedding: false, rerank: true, capReached: false });
+      expect(res.mode).toBe("fused-order");
+      const hybrid = res.passages.filter((p) => isHybrid(p));
       expect(hybrid.length).toBeGreaterThan(0);
       expect(hybrid.map((p) => p.chunkId)).toEqual(fused.slice(0, hybrid.length).map((f) => f.id));
       expect(hybrid.map((p) => p.score)).toEqual(fused.slice(0, hybrid.length).map((f) => f.fused));
+      expect(hybrid.every((p) => p.scoreKind === "rrf" && p.rerankRank === null)).toBe(true);
+      // RRF values are never a top score: the log's top_score is null too.
+      expect(res.topScore).toBeNull();
+      const [log] = await sql<{ top_score: number | null }[]>`select top_score from brain.retrieval_log where id = ${res.retrievalId}`;
+      expect(log.top_score).toBeNull();
     } finally {
       err.mockRestore();
     }
@@ -266,9 +280,8 @@ describe("search", () => {
   it("is not degraded when embedding and reranking succeed", async () => {
     const ctx = await seed();
     const res = await search(ctx, "What did Zorblax Industries release?");
-    expect(res.degraded).toBe(false);
-    expect(res.degradedReason).toBeNull();
-    expect(res.capReached).toBe(false);
+    expect(res.degraded).toEqual({ embedding: false, rerank: false, capReached: false });
+    expect(res.mode).toBe("hybrid");
   });
 
   it("goes keyword-only and says the cap was reached when the ledger refuses the query embedding", async () => {
@@ -279,7 +292,7 @@ describe("search", () => {
     const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const res = await search(ctx, "What did Zorblax Industries release?");
-      expect(res).toMatchObject({ degraded: true, degradedReason: "cap", capReached: true });
+      expect(res).toMatchObject({ mode: "keyword-only", degraded: { embedding: true, rerank: true, capReached: true } });
       expect(res.passages.some((p) => p.content.includes("ZX-9000"))).toBe(true);
       expect(calls).toEqual([]);
       expect(renderSearch(res)).toContain("(Voyage daily cap reached; keyword-only results)");
@@ -303,9 +316,9 @@ describe("search", () => {
     const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const res = await search(ctx, query);
-      expect(res).toMatchObject({ degraded: true, degradedReason: "rerank", capReached: true });
+      expect(res).toMatchObject({ mode: "fused-order", degraded: { embedding: false, rerank: true, capReached: true } });
       expect(calls.map((c) => c.path)).toEqual(["/embeddings"]);
-      expect(res.passages.filter((p) => p.group === "hybrid").length).toBeGreaterThan(0);
+      expect(res.passages.filter((p) => isHybrid(p)).length).toBeGreaterThan(0);
       expect(renderSearch(res)).toContain("(Voyage daily cap reached; results in fused order)");
       expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: Voyage daily cap reached, keeping fused order");
     } finally {
@@ -319,13 +332,117 @@ describe("search", () => {
     ctx.queryEmbedder = voyage;
     ctx.queryReranker = voyage;
     const res = await search(ctx, "What did Zorblax Industries release?");
-    expect(res).toMatchObject({ degraded: false, degradedReason: null, capReached: false });
+    expect(res).toMatchObject({ mode: "hybrid", degraded: { embedding: false, rerank: false, capReached: false } });
     const rows = await sql<{ operation: string; status: string; client: string }[]>`
       select operation, status, client from brain.provider_usage order by id`;
     expect(rows).toEqual([
       { operation: "embed_query", status: "ok", client: "cli" },
       { operation: "rerank", status: "ok", client: "cli" },
     ]);
+  });
+
+  it("reports how each hybrid passage was found: branch ranks, layers, rerank position and score kind", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "Zorblax Industries drill", { includeFacts: false });
+    const hybrid = res.passages.filter(isHybrid);
+    expect(hybrid.length).toBeGreaterThan(1);
+    // Only the Zorblax passage shares a term with the query, so it is the one passage both branches found.
+    const both = hybrid.find((p) => p.content.includes("ZX-9000"))!;
+    expect(both.layers).toEqual(["vector", "keyword"]);
+    expect(both.vectorRank).toBeGreaterThan(0);
+    expect(both.keywordRank).toBe(1);
+    const vectorOnly = hybrid.find((p) => !p.content.includes("ZX-9000"))!;
+    expect(vectorOnly).toMatchObject({ layers: ["vector"], keywordRank: null });
+    expect(hybrid.map((p) => p.rerankRank)).toEqual(hybrid.map((_p, i) => i + 1));
+    expect(hybrid.every((p) => p.scoreKind === "rerank" && p.fallbackTerm === null && p.viaEntity === null)).toBe(true);
+    expect(res.topScore).toBe(Math.max(...hybrid.map((p) => p.score as number)));
+    expect(res.candidates.keyword).toBe(1);
+    expect(res.candidates.fused).toBeGreaterThanOrEqual(res.candidates.vector);
+    expect(res.candidates.fused).toBeLessThanOrEqual(res.candidates.vector + res.candidates.keyword);
+    expect(both).toMatchObject({ title: "Zorblax news", sourceKind: "news", author: "owner", occurredAt: null });
+  });
+
+  it("times each stage; the stages are disjoint and fit inside the total", async () => {
+    const ctx = await seed();
+    const { timings } = await search(ctx, "What did Zorblax Industries release?");
+    for (const v of Object.values(timings)) expect(v).toBeGreaterThanOrEqual(0);
+    expect(timings.sqlMs).toBeGreaterThan(0);
+    expect(timings.totalMs).toBeGreaterThan(0);
+    // Each stage is rounded to 0.1 ms, so allow 0.05 ms per stage.
+    expect(timings.embedMs + timings.sqlMs + timings.rerankMs + timings.graphMs).toBeLessThanOrEqual(timings.totalMs + 0.25);
+  });
+
+  it("reports a graph passage with layers graph, no score, no ranks, and the entity that brought it in", async () => {
+    const ctx = await seed();
+    ctx.reranker = { rerank: async () => [] };
+    const res = await search(ctx, "Zorblax Industries", { includeFacts: false });
+    const entity = res.entities.find((e) => e.name === "Zorblax Industries")!;
+    const graph = res.passages.filter((p) => p.layers.includes("graph"));
+    expect(graph.length).toBe(1);
+    expect(graph[0]).toMatchObject({
+      layers: ["graph"], score: null, scoreKind: "none", vectorRank: null, keywordRank: null, rerankRank: null, fallbackTerm: null,
+      viaEntity: { id: entity.id, name: "Zorblax Industries" }, title: "Zorblax news",
+    });
+    expect(res.topScore).toBeNull();
+    expect(res.mode).toBe("hybrid");
+  });
+
+  it("reports a fallback passage with its document, the matched term, and no chunk or score", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "X-90");
+    const fb = res.passages.find((p) => p.layers.includes("fallback"))!;
+    expect(fb).toMatchObject({
+      chunkId: null, title: "Zorblax news", layers: ["fallback"], score: null, scoreKind: "none", fallbackTerm: "X-90",
+      vectorRank: null, keywordRank: null, rerankRank: null, viaEntity: null, headingPath: [],
+    });
+    expect(fb.charEnd).toBeGreaterThan(fb.charStart);
+  });
+
+  it("says where each fact came from: the extractor's document, or the owner", async () => {
+    const ctx = await seed();
+    const zorblax = (await sql<{ id: string }[]>`select id from brain.documents where title = 'Zorblax news'`)[0];
+    await addFact(sql, { predicate: "lives_in", objectText: "Austin", by: "agent:test" });
+    const visa = (await search(ctx, "visa status")).facts.find((f) => f.predicate === "visa_status")!;
+    expect(visa.verifiedBy).toMatch(/^extractor:/);
+    expect(visa).toMatchObject({ sourceDocumentId: zorblax.id, sourceKind: "news", verified: false });
+    expect(visa.sourceChunkId).not.toBeNull();
+    expect(factSource(visa)).toEqual({ kind: "document", sourceKind: "news", documentId: zorblax.id });
+    const lives = (await search(ctx, "where do I live", { k: 3 })).facts.find((f) => f.predicate === "lives_in")!;
+    expect(lives).toMatchObject({ verifiedBy: "agent:test", sourceChunkId: null, sourceDocumentId: null, sourceKind: null, confidence: 1 });
+    expect(factSource(lives)).toEqual({ kind: "owner" });
+  });
+
+  it("logs each passage without its text, the degraded flags, candidates, timings, k and mode, and returns the log id", async () => {
+    const ctx = weakRerank(await seed());
+    const res = await search(ctx, "Zorblax ZX-9000", { k: 5, includeFacts: false });
+    expect(res.fallbackUsed).toBe(true);
+    const rows = await sql<{
+      id: string; results: LoggedPassage[]; degraded: unknown; candidates: unknown; timings: unknown; k: number; mode: string;
+      chunk_ids: string[]; used_fallback: boolean; layers: string[]; top_score: number | null;
+    }[]>`select id, results, degraded, candidates, timings, k, mode, chunk_ids, used_fallback, layers, top_score from brain.retrieval_log`;
+    expect(rows).toHaveLength(1);
+    const [log] = rows;
+    expect(log.id).toBe(res.retrievalId);
+    expect(log.results).toHaveLength(res.passages.length);
+    for (const [i, entry] of log.results.entries()) {
+      expect(entry).not.toHaveProperty("content");
+      expect(entry).toEqual(Object.fromEntries(Object.entries(res.passages[i]).filter(([key]) => key !== "content")));
+      expect(entry).toHaveProperty("score");
+      expect(entry).toHaveProperty("layers");
+    }
+    const fb = log.results.find((e) => e.layers.includes("fallback"))!;
+    expect(fb).toMatchObject({ chunkId: null, fallbackTerm: "ZX-9000" });
+    expect(fb.documentId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(log.degraded).toEqual({ embedding: false, rerank: false, capReached: false });
+    expect(log.candidates).toEqual(res.candidates);
+    expect(log.timings).toEqual(res.timings);
+    expect(log.k).toBe(5);
+    expect(log.mode).toBe("hybrid");
+    // The v1 columns are still written.
+    expect(log.used_fallback).toBe(true);
+    expect(log.layers).toContain("fallback");
+    expect(log.chunk_ids).toEqual(res.passages.map((p) => p.chunkId).filter((id) => id !== null));
+    expect(log.top_score).toBeCloseTo(0.01, 5);
   });
 
   it("detects an entity from a lowercase query and expands its neighbours", async () => {
@@ -368,9 +485,9 @@ describe("search", () => {
     const z = res.entities.find((e) => e.name === "Zorblax Industries")!;
     expect(z.neighbors.length).toBe(config.graph.maxNeighbors);
     expect(z.neighbors[0].name).toBe("Place 25"); // highest edge confidence first
-    const graph = res.passages.filter((p) => p.group === "graph");
+    const graph = res.passages.filter((p) => p.layers.includes("graph"));
     expect(graph.length).toBe(config.graph.maxPassagesPerEntity);
-    expect(graph.map((p) => p.documentTitle)).toEqual(["M25", "M24", "M23", "M22", "M21"]); // newest documents first
+    expect(graph.map((p) => p.title)).toEqual(["M25", "M24", "M23", "M22", "M21"]); // newest documents first
   });
 
   it("maps a mention stored on a level-0 section to that section's first passage", async () => {
@@ -388,7 +505,7 @@ describe("search", () => {
     await sql`insert into brain.mentions (chunk_id, node_id) values (${sec.id}, ${node.id})`;
     ctx.reranker = { rerank: async () => [] };
     const res = await search(ctx, "Quuxcorp", { includeFacts: false });
-    expect(res.passages.filter((p) => p.group === "graph").map((p) => p.chunkId)).toEqual([first.id]);
+    expect(res.passages.filter((p) => p.layers.includes("graph")).map((p) => p.chunkId)).toEqual([first.id]);
   });
 
   it("returns only facts that overlap the query or its detected entities, capped", async () => {
@@ -417,7 +534,7 @@ describe("search", () => {
     ctx.reranker = { rerank: async () => [] };
     const res = await search(ctx, "Alphagroup", { includeFacts: false });
     expect(res.entities.map((e) => e.id)).toEqual([a.id]);
-    expect(res.passages.filter((p) => p.group === "graph").map((p) => p.documentTitle)).toEqual(["Beta doc"]);
+    expect(res.passages.filter((p) => p.layers.includes("graph")).map((p) => p.title)).toEqual(["Beta doc"]);
   });
 
   it("returns a fact pointing at a detected entity ahead of term-only matches, also through a merge", async () => {

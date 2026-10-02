@@ -7,6 +7,7 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
+import { degradedNote, searchMode } from "./retrieve/contract.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -131,11 +132,11 @@ program
     await withCtx(async (ctx) => {
       const res = await search(ctx, query, { ...searchOptions(opts), client: "cli" });
       if (opts.json) return void console.log(JSON.stringify(res, null, 2));
-      const { searchMode } = await import("./mcp/render.js");
-      console.log(`mode: ${searchMode(res)}\n`);
-      if (res.usedFallback) console.log("(weak match: included raw substring hits)\n");
+      const note = degradedNote(res.degraded);
+      console.log(`mode: ${searchMode(res.degraded)}${note ? ` (${note})` : ""}\n`);
+      if (res.fallbackUsed) console.log("(weak match: included raw substring hits)\n");
       res.passages.forEach((p, i) => {
-        console.log(`[P${i + 1}] ${p.group} ${p.score.toFixed(3)} ${p.sourceKind}${p.documentTitle ? " · " + p.documentTitle : ""}`);
+        console.log(`[P${i + 1}] ${p.layers.join("+")} ${p.score === null ? "-" : p.score.toFixed(3)} ${p.sourceKind}${p.title ? " · " + p.title : ""}`);
         console.log(`     ${p.content.replace(/\s+/g, " ").slice(0, 240)}\n`);
       });
       if (res.documents.length) console.log("Documents: " + res.documents.map((d) => d.title ?? d.documentId).join(" | "));
@@ -155,7 +156,7 @@ program
     await withCtx(async (ctx) => {
       const { answer, result } = await ask(ctx, question, searchOptions(opts));
       console.log(answer + "\n");
-      result.passages.forEach((p, i) => console.log(`[P${i + 1}] ${p.sourceKind}${p.documentTitle ? " · " + p.documentTitle : ""} (${p.documentId})`));
+      result.passages.forEach((p, i) => console.log(`[P${i + 1}] ${p.sourceKind}${p.title ? " · " + p.title : ""} (${p.documentId})`));
       result.facts.forEach((f, i) => console.log(`[F${i + 1}] ${f.predicate}: ${f.objectText}`));
     });
   });

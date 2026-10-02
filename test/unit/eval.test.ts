@@ -1,30 +1,32 @@
 import { describe, it, expect } from "vitest";
 import { kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning, evalVoyageLine } from "../../src/eval/run.js";
 import type { GoldenItem } from "../../src/eval/golden.js";
-import type { SearchResult } from "../../src/retrieve/search.js";
+import type { Layer, SearchResult } from "../../src/retrieve/contract.js";
+import { passage, searchResult as baseResult } from "./search-fixture.js";
 
 const item: GoldenItem = {
   id: "q05", question: "Why?", kind: "semantic", negative: false, source: "fixture", approved_at: "2026-09-30",
   expected: [{ origin: "note--fairness-in-ml.md", quote: "cannot satisfy all three" }],
 };
 
-type P = { documentId: string; group: "hybrid" | "graph" | "fallback"; content: string; score: number; chunkId?: string | null };
+type P = { documentId: string; layers: Layer[]; content: string; score: number; chunkId?: string | null };
 
 function searchResult(passages: P[], degraded = false): SearchResult {
-  return {
+  return baseResult({
     query: "Why?",
-    passages: passages.map((p, i) => ({ chunkId: p.chunkId === undefined ? `c${i}` : p.chunkId, documentId: p.documentId, documentTitle: null, sourceKind: "note", author: "owner", content: p.content, parentContent: null, headingPath: [], charStart: 0, charEnd: 0, score: p.score, group: p.group })),
-    documents: [], entities: [], facts: [], usedFallback: false, topScore: passages[0]?.score ?? null, degraded,
-    degradedReason: degraded ? "embedding" : null, capReached: false,
-  };
+    passages: passages.map((p, i) => passage({ chunkId: p.chunkId === undefined ? `c${i}` : p.chunkId, documentId: p.documentId, content: p.content, score: p.score, layers: p.layers })),
+    topScore: passages[0]?.score ?? null,
+    mode: degraded ? "keyword-only" : "hybrid",
+    degraded: { embedding: degraded, rerank: degraded, capReached: false },
+  });
 }
 
 describe("toQuestionResult", () => {
   it("records ranked documents with origins, quote hits, top score and graph presence", () => {
     const res = searchResult([
-      { documentId: "d1", group: "hybrid", content: "Demographic parity asks that positive rates match.", score: 0.4 },
-      { documentId: "d2", group: "hybrid", content: "shows you cannot satisfy all three when base rates differ", score: 0.3 },
-      { documentId: "d3", group: "graph", content: "x", score: 0 },
+      { documentId: "d1", layers: ["vector"], content: "Demographic parity asks that positive rates match.", score: 0.4 },
+      { documentId: "d2", layers: ["vector"], content: "shows you cannot satisfy all three when base rates differ", score: 0.3 },
+      { documentId: "d3", layers: ["graph"], content: "x", score: 0 },
     ]);
     const origins = new Map([["d1", "/c/other.md"], ["d2", "/c/note--fairness-in-ml.md"], ["d3", null]]);
     const q = toQuestionResult(item, res, origins, 42, [], 2, [true]);
@@ -38,23 +40,23 @@ describe("toQuestionResult", () => {
     expect(firstExpectedRank(q)).toBe(2);
   });
   it("a passage counts as containing the quote only when it belongs to an expected document", () => {
-    const res = searchResult([{ documentId: "d1", group: "hybrid", content: "you cannot satisfy all three", score: 0.4 }]);
+    const res = searchResult([{ documentId: "d1", layers: ["vector"], content: "you cannot satisfy all three", score: 0.4 }]);
     const q = toQuestionResult(item, res, new Map([["d1", "/c/other.md"]]), 1, [], 1, []);
     expect(q.ranked[0].containsQuote).toBe(false);
   });
   it("matches quotes with whitespace runs collapsed on both sides", () => {
     const spaced: GoldenItem = { ...item, expected: [{ origin: "note--fairness-in-ml.md", quote: "cannot  satisfy\nall three" }] };
-    const res = searchResult([{ documentId: "d2", group: "hybrid", content: "you cannot\n\tsatisfy all   three here", score: 0.4 }]);
+    const res = searchResult([{ documentId: "d2", layers: ["vector"], content: "you cannot\n\tsatisfy all   three here", score: 0.4 }]);
     const q = toQuestionResult(spaced, res, new Map([["d2", "/c/note--fairness-in-ml.md"]]), 1, [], 1, []);
     expect(q.ranked[0].containsQuote).toBe(true);
   });
   it("a fallback window (no chunk) is never a relevant passage, since totalRelevant counts chunks", () => {
-    const res = searchResult([{ documentId: "d2", group: "fallback", content: "you cannot satisfy all three", score: 0, chunkId: null }]);
+    const res = searchResult([{ documentId: "d2", layers: ["fallback"], content: "you cannot satisfy all three", score: 0, chunkId: null }]);
     const q = toQuestionResult(item, res, new Map([["d2", "/c/note--fairness-in-ml.md"]]), 1, [], 1, []);
     expect(q.ranked[0].containsQuote).toBe(false);
   });
   it("rank is null on a miss", () => {
-    const q = toQuestionResult(item, searchResult([{ documentId: "d9", group: "hybrid", content: "x", score: 0.9 }]), new Map([["d9", "/c/z.md"]]), 1, [], 0, []);
+    const q = toQuestionResult(item, searchResult([{ documentId: "d9", layers: ["vector"], content: "x", score: 0.9 }]), new Map([["d9", "/c/z.md"]]), 1, [], 0, []);
     expect(firstExpectedRank(q)).toBeNull();
   });
   it("reads the source kind from the file name prefix", () => {
@@ -71,7 +73,7 @@ describe("normalizeWhitespace", () => {
   });
   it("an NBSP in a quote does not match a plain space in a passage", () => {
     const nbsp: GoldenItem = { ...item, expected: [{ origin: "note--fairness-in-ml.md", quote: "cannot\u00a0satisfy" }] };
-    const res = searchResult([{ documentId: "d2", group: "hybrid", content: "you cannot satisfy all three", score: 0.4 }]);
+    const res = searchResult([{ documentId: "d2", layers: ["vector"], content: "you cannot satisfy all three", score: 0.4 }]);
     expect(toQuestionResult(nbsp, res, new Map([["d2", "/c/note--fairness-in-ml.md"]]), 1, [], 1, []).ranked[0].containsQuote).toBe(false);
   });
 });

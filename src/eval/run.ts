@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { readInput } from "../ingest/readers.js";
 import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
+import { isDegraded } from "../retrieve/contract.js";
 import { parseGolden, type Expected, type GoldenItem } from "./golden.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
 import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
@@ -135,8 +136,8 @@ export function toQuestionResult(
     ranked,
     totalRelevant,
     topScore: res.topScore,
-    hasGraphPassage: res.passages.some((p) => p.group === "graph"),
-    degraded: res.degraded,
+    hasGraphPassage: res.passages.some((p) => p.layers.includes("graph")),
+    degraded: isDegraded(res.degraded),
     totalMs,
     paraphraseRanked,
     paraphraseDegraded,
@@ -207,7 +208,7 @@ export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
     const totalRelevant = await countRelevantPassages(ctx.sql, g.expected);
     const warning = missingQuoteWarning(g, totalRelevant);
     if (warning) console.error(warning);
-    results.push(toQuestionResult(g, main.res, origins, main.ms, paraphraseRanked, totalRelevant, paras.map((r) => r.degraded)));
+    results.push(toQuestionResult(g, main.res, origins, main.ms, paraphraseRanked, totalRelevant, paras.map((r) => isDegraded(r.degraded))));
   }
   const ranks: Record<string, number | null> = {};
   for (const r of results) if (!r.negative) ranks[r.id] = firstExpectedRank(r);

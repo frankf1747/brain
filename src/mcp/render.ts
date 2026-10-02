@@ -1,4 +1,5 @@
 import type { SearchResult } from "../retrieve/search.js";
+import { degradedNote } from "../retrieve/contract.js";
 import type { Orientation } from "../retrieve/orient.js";
 import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
@@ -8,35 +9,16 @@ import { voyageTodayLine } from "../llm/usage.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
-/** The one-line note for a degraded search, or null for a full hybrid search. */
-export function degradedNote(r: Pick<SearchResult, "degradedReason" | "capReached">): string | null {
-  switch (r.degradedReason) {
-    case "cap":
-      return "Voyage daily cap reached; keyword-only results";
-    case "embedding":
-      return "query embedding failed; keyword-only results";
-    case "rerank":
-      return r.capReached ? "Voyage daily cap reached; results in fused order" : "reranking failed; results in fused order";
-    default:
-      return null;
-  }
-}
-
-/** The search mode, as the CLI prints it on its `mode:` line. */
-export function searchMode(r: Pick<SearchResult, "degradedReason" | "capReached">): string {
-  return degradedNote(r) ?? "hybrid (vector and keyword, reranked)";
-}
-
 export function renderSearch(r: SearchResult): string {
   const out: string[] = [];
-  const note = degradedNote(r);
+  const note = degradedNote(r.degraded);
   if (note) out.push(`(${note})`);
-  if (r.usedFallback) out.push("(weak match: results include raw substring hits)\n");
+  if (r.fallbackUsed) out.push("(weak match: results include raw substring hits)\n");
   if (r.passages.length === 0) out.push("No passages matched.");
   r.passages.forEach((p, i) => {
     const where = p.chunkId ? `(document ${p.documentId}, chunk ${p.chunkId})` : `(document ${p.documentId})`;
-    const title = p.documentTitle ? ` · ${p.documentTitle}` : "";
-    out.push(`[P${i + 1}] ${p.group} · ${p.sourceKind} · author: ${p.author}${title} ${where}${p.headingPath.length ? `\n  ${p.headingPath.join(" > ")}` : ""}\n${p.content.trim()}\n`);
+    const title = p.title ? ` · ${p.title}` : "";
+    out.push(`[P${i + 1}] ${p.layers.join("+")} · ${p.sourceKind} · author: ${p.author}${title} ${where}${p.headingPath.length ? `\n  ${p.headingPath.join(" > ")}` : ""}\n${p.content.trim()}\n`);
   });
   if (r.documents.length) out.push("Documents by summary: " + r.documents.map((d) => `${d.title ?? "(untitled)"} [${d.sourceKind}] (document ${d.documentId})`).join("; "));
   for (const e of r.entities) {

@@ -6,7 +6,7 @@ export const ASK_SYSTEM =
 
 export function buildAskPrompt(question: string, result: SearchResult): string {
   const passages = result.passages
-    .map((p, i) => `[P${i + 1}] (${p.sourceKind}${p.documentTitle ? ": " + p.documentTitle : ""})\n${p.content}`)
+    .map((p, i) => `[P${i + 1}] (${p.sourceKind}${p.title ? ": " + p.title : ""})\n${p.content}`)
     .join("\n\n");
   const facts = result.facts
     .map((f, i) => `[F${i + 1}] ${f.predicate}: ${f.objectText}${f.verified ? "" : " (unverified)"}`)

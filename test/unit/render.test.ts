@@ -1,58 +1,50 @@
 import { describe, it, expect } from "vitest";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, degradedNote, searchMode } from "../../src/mcp/render.js";
+import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus } from "../../src/mcp/render.js";
+import { passage, fact, searchResult } from "./search-fixture.js";
 
 describe("renderSearch", () => {
   it("numbers passages with ids, lists entities, facts and the fallback notice", () => {
-    const text = renderSearch({
-      query: "q",
+    const text = renderSearch(searchResult({
       passages: [
-        { chunkId: "c1", documentId: "d1", documentTitle: "Doc", sourceKind: "news", author: "other", content: "Body text", parentContent: null, headingPath: ["H"], charStart: 0, charEnd: 9, score: 0.8, group: "hybrid" },
-        { chunkId: null, documentId: "d2", documentTitle: null, sourceKind: "note", author: "owner", content: "raw hit", parentContent: null, headingPath: [], charStart: 0, charEnd: 7, score: 0, group: "fallback" },
+        passage({ headingPath: ["H"] }),
+        passage({
+          chunkId: null, documentId: "d2", title: null, sourceKind: "note", author: "owner", content: "raw hit", score: null, scoreKind: "none",
+          layers: ["fallback"], vectorRank: null, keywordRank: null, rerankRank: null, fallbackTerm: "hit",
+        }),
       ],
       documents: [{ documentId: "d1", title: "Doc", sourceKind: "news", summary: "S", score: 0.1 }],
       entities: [{ id: "n1", type: "organization", name: "Acme", matchedSpan: "acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
-      facts: [{ id: "f1", predicate: "visa_status", objectText: "F-1", confidence: 1, verified: true, sourceChunkId: null }],
-      usedFallback: true,
-      topScore: 0.8,
-      degraded: false,
-      degradedReason: null,
-      capReached: false,
-    });
-    expect(text).toContain("[P1] hybrid · news · author: other · Doc (document d1, chunk c1)");
+      facts: [fact({ verified: true })],
+      fallbackUsed: true,
+      topScore: 0.76,
+    }));
+    expect(text).toContain("[P1] vector+keyword · news · author: other · Doc (document d1, chunk c1)");
     expect(text).toContain("[P2] fallback · note · author: owner (document d2)");
     expect(text).toContain("organization: Acme (node n1) — Austin (place)");
-    expect(text).toContain("[F1] visa_status: F-1 (verified)");
+    expect(text).toContain("[F1] visa_status: F-1 OPT (verified)");
     expect(text).toContain("weak match");
-    expect(text).not.toContain("embeddings unavailable");
   });
-  const empty = { query: "q", passages: [], documents: [], entities: [], facts: [], usedFallback: false, topScore: null };
 
   it("says so when nothing was found", () => {
-    expect(renderSearch({ ...empty, usedFallback: true, degraded: false, degradedReason: null, capReached: false })).toContain("No passages matched");
+    expect(renderSearch(searchResult({ fallbackUsed: true }))).toContain("No passages matched");
   });
 
   it("names which part of a degraded search fell back, on its own line near the top", () => {
     const cases = [
-      { degradedReason: "cap" as const, capReached: true, note: "Voyage daily cap reached; keyword-only results" },
-      { degradedReason: "embedding" as const, capReached: false, note: "query embedding failed; keyword-only results" },
-      { degradedReason: "rerank" as const, capReached: true, note: "Voyage daily cap reached; results in fused order" },
-      { degradedReason: "rerank" as const, capReached: false, note: "reranking failed; results in fused order" },
+      { degraded: { embedding: true, rerank: true, capReached: true }, note: "Voyage daily cap reached; keyword-only results" },
+      { degraded: { embedding: true, rerank: true, capReached: false }, note: "query embedding failed; keyword-only results" },
+      { degraded: { embedding: false, rerank: true, capReached: true }, note: "Voyage daily cap reached; results in fused order" },
+      { degraded: { embedding: false, rerank: true, capReached: false }, note: "reranking failed; results in fused order" },
     ];
     for (const c of cases) {
-      const r = { ...empty, degraded: true, degradedReason: c.degradedReason, capReached: c.capReached };
-      expect(degradedNote(r)).toBe(c.note);
-      expect(searchMode(r)).toBe(c.note);
-      const lines = renderSearch(r).split("\n");
+      const lines = renderSearch(searchResult({ degraded: c.degraded })).split("\n");
       expect(lines.indexOf(`(${c.note})`)).toBeGreaterThanOrEqual(0);
       expect(lines.indexOf(`(${c.note})`)).toBeLessThan(3);
-      expect(renderSearch(r)).not.toContain("embeddings unavailable");
     }
   });
 
-  it("prints no note for a full hybrid search, and the CLI mode says so", () => {
-    const r = { ...empty, degraded: false, degradedReason: null, capReached: false };
-    expect(degradedNote(r)).toBeNull();
-    expect(searchMode(r)).toBe("hybrid (vector and keyword, reranked)");
+  it("prints no degraded note for a hybrid search", () => {
+    expect(renderSearch(searchResult())).not.toMatch(/keyword-only results|fused order/);
   });
 });
 
