@@ -1,50 +1,114 @@
 import { describe, it, expect } from "vitest";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus } from "../../src/mcp/render.js";
+import {
+  renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
+} from "../../src/mcp/render.js";
 import { passage, fact, searchResult } from "./search-fixture.js";
 
+const graphPassage = passage({
+  chunkId: "c3", documentId: "d3", title: "Acme memo", sourceKind: "note", author: "owner", occurredAt: "2026-01-25T00:00:00.000Z",
+  content: "Graph body", score: null, scoreKind: "none", layers: ["graph"], vectorRank: null, keywordRank: null, rerankRank: null,
+  viaEntity: { id: "n1", name: "Acme" },
+});
+const fallbackPassage = passage({
+  chunkId: null, documentId: "d4", title: "Codes", sourceKind: "note", author: "unknown", occurredAt: null, content: "Order X-90 today",
+  charStart: 10, charEnd: 30, score: null, scoreKind: "none", layers: ["fallback"], vectorRank: null, keywordRank: null, rerankRank: null,
+  fallbackTerm: "X-90",
+});
+
+const fixture = searchResult({
+  fallbackUsed: true,
+  topScore: 0.76,
+  passages: [
+    passage({ headingPath: ["H", "Sub"] }),
+    passage({
+      chunkId: "c2", documentId: "d2", title: null, sourceKind: "note", author: "owner", occurredAt: null, content: "  Second body  ",
+      score: 0.41, layers: ["vector"], vectorRank: 1, keywordRank: null, rerankRank: 2,
+    }),
+    graphPassage,
+    fallbackPassage,
+  ],
+  documents: [{ documentId: "d1", title: "Doc", sourceKind: "news", summary: "S", score: 0.03 }],
+  entities: [{ id: "n1", type: "organization", name: "Acme", matchedSpan: "acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
+  facts: [
+    fact(),
+    fact({ id: "f2", predicate: "lives_in", objectText: "Austin", verified: true, verifiedBy: "agent:claude-code", sourceChunkId: null, sourceDocumentId: null, sourceKind: null }),
+    fact({ id: "f3", predicate: "prefers", objectText: "tea", sourceChunkId: null, sourceDocumentId: null, sourceKind: null }),
+  ],
+});
+
 describe("renderSearch", () => {
-  it("numbers passages with ids, lists entities, facts and the fallback notice", () => {
-    const text = renderSearch(searchResult({
-      passages: [
-        passage({ headingPath: ["H"] }),
-        passage({
-          chunkId: null, documentId: "d2", title: null, sourceKind: "note", author: "owner", content: "raw hit", score: null, scoreKind: "none",
-          layers: ["fallback"], vectorRank: null, keywordRank: null, rerankRank: null, fallbackTerm: "hit",
-        }),
-      ],
-      documents: [{ documentId: "d1", title: "Doc", sourceKind: "news", summary: "S", score: 0.1 }],
-      entities: [{ id: "n1", type: "organization", name: "Acme", matchedSpan: "acme", neighbors: [{ id: "n2", type: "place", name: "Austin", depth: 1 }] }],
-      facts: [fact({ verified: true })],
-      fallbackUsed: true,
-      topScore: 0.76,
-    }));
-    expect(text).toContain("[P1] vector+keyword · news · author: other · Doc (document d1, chunk c1)");
-    expect(text).toContain("[P2] fallback · note · author: owner (document d2)");
-    expect(text).toContain("organization: Acme (node n1) — Austin (place)");
-    expect(text).toContain("[F1] visa_status: F-1 OPT (verified)");
-    expect(text).toContain("weak match");
+  it("generates the whole text from the structure", () => {
+    expect(renderSearch(fixture)).toBe(
+      [
+        "retrieval r1 · mode: hybrid · 4 passages",
+        "(weak match: results include raw substring hits)",
+        "",
+        '[P1] 0.76 rerank · vector#2 keyword#5 · news · author: other · "Doc" · 2026-09-29 (doc d1, chunk c1)',
+        "  H > Sub",
+        "Body text",
+        "",
+        "[P2] 0.41 rerank · vector#1 · note · author: owner · (untitled) · undated (doc d2, chunk c2)",
+        "Second body",
+        "",
+        '[P3] - · graph via Acme · note · author: owner · "Acme memo" · 2026-01-25 (doc d3, chunk c3)',
+        "Graph body",
+        "",
+        '[P4] - · fallback "X-90" · note · author: unknown · "Codes" · undated (doc d4, chars 10–30)',
+        "Order X-90 today",
+        "",
+        "Documents by summary: Doc [news] (doc d1)",
+        'Entity organization: Acme (node n1, matched "acme") — Austin (place)',
+        "Facts about the owner:",
+        "[F1] visa_status: F-1 OPT (unverified · from note d9)",
+        "[F2] lives_in: Austin (verified · stated by owner)",
+        "[F3] prefers: tea (unverified · extracted; source passage no longer stored)",
+      ].join("\n"),
+    );
+  });
+
+  it("brief mode keeps every provenance line and cuts each passage to one line", () => {
+    const long = passage({ content: "word ".repeat(100) + "\n\nend" });
+    const text = renderSearch(searchResult({ passages: [long] }), { brief: true });
+    expect(text.split("\n")[0]).toBe("retrieval r1 · mode: hybrid · 1 passage");
+    expect(text).toContain(passageLine(long, 0));
+    const body = text.split("\n")[3];
+    expect(body.startsWith("     word word")).toBe(true);
+    expect(body.length).toBe(5 + 240);
+  });
+
+  it("states the mode exactly and keeps the four degraded notes on the line after the header", () => {
+    const cases = [
+      { degraded: { embedding: true, rerank: true, capReached: true }, mode: "keyword-only" as const, note: "Voyage daily cap reached; keyword-only results" },
+      { degraded: { embedding: true, rerank: true, capReached: false }, mode: "keyword-only" as const, note: "query embedding failed; keyword-only results" },
+      { degraded: { embedding: false, rerank: true, capReached: true }, mode: "fused-order" as const, note: "Voyage daily cap reached; results in fused order" },
+      { degraded: { embedding: false, rerank: true, capReached: false }, mode: "fused-order" as const, note: "reranking failed; results in fused order" },
+    ];
+    for (const c of cases) {
+      const lines = renderSearch(searchResult({ retrievalId: "r9", mode: c.mode, degraded: c.degraded })).split("\n");
+      expect(lines[0]).toBe(`retrieval r9 · mode: ${c.mode} · 0 passages`);
+      expect(lines[1]).toBe(`(${c.note})`);
+    }
+    const hybrid = renderSearch(searchResult()).split("\n");
+    expect(hybrid[0]).toBe("retrieval r1 · mode: hybrid · 0 passages");
+    expect(hybrid[1]).toBe("");
   });
 
   it("says so when nothing was found", () => {
-    expect(renderSearch(searchResult({ fallbackUsed: true }))).toContain("No passages matched");
+    expect(renderSearch(searchResult())).toContain("No passages matched.");
   });
 
-  it("names which part of a degraded search fell back, on its own line near the top", () => {
-    const cases = [
-      { degraded: { embedding: true, rerank: true, capReached: true }, note: "Voyage daily cap reached; keyword-only results" },
-      { degraded: { embedding: true, rerank: true, capReached: false }, note: "query embedding failed; keyword-only results" },
-      { degraded: { embedding: false, rerank: true, capReached: true }, note: "Voyage daily cap reached; results in fused order" },
-      { degraded: { embedding: false, rerank: true, capReached: false }, note: "reranking failed; results in fused order" },
-    ];
-    for (const c of cases) {
-      const lines = renderSearch(searchResult({ degraded: c.degraded })).split("\n");
-      expect(lines.indexOf(`(${c.note})`)).toBeGreaterThanOrEqual(0);
-      expect(lines.indexOf(`(${c.note})`)).toBeLessThan(3);
-    }
+  it("shows RRF scores with four decimals when reranking was skipped, and keyword ranks alone in keyword-only mode", () => {
+    const p = passage({ score: 1 / 61, scoreKind: "rrf", layers: ["keyword"], vectorRank: null, keywordRank: 1, rerankRank: null });
+    expect(scoreText(p)).toBe("0.0164 rrf");
+    expect(foundBy(p)).toBe("keyword#1");
+    expect(scoreText(graphPassage)).toBe("-");
+    expect(foundBy(graphPassage)).toBe("graph via Acme");
+    expect(foundBy(fallbackPassage)).toBe('fallback "X-90"');
   });
 
-  it("prints no degraded note for a hybrid search", () => {
-    expect(renderSearch(searchResult())).not.toMatch(/keyword-only results|fused order/);
+  it("factLine and searchHeader are what renderSearch prints", () => {
+    expect(factLine(fact(), 0)).toBe("[F1] visa_status: F-1 OPT (unverified · from note d9)");
+    expect(searchHeader(fixture)).toBe("retrieval r1 · mode: hybrid · 4 passages");
   });
 });
 

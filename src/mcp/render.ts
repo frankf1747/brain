@@ -1,5 +1,4 @@
-import type { SearchResult } from "../retrieve/search.js";
-import { degradedNote } from "../retrieve/contract.js";
+import { degradedNote, factSource, type FactRow, type LoggedPassage, type SearchResult } from "../retrieve/contract.js";
 import type { Orientation } from "../retrieve/orient.js";
 import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
@@ -9,23 +8,70 @@ import { voyageTodayLine } from "../llm/usage.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
-export function renderSearch(r: SearchResult): string {
-  const out: string[] = [];
+/** "0.76 rerank", "0.0328 rrf" (reranking skipped), or "-" for a passage with no score (graph and fallback). */
+export function scoreText(p: Pick<LoggedPassage, "score" | "scoreKind">): string {
+  if (p.score === null || p.scoreKind === "none") return "-";
+  return `${p.score.toFixed(p.scoreKind === "rrf" ? 4 : 2)} ${p.scoreKind}`;
+}
+
+/** How a passage was found: its rank in each branch, the entity it came through, or the literal term it contains. */
+export function foundBy(p: Pick<LoggedPassage, "layers" | "vectorRank" | "keywordRank" | "viaEntity" | "fallbackTerm">): string {
+  if (p.layers.includes("graph")) return `graph via ${p.viaEntity?.name ?? "an entity"}`;
+  if (p.layers.includes("fallback")) return `fallback "${p.fallbackTerm ?? ""}"`;
+  const ranks = [p.vectorRank !== null ? `vector#${p.vectorRank}` : null, p.keywordRank !== null ? `keyword#${p.keywordRank}` : null];
+  return ranks.filter((x): x is string => x !== null).join(" ");
+}
+
+/**
+ * One passage's provenance line: label, score and score kind, how it was found, source kind, author, title, date,
+ * and the ids to read it with (a fallback passage has no chunk, so its character window instead).
+ */
+export function passageLine(p: LoggedPassage, index: number): string {
+  const title = p.title ? `"${p.title}"` : "(untitled)";
+  const date = p.occurredAt ? p.occurredAt.slice(0, 10) : "undated";
+  const where = p.chunkId ? `(doc ${p.documentId}, chunk ${p.chunkId})` : `(doc ${p.documentId}, chars ${p.charStart}–${p.charEnd})`;
+  return `[P${index + 1}] ${scoreText(p)} · ${foundBy(p)} · ${p.sourceKind} · author: ${p.author} · ${title} · ${date} ${where}`;
+}
+
+/** One fact: verification state, and whether the extractor read it from a document or the owner stated it. */
+export function factLine(f: FactRow, index: number): string {
+  const src = factSource(f);
+  const from =
+    src.kind === "document" ? `from ${src.sourceKind} ${src.documentId}`
+    : src.kind === "owner" ? "stated by owner"
+    : "extracted; source passage no longer stored";
+  return `[F${index + 1}] ${f.predicate}: ${f.objectText} (${f.verified ? "verified" : "unverified"} · ${from})`;
+}
+
+/** First line of every search: the id brain_explain takes, the exact mode, and the passage count. */
+export function searchHeader(r: Pick<SearchResult, "retrievalId" | "mode" | "passages">): string {
+  const n = r.passages.length;
+  return `retrieval ${r.retrievalId} · mode: ${r.mode} · ${n} passage${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * The brain_search text, generated from the evidence contract alone. brief (the CLI's `brain search`) prints each
+ * passage as one line of at most 240 characters instead of its heading path and full text.
+ */
+export function renderSearch(r: SearchResult, opts: { brief?: boolean } = {}): string {
+  const out = [searchHeader(r)];
   const note = degradedNote(r.degraded);
   if (note) out.push(`(${note})`);
-  if (r.fallbackUsed) out.push("(weak match: results include raw substring hits)\n");
+  if (r.fallbackUsed) out.push("(weak match: results include raw substring hits)");
+  out.push("");
   if (r.passages.length === 0) out.push("No passages matched.");
   r.passages.forEach((p, i) => {
-    const where = p.chunkId ? `(document ${p.documentId}, chunk ${p.chunkId})` : `(document ${p.documentId})`;
-    const title = p.title ? ` · ${p.title}` : "";
-    out.push(`[P${i + 1}] ${p.layers.join("+")} · ${p.sourceKind} · author: ${p.author}${title} ${where}${p.headingPath.length ? `\n  ${p.headingPath.join(" > ")}` : ""}\n${p.content.trim()}\n`);
+    const body = opts.brief
+      ? `     ${p.content.replace(/\s+/g, " ").trim().slice(0, 240)}`
+      : `${p.headingPath.length ? `  ${p.headingPath.join(" > ")}\n` : ""}${p.content.trim()}`;
+    out.push(`${passageLine(p, i)}\n${body}\n`);
   });
-  if (r.documents.length) out.push("Documents by summary: " + r.documents.map((d) => `${d.title ?? "(untitled)"} [${d.sourceKind}] (document ${d.documentId})`).join("; "));
+  if (r.documents.length) out.push("Documents by summary: " + r.documents.map((d) => `${d.title ?? "(untitled)"} [${d.sourceKind}] (doc ${d.documentId})`).join("; "));
   for (const e of r.entities) {
     const n = e.neighbors.map((x) => `${x.name} (${x.type})`).join(", ") || "no neighbors";
-    out.push(`Entity ${e.type}: ${e.name} (node ${e.id}) — ${n}`);
+    out.push(`Entity ${e.type}: ${e.name} (node ${e.id}, matched "${e.matchedSpan}") — ${n}`);
   }
-  if (r.facts.length) out.push("Facts about the owner:\n" + r.facts.map((f, i) => `[F${i + 1}] ${f.predicate}: ${f.objectText} (${f.verified ? "verified" : "unverified"})`).join("\n"));
+  if (r.facts.length) out.push("Facts about the owner:\n" + r.facts.map(factLine).join("\n"));
   return out.join("\n");
 }
 
