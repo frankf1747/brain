@@ -58,6 +58,17 @@ describe("reserveTokens and settleReservation", () => {
     expect(await tokensToday(sql)).toBe(55);
   });
 
+  it("keeps an error that may have been billed at its estimate, and an ordinary error at 0", async () => {
+    const id = await reserveTokens(ledger(1000), call(35));
+    await settleReservation(sql, id, { error: "The operation was aborted due to timeout", maybeBilled: true });
+    expect(await rowById(id)).toMatchObject({ status: "error", tokens: null, error: "The operation was aborted due to timeout", finished: true });
+    expect(await tokensToday(sql)).toBe(35);
+    await seed("error", 40, 0);
+    expect(await tokensToday(sql)).toBe(35);
+    // Counted against the cap like any other spend.
+    await expect(reserveTokens(ledger(1000), call(966))).rejects.toThrow(/35 tokens counted today/);
+  });
+
   it("keeps a call at its estimate when Voyage reports no usage", async () => {
     const id = await reserveTokens(ledger(1000), call(25));
     await settleReservation(sql, id, { tokens: null });
@@ -92,7 +103,7 @@ describe("reserveTokens and settleReservation", () => {
     await expect(reserveTokens(ledger(1000), call(1))).rejects.toThrow(/Voyage daily token cap reached/);
   });
 
-  it("counts today's ok and reserved rows, stale reservations at their estimate, and nothing else", async () => {
+  it("counts today's ok, reserved and error rows, stale reservations at their estimate, and nothing else", async () => {
     await seed("ok", 10, 100);
     await seed("reserved", 20, null);
     // A reservation whose process died mid-call: still counted, at its estimate. Kept inside today near 00:00 UTC.

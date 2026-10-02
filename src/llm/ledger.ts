@@ -34,8 +34,13 @@ export interface MeteredCall {
   estimatedTokens: number;
 }
 
-/** How a reservation ends: Voyage's token count (null: none reported, keep the estimate), or an error at 0 tokens. */
-export type Settlement = { tokens: number | null; error?: string } | { error: string };
+/**
+ * How a reservation ends: Voyage's token count (null: none reported, keep the estimate), or an error. An error is
+ * stored at 0 tokens (an HTTP error status: Voyage does not bill it), or with `maybeBilled` at null tokens, which
+ * brain.provider_tokens_today counts at the estimate (fetch threw: a timeout or a dropped connection may come after
+ * Voyage processed and billed the request).
+ */
+export type Settlement = { tokens: number | null; error?: string } | { error: string; maybeBilled?: boolean };
 
 /** A row still `reserved` after this long belongs to a process that died mid-call. It keeps counting at its estimate. */
 export const STALE_RESERVATION_MINUTES = 10;
@@ -93,7 +98,7 @@ export async function settleReservation(sql: Db, id: string, outcome: Settlement
   } else {
     await sql`
       update brain.provider_usage
-      set status = 'error', tokens = 0, error = ${outcome.error.slice(0, 1000)}, finished_at = now()
+      set status = 'error', tokens = ${outcome.maybeBilled ? null : 0}::int, error = ${outcome.error.slice(0, 1000)}, finished_at = now()
       where id = ${id}::bigint and status = 'reserved'`;
   }
 }

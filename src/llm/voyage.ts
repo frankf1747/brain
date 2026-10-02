@@ -34,6 +34,11 @@ export interface VoyageOptions {
   maxRateLimitAttempts?: number;
   /** Total calls allowed across 5xx responses and network errors (default 4). */
   maxAttempts?: number;
+  /**
+   * Milliseconds one HTTP attempt may take before it is aborted (AbortSignal.timeout; default 120 s, query clients
+   * 30 s). A timed-out attempt is a thrown fetch: retried like a network error and counted at its estimate.
+   */
+  requestTimeoutMs?: number;
   /** Most total time one call may sleep between attempts; a wait that would pass it gives up instead (default unlimited). */
   maxTotalWaitMs?: number;
   /**
@@ -47,6 +52,10 @@ export interface VoyageOptions {
 const MAX_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_ATTEMPTS = 6;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
+/** Ingest requests carry up to 128 chunks, so they get a generous timeout. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+/** Query-time clients (src/ctx.ts): a single query or one rerank should never take 30 s. */
+export const QUERY_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * Query-time clients (src/ctx.ts): 3 attempts and at most 10 s of backoff in total, so a search degrades quickly
@@ -101,6 +110,11 @@ export class VoyageClient implements Embedder, Reranker {
   /** The ledger this client records and caps its calls in, or null for an unmetered test client. */
   get ledger(): VoyageLedger | null {
     return this.opts.ledger ?? null;
+  }
+
+  /** How long one HTTP attempt may take before it is aborted. */
+  get requestTimeoutMs(): number {
+    return this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   /** The attempt and wait limits this client applies to one call. */
@@ -184,20 +198,24 @@ export class VoyageClient implements Embedder, Reranker {
     let failures = 0;
     let rateLimits = 0;
     for (;;) {
-      // Each attempt is its own reservation: a retry re-checks the cap, and a failed attempt settles at 0 tokens.
+      // Each attempt is its own reservation: a retry re-checks the cap. A 429 or 5xx settles at 0 tokens (Voyage
+      // does not bill them); a thrown fetch keeps counting at its estimate.
       const reservation = await this.reserve(call);
-      const init = {
+      const init: RequestInit = {
         method: "POST",
         headers: { "content-type": "application/json", authorization },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
       };
       let res: Response;
       try {
         res = await fetchFn(`${BASE}${path}`, init);
       } catch (err) {
-        // Network failure (DNS, reset, "fetch failed"): retry with backoff like a 5xx.
+        // Network failure (DNS, reset, "fetch failed") or our timeout: retry with backoff like a 5xx. Voyage may
+        // already have processed and billed the request (a timeout waiting for headers, a connection dropped
+        // after processing), so the attempt keeps counting at its estimate.
         lastError = err instanceof Error ? err : new Error(String(err));
-        await this.settle(reservation, { error: lastError.message });
+        await this.settle(reservation, { error: lastError.message, maybeBilled: true });
         if (++failures >= maxAttempts) throw lastError;
         if (!(await pause(delay * 2 ** (failures - 1)))) throw lastError;
         continue;
@@ -219,7 +237,8 @@ export class VoyageClient implements Embedder, Reranker {
         await this.settle(reservation, { tokens });
         return body;
       }
-      const text = await res.text();
+      // The body can fail to arrive (timeout, reset); the status is what matters here.
+      const text = await res.text().catch(() => "");
       lastError = new Error(`Voyage ${path} returned ${res.status}: ${text.slice(0, 200)}`);
       await this.settle(reservation, { error: lastError.message });
       if (res.status === 429) {

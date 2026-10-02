@@ -115,3 +115,40 @@ describe("VoyageClient with a ledger", () => {
     expect(await rows()).toEqual([]);
   });
 });
+
+describe("VoyageClient with a ledger when fetch throws", () => {
+  it("counts a thrown fetch at its estimate: Voyage may have processed and billed it", async () => {
+    let n = 0;
+    const fn = (async () => {
+      n++;
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, retryDelayMs: 1, maxAttempts: 2, ledger: ledger(1000) });
+    await expect(client.embed(["abcdefgh"], "document")).rejects.toThrow(/fetch failed/);
+    expect(n).toBe(2);
+    expect((await rows()).map((r) => [r.status, r.estimated_tokens, r.tokens, r.error, r.finished])).toEqual([
+      ["error", 2, null, "fetch failed", true],
+      ["error", 2, null, "fetch failed", true],
+    ]);
+    expect(await tokensToday(sql)).toBe(4);
+  });
+
+  it("counts a timed-out request at its estimate, and a 5xx after it at 0", async () => {
+    let n = 0;
+    const fn = ((_url: string, init: RequestInit) => {
+      n++;
+      if (n > 1) return Promise.resolve(new Response(JSON.stringify({ detail: "busy" }), { status: 503 }));
+      // Never answers; rejects with the signal's reason when the client's timeout aborts it.
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal!.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }) as unknown as typeof fetch;
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, retryDelayMs: 1, maxAttempts: 2, requestTimeoutMs: 20, ledger: ledger(1000) });
+    await expect(client.rerank("q", ["abcd"], 1)).rejects.toThrow(/503/);
+    const [timedOut, busy] = await rows();
+    expect(timedOut).toMatchObject({ status: "error", tokens: null, estimated_tokens: estimateRerankTokens("q", ["abcd"]), finished: true });
+    expect(timedOut.error).toMatch(/timeout|aborted/i);
+    expect(busy).toMatchObject({ status: "error", tokens: 0 });
+    expect(await tokensToday(sql)).toBe(estimateRerankTokens("q", ["abcd"]));
+  });
+});

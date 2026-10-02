@@ -35,6 +35,18 @@ describe("makeCtx", () => {
     }
   });
 
+  it("times out query requests after 30 s and ingest requests after 120 s", async () => {
+    const ctx = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false });
+    try {
+      expect((ctx.queryEmbedder as VoyageClient).requestTimeoutMs).toBe(30_000);
+      expect((ctx.queryReranker as VoyageClient).requestTimeoutMs).toBe(30_000);
+      expect((ctx.embedder as VoyageClient).requestTimeoutMs).toBe(120_000);
+      expect((ctx.reranker as VoyageClient).requestTimeoutMs).toBe(120_000);
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
   it("labels CLI spend cli by default, and the eval's spend eval in brain_eval's ledger", async () => {
     const cli = makeCtx({ databaseUrl: UNUSED_DB, obsidian: false });
     const ev = makeEvalCtx();

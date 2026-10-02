@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { VoyageClient, FakeEmbedder, FakeReranker, hashVector, estimateEmbedTokens, estimateRerankTokens, usageTokens, QUERY_RETRY_BUDGET } from "../../src/llm/voyage.js";
+import { VoyageClient, FakeEmbedder, FakeReranker, hashVector, estimateEmbedTokens, estimateRerankTokens, usageTokens, QUERY_RETRY_BUDGET, QUERY_REQUEST_TIMEOUT_MS } from "../../src/llm/voyage.js";
 
 function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
   const calls: { url: string; body: any }[] = [];
@@ -327,5 +327,48 @@ describe("query-time retry budget", () => {
     const fn = (async () => new Response("{}")) as unknown as typeof fetch;
     expect(new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalWaitMs: 10_000 });
     expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalWaitMs: Infinity });
+  });
+});
+
+describe("request timeout", () => {
+  it("is 120 s by default (ingest) and 30 s for the query clients", () => {
+    const fn = (async () => new Response("{}")) as unknown as typeof fetch;
+    expect(QUERY_REQUEST_TIMEOUT_MS).toBe(30_000);
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).requestTimeoutMs).toBe(120_000);
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn, requestTimeoutMs: QUERY_REQUEST_TIMEOUT_MS }).requestTimeoutMs).toBe(30_000);
+  });
+
+  it("sends every attempt with its own abort signal", async () => {
+    const signals: AbortSignal[] = [];
+    let n = 0;
+    const fn = (async (_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      return ++n === 1
+        ? new Response("{}", { status: 503 })
+        : new Response(JSON.stringify({ data: [{ index: 0, embedding: [1] }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await new VoyageClient({ apiKey: "k", fetchFn: fn, sleep: async () => {} }).embed(["a"], "query");
+    expect(signals).toHaveLength(2);
+    for (const s of signals) {
+      expect(s).toBeInstanceOf(AbortSignal);
+      expect(s.aborted).toBe(false);
+    }
+    expect(signals[0]).not.toBe(signals[1]);
+  });
+
+  it("aborts a request that outlives the timeout and retries it like a network error", async () => {
+    let n = 0;
+    const fn = ((_url: string, init: RequestInit) => {
+      n++;
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal!.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }) as unknown as typeof fetch;
+    const waits: number[] = [];
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, requestTimeoutMs: 20, maxAttempts: 2, retryDelayMs: 5, sleep: async (ms) => void waits.push(ms) });
+    const err = await client.embed(["a"], "query").catch((e: unknown) => e);
+    expect((err as Error).name).toBe("TimeoutError");
+    expect(n).toBe(2);
+    expect(waits).toEqual([5]);
   });
 });
