@@ -68,6 +68,16 @@ Done when: `brain_search` output shows mode, scores, layers and author on every 
 
 ---
 
+Follow-ups from the Phase 4 final review (not blocking):
+- Measure one k=30 `brain_search` on the real KB in Claude Code: text plus `structuredContent` (which repeats passage text) can approach the MCP output limit when graph passages are added. If it does, drop `content` from `structuredContent` or lower the k cap.
+- `renderExplain` pre-v2 rows: `topScore.toFixed(2)` shows an RRF value 0.0164 as 0.02; use 4 decimals below 0.05.
+- `explain.ts`: `safeParse` the log row so a future required contract field cannot break explaining older rows.
+- Titles that contain quotes render with doubled quotes (`""I thought…"`); strip or escape them in `passageLine`/`explainLine`.
+- README example block omits passage bodies and the "Facts about the owner:" heading; README eval paragraph still quotes the first baseline's p50.
+- `retrieval_log` grows about 6 KB per search with no retention policy.
+
+---
+
 ## Phase 5: Deterministic citation verification (spec §7)
 
 | # | Task | Files | Tests that prove it |
