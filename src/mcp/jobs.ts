@@ -1,5 +1,5 @@
 import type { Ctx } from "../ctx.js";
-import { runPipeline, MAX_CONCURRENT_PIPELINES, type PipelineResult } from "../ingest/pipeline.js";
+import { runPipeline, MAX_CONCURRENT_PIPELINES, DEFERRED_MESSAGE, type PipelineResult } from "../ingest/pipeline.js";
 
 /**
  * Background pipelines this manager runs at once. One core slot stays free so a foreground
@@ -7,7 +7,10 @@ import { runPipeline, MAX_CONCURRENT_PIPELINES, type PipelineResult } from "../i
  */
 export const BACKGROUND_SLOTS = Math.max(1, MAX_CONCURRENT_PIPELINES - 1);
 
-const utcDay = () => new Date().toISOString().slice(0, 10);
+export interface JobManagerOptions {
+  /** The clock the UTC day is read from (tests). */
+  now?: () => Date;
+}
 
 /** Runs post-chunk pipeline stages in the background inside the server process. */
 export class JobManager {
@@ -25,7 +28,12 @@ export class JobManager {
   constructor(
     private readonly ctx: Ctx,
     private readonly log: (message: string) => void = (m) => process.stderr.write(m + "\n"),
+    private readonly opts: JobManagerOptions = {},
   ) {}
+
+  private utcDay(): string {
+    return (this.opts.now?.() ?? new Date()).toISOString().slice(0, 10);
+  }
 
   /** Queued and running document ids. */
   get pending(): string[] {
@@ -41,12 +49,15 @@ export class JobManager {
   private pump(): void {
     while (this.running.size < BACKGROUND_SLOTS && this.queue.length > 0) {
       const documentId = this.queue.shift()!;
-      const voyageBlocked = this.voyageBlockedDay === utcDay();
+      const voyageBlocked = this.voyageBlockedDay === this.utcDay();
       const run = runPipeline(this.ctx, documentId, { voyageBlocked })
         .then((r) => {
           if (r.spendCap) {
-            if (this.voyageBlockedDay !== utcDay()) {
-              this.voyageBlockedDay = utcDay();
+            // Only a real refusal blocks the day. A deferred result never asked the ledger, and one started blocked
+            // yesterday that returns after 00:00 UTC must not block today.
+            const day = this.utcDay();
+            if (r.error !== DEFERRED_MESSAGE && this.voyageBlockedDay !== day) {
+              this.voyageBlockedDay = day;
               this.log(`brain: Voyage daily cap reached (${r.error}); queued documents stop before embedding until 00:00 UTC, then brain retry or the next brain_ingest resumes them`);
             }
           } else if (r.error && !r.skipped) {

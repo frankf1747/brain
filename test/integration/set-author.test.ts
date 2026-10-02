@@ -103,28 +103,50 @@ describe("setAuthor", () => {
     expect(notified).toBe(0);
   });
 
-  it("leaves the job at extracted with the error when re-resolving fails, so a retry finishes it", async () => {
+  it("changes nothing when the re-resolve's embedding fails, so setting the author again finishes it", async () => {
     const ctx = fakeCtx(sql, handler);
     const { id } = await ingest(ctx, { text: body, sourceKind: "note", author: "other" });
     expect(await selfFacts()).toEqual([]);
     const working = ctx.embedder;
     ctx.embedder = { embed: async () => { throw new Error("embedder down"); } } as unknown as typeof ctx.embedder;
 
-    await expect(setAuthor(ctx, id, "owner")).rejects.toThrow(
-      "author changed to owner but re-resolving failed: embedder down; run `brain retry` to finish",
-    );
+    await expect(setAuthor(ctx, id, "owner")).rejects.toThrow("author not changed (still other): embedder down");
     const [job] = await sql<{ stage: string; error: string | null; attempts: number }[]>`
       select stage, error, attempts from brain.ingest_jobs where document_id = ${id}`;
-    expect(job).toMatchObject({ stage: "extracted", error: "embedder down", attempts: 1 });
+    expect(job).toMatchObject({ stage: "done", error: null, attempts: 0 });
     const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${id}`;
-    expect(doc.author).toBe("owner");
+    expect(doc.author).toBe("other");
+    expect(await selfFacts()).toEqual([]);
 
     ctx.embedder = working;
-    expect(await runPipeline(ctx, id)).toMatchObject({ stage: "done", error: null });
+    expect(await setAuthor(ctx, id, "owner")).toMatchObject({ previous: "other", author: "owner", reresolved: true });
     expect(await selfFacts()).toEqual(["has_experience_with", "recommends", "view_on"]);
     expect(await selfEdges()).toEqual(["Databricks cost governance"]);
-    const [done] = await sql<{ error: string | null }[]>`select error from brain.ingest_jobs where document_id = ${id}`;
-    expect(done.error).toBeNull();
+    const [done] = await sql<{ stage: string; error: string | null }[]>`select stage, error from brain.ingest_jobs where document_id = ${id}`;
+    expect(done).toMatchObject({ stage: "done", error: null });
+  });
+
+  it("owner -> other with Voyage failing keeps the author and the owner's facts current, and leaves the job alone", async () => {
+    const ctx = fakeCtx(sql, handler);
+    const { id } = await ingest(ctx, { text: body, sourceKind: "note" });
+    expect(await selfFacts()).toEqual(["has_experience_with", "recommends", "view_on"]);
+    ctx.embedder = {
+      embed: async () => { throw new Error("Voyage /embeddings returned 500: internal error"); },
+    } as unknown as typeof ctx.embedder;
+
+    await expect(setAuthor(ctx, id, "other")).rejects.toThrow(
+      "author not changed (still owner): Voyage /embeddings returned 500: internal error",
+    );
+    const current = await sql<{ predicate: string }[]>`
+      select f.predicate from brain.facts f join brain.nodes n on n.id = f.subject_id
+      where n.is_self and f.superseded_by is null order by f.predicate`;
+    expect(current.map((r) => r.predicate)).toEqual(["has_experience_with", "recommends", "view_on"]);
+    expect(await selfEdges()).toEqual(["Databricks cost governance"]);
+    const [doc] = await sql<{ author: string }[]>`select author from brain.documents where id = ${id}`;
+    expect(doc.author).toBe("owner");
+    const [job] = await sql<{ stage: string; error: string | null; attempts: number }[]>`
+      select stage, error, attempts from brain.ingest_jobs where document_id = ${id}`;
+    expect(job).toMatchObject({ stage: "done", error: null, attempts: 0 });
   });
 
   it("lists the facts it kept because the owner corrected them, and does not report them as added", async () => {
