@@ -46,6 +46,16 @@ describe("brain MCP server", () => {
     await ro.close();
   });
 
+  it("brain_orient reports today's Voyage tokens against the cap", async () => {
+    await sql`
+      insert into brain.provider_usage (provider, operation, model, requests, estimated_tokens, tokens, status, client)
+      values ('voyage', 'embed_query', 'voyage-test', 1, 1000, 1234, 'ok', 'test')`;
+    const s = await connect();
+    const orient = await s.call("brain_orient");
+    expect(orient.text).toMatch(/Voyage today: 1,234 of [\d,]+ tokens/);
+    await s.close();
+  });
+
   it("records who wrote a saved document and shows it when reading it", async () => {
     const s = await connect();
     const other = await s.call("brain_ingest", { text: "I think Databricks costs too much.", source_kind: "note", author: "other" });

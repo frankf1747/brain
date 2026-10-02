@@ -5,6 +5,47 @@ import { fileURLToPath } from "node:url";
 // quiet: dotenv 17 otherwise logs to stdout, which would corrupt an MCP stdio stream.
 dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)), quiet: true });
 
+export const DEFAULT_VOYAGE_DAILY_TOKEN_CAP = 5_000_000;
+/** brain_eval's own daily cap (BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP), separate from the real base's. */
+export const DEFAULT_EVAL_VOYAGE_DAILY_TOKEN_CAP = 1_000_000;
+
+/**
+ * A daily Voyage token cap from .env (BRAIN_VOYAGE_DAILY_TOKEN_CAP by default; `name` and `fallback` serve the
+ * eval's BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP): whole tokens per UTC day (underscores allowed). Unset or empty means
+ * the default; 0 blocks every Voyage call. There is no value that turns the cap off, and anything unreadable stops
+ * the process at startup, so a typo can never lift the cap.
+ */
+export function parseTokenCap(
+  raw: string | undefined,
+  name = "BRAIN_VOYAGE_DAILY_TOKEN_CAP",
+  fallback = DEFAULT_VOYAGE_DAILY_TOKEN_CAP,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const s = raw.trim().replace(/_/g, "");
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isSafeInteger(n)) {
+    throw new Error(`${name} must be a whole number of tokens per UTC day (0 blocks every Voyage call); got "${raw}"`);
+  }
+  return n;
+}
+
+/** A USD-per-million-tokens price from .env. Unset or empty means 0, which prints tokens only. */
+export function parsePrice(name: string, raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 0;
+  const s = raw.trim();
+  if (!/^\d+(\.\d+)?$/.test(s)) throw new Error(`${name} must be a non-negative number of US dollars per million tokens; got "${raw}"`);
+  return Number(s);
+}
+
+export const VOYAGE_CAP_NAME = "BRAIN_VOYAGE_DAILY_TOKEN_CAP";
+export const EVAL_VOYAGE_CAP_NAME = "BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP";
+
+/** The daily Voyage token cap a database is held to, and the .env variable that sets it (named in messages). */
+export interface VoyageCap {
+  tokens: number;
+  name: string;
+}
+
 export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
@@ -16,6 +57,17 @@ export const config = {
   voyageApiKey: process.env.VOYAGE_API_KEY ?? "",
   voyageEmbedModel: process.env.VOYAGE_EMBED_MODEL ?? "voyage-4-large",
   voyageRerankModel: process.env.VOYAGE_RERANK_MODEL ?? "rerank-2.5",
+  /** Hard cap on Voyage tokens per UTC day, enforced before every request by src/llm/ledger.ts. */
+  voyageDailyTokenCap: parseTokenCap(process.env.BRAIN_VOYAGE_DAILY_TOKEN_CAP),
+  /** brain_eval's own daily cap (makeEvalCtx). Voyage bills the account, so its daily ceiling is both caps together. */
+  evalVoyageDailyTokenCap: parseTokenCap(
+    process.env.BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP,
+    EVAL_VOYAGE_CAP_NAME,
+    DEFAULT_EVAL_VOYAGE_DAILY_TOKEN_CAP,
+  ),
+  /** US dollars per million tokens, copied from Voyage's pricing page into .env; 0 prints tokens only. */
+  voyagePricePerMTokEmbed: parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED", process.env.BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED),
+  voyagePricePerMTokRerank: parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK", process.env.BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK),
   obsidianVaultPath: process.env.OBSIDIAN_VAULT_PATH ?? "/Users/frankfu/Documents/Obsidian/General",
   obsidianFolder: process.env.OBSIDIAN_FOLDER || "Brain", // empty means unset
   embeddingDimensions: 1024,
@@ -40,3 +92,19 @@ export const config = {
   /** Predicates that hold one current value: a newer statement in an owner document supersedes the older (spec §4.4). */
   singleValuedPredicates: ["lives_in", "visa_status", "targeting_role", "pursuing_degree", "employment_status", "current_employer", "phone", "email"],
 } as const;
+
+/**
+ * The cap for the database at `databaseUrl`: a database whose name ends in _eval (brain_eval) is held to
+ * BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP whichever command opened it; every other database to BRAIN_VOYAGE_DAILY_TOKEN_CAP.
+ */
+export function voyageCapFor(databaseUrl: string): VoyageCap {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(databaseUrl).pathname.replace(/^\//, ""));
+  } catch {
+    // An unparseable URL fails at connect; it is never the eval database.
+  }
+  return name.endsWith("_eval")
+    ? { tokens: config.evalVoyageDailyTokenCap, name: EVAL_VOYAGE_CAP_NAME }
+    : { tokens: config.voyageDailyTokenCap, name: VOYAGE_CAP_NAME };
+}

@@ -17,9 +17,21 @@ Local Supabase uses ports 55320-55329 (set in `supabase/config.toml`) because th
 
 To use a hosted Supabase project instead: create the project, run `supabase link --project-ref <ref>` and `supabase db push`, then set `DATABASE_URL` in `.env` to the project's direct connection string.
 
-### Voyage rate limit
+### Voyage spending cap
 
-The Voyage free tier without a payment method allows 3 requests per minute. The client waits out 429 responses (messages are printed on stderr), so ingestion and search are slow until a payment method is added to the Voyage account.
+Every Voyage request (passage and summary embeddings, entity-name embeddings during resolve, query embeddings, reranking) is recorded in `brain.provider_usage` and counted against a hard daily cap: `BRAIN_VOYAGE_DAILY_TOKEN_CAP` tokens per UTC day, default 5,000,000. Before each request the client reserves its estimated tokens (characters / 4) under a database lock and refuses the request without sending it when today's total plus the estimate would pass the cap; after the response it records Voyage's own `usage.total_tokens`. A request Voyage answers with an error status is recorded at 0 tokens; a request that times out or whose connection drops counts at its estimate, since Voyage may have processed and billed it. A retry is a request of its own. `0` blocks every call. **There is no setting that turns the cap off**, and a value that is not a whole number stops the program at startup, so a typo can never lift it.
+
+When the cap is reached:
+- Ingestion stores, chunks and summarizes as usual and stops before embedding (or before resolving); `brain status` shows `spend_cap: …` on those jobs, and no retry attempt is used up. After the first refusal the rest of a batch stops before its Voyage stages without asking again. `brain retry` (or the next `brain_ingest`, which resumes stalled jobs) finishes them after 00:00 UTC, or at once after raising the cap.
+- Search returns keyword-only results and says "Voyage daily cap reached; keyword-only results" (or "…; results in fused order" when only the rerank was refused).
+
+`npm run brain -- usage [--days 30]` prints requests, tokens, refused calls and errors per UTC day and operation, today's tokens against the cap, and an estimated cost once `BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED` and `BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK` are set from Voyage's pricing page (default 0: tokens only). `brain_orient` shows today's tokens against the cap (or "Voyage ledger unavailable" on a database without migration 010).
+
+How far past the cap a day can go: settled calls count their real tokens, so the only overshoot comes from calls in flight when the cap is reached, which were admitted at their characters / 4 estimate. On measured data that estimate was within about 4% for English; for non-English or code-heavy text it can undercount 2–4×. The worst case is roughly (number of concurrent callers) × (largest batch estimate) × (estimate error): tens of thousands of tokens for English, more for other text. The overshoot never grows over the day, because every later reservation sees the settled totals.
+
+The ledger lives in each database: the real knowledge base and `brain_eval` each count and cap their own calls. The eval database has its own cap, `BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP` (default 1,000,000, read the same way); any database whose name ends in `_eval` is held to it, whichever command opens it. Voyage bills the account, so **the account-wide daily ceiling is `BRAIN_VOYAGE_DAILY_TOKEN_CAP` plus `BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP`** (6,000,000 tokens with the defaults), plus the in-flight overshoot, and the cap of any other database using the same key. Running processes read the caps when they start: restart the MCP server after changing them. A request in flight when its process dies stays counted at its estimate for the rest of the day.
+
+Each Voyage request times out after 8 seconds for search and 120 seconds for ingestion. Search sends at most 3 HTTP requests per Voyage call (rate limits, server errors and timeouts share that count) and waits at most 10 seconds in total between them, then falls back; ingestion waits out rate limits (up to 6 attempts, at most 60 s per wait).
 
 ## Commands
 
@@ -27,6 +39,7 @@ The Voyage free tier without a payment method allows 3 requests per minute. The 
 npm run brain -- ingest <file|dir|url|-> [--kind note] [--author owner|other|unknown] [--title T] [--occurred-at 2026-01-01] [--meta k=v] [--until chunked]
 npm run brain -- status
 npm run brain -- retry [--stage embedded]
+npm run brain -- usage [--days 30]
 npm run brain -- search "<query>" [--kind news note] [--since 2026-01-01] [--until 2026-12-31] [--verified] [-k 10] [--json]
 npm run brain -- ask "<question>"
 npm run brain -- node "<name or id>"
@@ -41,7 +54,7 @@ npm run brain -- backfill [--limit 500] [--poll 30]
 
 - `npm run test:unit` needs nothing.
 - `npm run test:int` needs `npm run db:start`. It recreates a separate `brain_test` database from the migrations and runs there with fakes for Claude and Voyage, so your real knowledge base is never touched. The test helper refuses any database whose name does not end in `_test`.
-- The retrieval eval runs only against `brain_eval` and checks the live connection before any write (`npm run eval:prepare` creates it from the migrations; `--reset` recreates it). `npm run brain -- eval ingest` loads `eval/corpus`; `npm run eval:run` scores `eval/golden.jsonl` and compares with `eval/baseline.json`; `npm run eval:gate` exits 1 on a regression (recall@10 or MRR down more than 0.02, abstention down, any degraded search, a changed golden set, or no baseline). After a deliberate change, `npm run brain -- eval run --accept` records the new baseline. `eval:prepare` only creates `brain_eval`; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. Metrics: set recall@1/5/10 over the top-k passages, MRR over distinct documents, nDCG@10 against all quote-bearing passages, paraphrase consistency, abstention and false-answer rate on negatives, degraded fraction, nearest-rank latency. Baseline on 2026-09-30 (commit `2b3426d`, before any retrieval change): recall@1 0.79, recall@10 1.00, MRR 1.00, p50 236 ms, 0% degraded, 14 questions over 6 documents. The set is small and has no negatives yet, so treat it as a regression check until Phase 6 of `docs/superpowers/specs/2026-09-30-retrieval-hardening-design.md` grows it.
+- The retrieval eval runs only against `brain_eval` and checks the live connection before any write (`npm run eval:prepare` creates it from the migrations; `--reset` recreates it). `npm run brain -- eval ingest` loads `eval/corpus`; `npm run eval:run` scores `eval/golden.jsonl` and compares with `eval/baseline.json`; `npm run eval:gate` exits 1 on a regression (recall@10 or MRR down more than 0.02, abstention down, any degraded search, a changed golden set, or no baseline). Each run also prints `voyage tokens=… requests=… refused=…`: the Voyage tokens that run used, from `brain_eval`'s own ledger and cap (not part of the baseline). After a deliberate change, `npm run brain -- eval run --accept` records the new baseline. `eval:prepare` only creates `brain_eval`; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. Metrics: set recall@1/5/10 over the top-k passages, MRR over distinct documents, nDCG@10 against all quote-bearing passages, paraphrase consistency, abstention and false-answer rate on negatives, degraded fraction, nearest-rank latency. Baseline on 2026-09-30 (commit `2b3426d`, before any retrieval change): recall@1 0.79, recall@10 1.00, MRR 1.00, p50 236 ms, 0% degraded, 14 questions over 6 documents. The set is small and has no negatives yet, so treat it as a regression check until Phase 6 of `docs/superpowers/specs/2026-09-30-retrieval-hardening-design.md` grows it.
 
 ## Layout
 

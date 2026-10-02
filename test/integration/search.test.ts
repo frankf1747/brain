@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
-import { testDb, wipe, fakeCtx } from "./helpers.js";
+import { testDb, wipe, fakeCtx, meteredVoyage } from "./helpers.js";
 import { ingest } from "../../src/ingest/pipeline.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
 import { search } from "../../src/retrieve/search.js";
-import { FakeReranker, type RerankHit } from "../../src/llm/voyage.js";
+import { FakeReranker, estimateEmbedTokens, type RerankHit } from "../../src/llm/voyage.js";
+import { renderSearch } from "../../src/mcp/render.js";
 import { reciprocalRankFusion } from "../../src/retrieve/fuse.js";
 import { toVector } from "../../src/db.js";
 import { config } from "../../src/config.js";
@@ -198,6 +199,8 @@ describe("search", () => {
     try {
       const res = await search(ctx, "What did Zorblax Industries release?");
       expect(res.degraded).toBe(true);
+      expect(res.degradedReason).toBe("embedding");
+      expect(res.capReached).toBe(false);
       expect(res.passages.some((p) => p.content.includes("ZX-9000"))).toBe(true);
       expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: query embedding failed, keyword search only: voyage 503");
     } finally {
@@ -249,6 +252,8 @@ describe("search", () => {
     try {
       const res = await search(ctx, "Zorblax Industries drill");
       expect(res.degraded).toBe(true);
+      expect(res.degradedReason).toBe("rerank");
+      expect(res.capReached).toBe(false);
       const hybrid = res.passages.filter((p) => p.group === "hybrid");
       expect(hybrid.length).toBeGreaterThan(0);
       expect(hybrid.map((p) => p.chunkId)).toEqual(fused.slice(0, hybrid.length).map((f) => f.id));
@@ -262,6 +267,65 @@ describe("search", () => {
     const ctx = await seed();
     const res = await search(ctx, "What did Zorblax Industries release?");
     expect(res.degraded).toBe(false);
+    expect(res.degradedReason).toBeNull();
+    expect(res.capReached).toBe(false);
+  });
+
+  it("goes keyword-only and says the cap was reached when the ledger refuses the query embedding", async () => {
+    const ctx = await seed();
+    const { voyage, calls } = meteredVoyage(sql, 1);
+    ctx.queryEmbedder = voyage;
+    ctx.queryReranker = voyage;
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await search(ctx, "What did Zorblax Industries release?");
+      expect(res).toMatchObject({ degraded: true, degradedReason: "cap", capReached: true });
+      expect(res.passages.some((p) => p.content.includes("ZX-9000"))).toBe(true);
+      expect(calls).toEqual([]);
+      expect(renderSearch(res)).toContain("(Voyage daily cap reached; keyword-only results)");
+      expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: Voyage daily cap reached, keyword search only");
+    } finally {
+      err.mockRestore();
+    }
+    const [log] = await sql<{ layers: string[] }[]>`select layers from brain.retrieval_log`;
+    expect(log.layers).toEqual(expect.arrayContaining(["degraded", "cap_reached"]));
+    const [refused] = await sql<{ operation: string; status: string }[]>`select operation, status from brain.provider_usage`;
+    expect(refused).toEqual({ operation: "embed_query", status: "refused" });
+  });
+
+  it("keeps fused order and says the cap was reached when only the rerank is refused", async () => {
+    const ctx = await seed();
+    const query = "Zorblax Industries drill";
+    // Room for the query embedding (the fake reports exactly the estimate) and nothing more.
+    const { voyage, calls } = meteredVoyage(sql, estimateEmbedTokens([query]));
+    ctx.queryEmbedder = voyage;
+    ctx.queryReranker = voyage;
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const res = await search(ctx, query);
+      expect(res).toMatchObject({ degraded: true, degradedReason: "rerank", capReached: true });
+      expect(calls.map((c) => c.path)).toEqual(["/embeddings"]);
+      expect(res.passages.filter((p) => p.group === "hybrid").length).toBeGreaterThan(0);
+      expect(renderSearch(res)).toContain("(Voyage daily cap reached; results in fused order)");
+      expect(err.mock.calls.map((c) => String(c[0])).join("")).toContain("brain: Voyage daily cap reached, keeping fused order");
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("searches normally through the ledger under the cap and records both calls", async () => {
+    const ctx = await seed();
+    const { voyage } = meteredVoyage(sql, 1_000_000, { client: "cli" });
+    ctx.queryEmbedder = voyage;
+    ctx.queryReranker = voyage;
+    const res = await search(ctx, "What did Zorblax Industries release?");
+    expect(res).toMatchObject({ degraded: false, degradedReason: null, capReached: false });
+    const rows = await sql<{ operation: string; status: string; client: string }[]>`
+      select operation, status, client from brain.provider_usage order by id`;
+    expect(rows).toEqual([
+      { operation: "embed_query", status: "ok", client: "cli" },
+      { operation: "rerank", status: "ok", client: "cli" },
+    ]);
   });
 
   it("detects an entity from a lowercase query and expands its neighbours", async () => {

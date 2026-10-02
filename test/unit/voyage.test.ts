@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { VoyageClient, FakeEmbedder, FakeReranker, hashVector } from "../../src/llm/voyage.js";
+import { VoyageClient, FakeEmbedder, FakeReranker, hashVector, estimateEmbedTokens, estimateRerankTokens, usageTokens, QUERY_RETRY_BUDGET, QUERY_REQUEST_TIMEOUT_MS } from "../../src/llm/voyage.js";
 
 function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
   const calls: { url: string; body: any }[] = [];
@@ -208,5 +208,179 @@ describe("fakes", () => {
     expect(e.calls).toEqual([["x"]]);
     const hits = await new FakeReranker().rerank("red apple", ["green pear", "red apple pie"], 1);
     expect(hits[0].index).toBe(1);
+  });
+});
+
+describe("spend metering", () => {
+  it("estimates embeddings at 4 characters per token, at least 1", () => {
+    expect(estimateEmbedTokens(["aaaa", "bbbbbbbb"])).toBe(3);
+    expect(estimateEmbedTokens(["abcde"])).toBe(2);
+    expect(estimateEmbedTokens([""])).toBe(1);
+    expect(estimateEmbedTokens([])).toBe(1);
+  });
+
+  it("estimates a rerank as the query once per document plus every document", () => {
+    // (3 chars * 2 documents + 4 + 6) / 4 = 4
+    expect(estimateRerankTokens("abc", ["abcd", "abcdef"])).toBe(4);
+    expect(estimateRerankTokens("q", [])).toBe(1);
+  });
+
+  it("reads usage.total_tokens and nothing else", () => {
+    expect(usageTokens({ data: [], usage: { total_tokens: 42 } })).toBe(42);
+    expect(usageTokens({ data: [] })).toBeNull();
+    expect(usageTokens({ usage: { total_tokens: "42" } })).toBeNull();
+    expect(usageTokens({ usage: { total_tokens: -1 } })).toBeNull();
+    expect(usageTokens(null)).toBeNull();
+  });
+
+  it("refuses to build a client that could call Voyage without the ledger", () => {
+    expect(() => new VoyageClient()).toThrow(/needs a spend ledger/);
+    expect(() => new VoyageClient({ apiKey: "k", maxAttempts: 2 })).toThrow(/needs a spend ledger/);
+    // An injected fetch (tests) may run unmetered.
+    const fn = (async () => new Response("{}")) as unknown as typeof fetch;
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).ledger).toBeNull();
+  });
+});
+
+describe("query-time retry budget", () => {
+  const ok = { data: [{ index: 0, embedding: [1] }] };
+
+  function seq(responses: Array<{ status: number; headers?: Record<string, string> }>) {
+    let n = 0;
+    const fn = (async () => {
+      const r = responses[Math.min(n, responses.length - 1)];
+      n++;
+      return new Response(JSON.stringify(r.status === 200 ? ok : { detail: "x" }), { status: r.status, headers: r.headers });
+    }) as unknown as typeof fetch;
+    return { fn, count: () => n };
+  }
+
+  function client(fn: typeof fetch) {
+    const waits: number[] = [];
+    const c = new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn, sleep: async (ms) => void waits.push(ms) });
+    return { c, waits };
+  }
+
+  // The rate-limit message goes to stderr; keep test output clean.
+  const quiet = () => vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+  it("is 3 attempts with at most 10 s of backoff in total", () => {
+    expect(QUERY_RETRY_BUDGET).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalAttempts: 3, retryDelayMs: 500, rateLimitDelayMs: 2000, maxTotalWaitMs: 10_000 });
+  });
+
+  it("sends at most 3 HTTP requests in total when 429s and 5xx alternate", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 503 }, { status: 429 }, { status: 503 }, { status: 429 }, { status: 503 }, { status: 200 }]);
+      const { c } = client(fn);
+      await expect(c.embed(["a"], "query")).rejects.toThrow(/503/);
+      expect(count()).toBe(3);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("returns the result after two 429s, within the budget", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 429 }, { status: 429 }, { status: 200 }]);
+      const { c, waits } = client(fn);
+      expect(await c.embed(["a"], "query")).toEqual([[1]]);
+      expect(count()).toBe(3);
+      expect(waits).toEqual([2000, 4000]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("throws after three 429s", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 429 }]);
+      const { c, waits } = client(fn);
+      await expect(c.embed(["a"], "query")).rejects.toThrow(/429/);
+      expect(count()).toBe(3);
+      expect(waits).toEqual([2000, 4000]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("gives up at once when Retry-After asks for more than the budget", async () => {
+    const { fn, count } = seq([{ status: 429, headers: { "retry-after": "30" } }, { status: 200 }]);
+    const { c, waits } = client(fn);
+    await expect(c.embed(["a"], "query")).rejects.toThrow(/429/);
+    expect(count()).toBe(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("never sleeps more than 10 s in total across retries", async () => {
+    const err = quiet();
+    try {
+      const { fn, count } = seq([{ status: 429, headers: { "retry-after": "6" } }, { status: 429, headers: { "retry-after": "6" } }, { status: 200 }]);
+      const { c, waits } = client(fn);
+      await expect(c.embed(["a"], "query")).rejects.toThrow(/429/);
+      expect(count()).toBe(2);
+      expect(waits).toEqual([6000]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("allows 3 attempts for 5xx with short backoff", async () => {
+    const { fn, count } = seq([{ status: 503 }]);
+    const { c, waits } = client(fn);
+    await expect(c.rerank("q", ["a"], 1)).rejects.toThrow(/503/);
+    expect(count()).toBe(3);
+    expect(waits).toEqual([500, 1000]);
+  });
+
+  it("reports each client's budget; the ingest default has no total limit", () => {
+    const fn = (async () => new Response("{}")) as unknown as typeof fetch;
+    expect(new VoyageClient({ ...QUERY_RETRY_BUDGET, apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 3, maxRateLimitAttempts: 3, maxTotalAttempts: 3, maxTotalWaitMs: 10_000 });
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).retryBudget).toEqual({ maxAttempts: 4, maxRateLimitAttempts: 6, maxTotalAttempts: Infinity, maxTotalWaitMs: Infinity });
+  });
+});
+
+describe("request timeout", () => {
+  it("is 120 s by default (ingest) and 8 s for the query clients", () => {
+    const fn = (async () => new Response("{}")) as unknown as typeof fetch;
+    expect(QUERY_REQUEST_TIMEOUT_MS).toBe(8_000);
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn }).requestTimeoutMs).toBe(120_000);
+    expect(new VoyageClient({ apiKey: "k", fetchFn: fn, requestTimeoutMs: QUERY_REQUEST_TIMEOUT_MS }).requestTimeoutMs).toBe(8_000);
+  });
+
+  it("sends every attempt with its own abort signal", async () => {
+    const signals: AbortSignal[] = [];
+    let n = 0;
+    const fn = (async (_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      return ++n === 1
+        ? new Response("{}", { status: 503 })
+        : new Response(JSON.stringify({ data: [{ index: 0, embedding: [1] }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await new VoyageClient({ apiKey: "k", fetchFn: fn, sleep: async () => {} }).embed(["a"], "query");
+    expect(signals).toHaveLength(2);
+    for (const s of signals) {
+      expect(s).toBeInstanceOf(AbortSignal);
+      expect(s.aborted).toBe(false);
+    }
+    expect(signals[0]).not.toBe(signals[1]);
+  });
+
+  it("aborts a request that outlives the timeout and retries it like a network error", async () => {
+    let n = 0;
+    const fn = ((_url: string, init: RequestInit) => {
+      n++;
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal!.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }) as unknown as typeof fetch;
+    const waits: number[] = [];
+    const client = new VoyageClient({ apiKey: "k", fetchFn: fn, requestTimeoutMs: 20, maxAttempts: 2, retryDelayMs: 5, sleep: async (ms) => void waits.push(ms) });
+    const err = await client.embed(["a"], "query").catch((e: unknown) => e);
+    expect((err as Error).name).toBe("TimeoutError");
+    expect(n).toBe(2);
+    expect(waits).toEqual([5]);
   });
 });

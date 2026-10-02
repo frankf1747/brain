@@ -5,6 +5,7 @@ import { toVector, type Db } from "../db.js";
 import { reciprocalRankFusion } from "./fuse.js";
 import { triggerTerms } from "./fallback.js";
 import { detectEntities, type EntityRef } from "./entities.js";
+import { isSpendCap } from "../llm/errors.js";
 
 export interface SearchOptions {
   k?: number;
@@ -70,9 +71,19 @@ export interface SearchResult {
   facts: FactRow[];
   usedFallback: boolean;
   topScore: number | null;
-  /** True when the query embedding or the reranker failed and results come from keyword search and fused order. */
+  /** True when any part fell back (degradedReason is not null). */
   degraded: boolean;
+  /**
+   * Which part fell back: "cap" (the Voyage daily cap refused the query embedding: keyword-only), "embedding" (the
+   * query embedding failed: keyword-only), "rerank" (the reranker failed or was refused: vector and keyword in
+   * fused order). Phase 4 replaces this with a structured `degraded` object.
+   */
+  degradedReason: DegradedReason;
+  /** True when the Voyage daily cap refused the query embedding or the rerank. */
+  capReached: boolean;
 }
+
+export type DegradedReason = "cap" | "embedding" | "rerank" | null;
 
 interface ChunkRow {
   id: string;
@@ -132,14 +143,22 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   const since = opts.since ?? null;
   const until = opts.until ?? null;
 
-  let degraded = false;
+  let degradedReason: DegradedReason = null;
+  let capReached = false;
   let qvec: string | null = null;
   try {
     const [queryVector] = await (ctx.queryEmbedder ?? ctx.embedder).embed([query], "query");
     qvec = toVector(queryVector);
   } catch (err) {
-    degraded = true;
-    process.stderr.write(`brain: query embedding failed, keyword search only: ${err instanceof Error ? err.message : String(err)}\n`);
+    const message = err instanceof Error ? err.message : String(err);
+    if (isSpendCap(err)) {
+      capReached = true;
+      degradedReason = "cap";
+      process.stderr.write(`brain: Voyage daily cap reached, keyword search only: ${message}\n`);
+    } else {
+      degradedReason = "embedding";
+      process.stderr.write(`brain: query embedding failed, keyword search only: ${message}\n`);
+    }
   }
 
   // pgvector 0.8: with iterative scans the HNSW index keeps going until `limit k` rows satisfy the
@@ -179,11 +198,18 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
         k,
       );
     } catch (err) {
-      degraded = true;
-      process.stderr.write(`brain: reranking failed, keeping fused order: ${err instanceof Error ? err.message : String(err)}\n`);
+      const message = err instanceof Error ? err.message : String(err);
+      degradedReason = "rerank";
+      if (isSpendCap(err)) {
+        capReached = true;
+        process.stderr.write(`brain: Voyage daily cap reached, keeping fused order: ${message}\n`);
+      } else {
+        process.stderr.write(`brain: reranking failed, keeping fused order: ${message}\n`);
+      }
       reranked = fusedOrder();
     }
   }
+  const degraded = degradedReason !== null;
   const passages: Passage[] = reranked.map((h) => toPassage(ordered[h.index], h.score, "hybrid"));
   const seen = new Set(passages.map((p) => p.chunkId));
 
@@ -300,7 +326,10 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
     }
   }
 
-  const layers = ["hybrid", "summary", ...(entities.length ? ["graph"] : []), ...(facts.length ? ["facts"] : []), ...(usedFallback ? ["fallback"] : []), ...(degraded ? ["degraded"] : [])];
+  const layers = [
+    "hybrid", "summary", ...(entities.length ? ["graph"] : []), ...(facts.length ? ["facts"] : []), ...(usedFallback ? ["fallback"] : []),
+    ...(degraded ? ["degraded"] : []), ...(capReached ? ["cap_reached"] : []),
+  ];
   const filters = { sourceKinds: kinds, since, until, verifiedOnly: opts.verifiedOnly ?? false };
   await sql`
     insert into brain.retrieval_log (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client)
@@ -308,5 +337,5 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
             ${passages.map((p) => p.chunkId).filter((id): id is string => id !== null)}::uuid[],
             ${entities.map((e) => e.id)}::uuid[], ${topScore}, ${usedFallback}, ${opts.client ?? "cli"})`;
 
-  return { query, passages, documents, entities, facts, usedFallback, topScore, degraded };
+  return { query, passages, documents, entities, facts, usedFallback, topScore, degraded, degradedReason, capReached };
 }

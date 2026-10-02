@@ -2,7 +2,8 @@ import type { Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
 import { UUID } from "../retrieve/documents.js";
 import { refreshMirror } from "../obsidian/auto.js";
-import { runResolve, type ResolveReport } from "./stages/resolve.js";
+import { embedEntityNames, runResolve, type EntityVectors, type ResolveReport } from "./stages/resolve.js";
+import { isSpendCap, SPEND_CAP_PREFIX } from "../llm/errors.js";
 import { withDocumentLock } from "./lock.js";
 import { AUTHORS, isAuthor, type Author } from "./author.js";
 
@@ -39,6 +40,7 @@ const RESOLVED_STAGES = new Set(["resolved", "done"]);
  * edges from the owner follow the new author (spec §4.1). A document that has not reached the resolve stage
  * only gets the new author; the pipeline's resolve stage applies the gate when it gets there. Holds the same
  * per-document advisory lock as runPipeline, so it never interleaves with a run on the same document.
+ * When the re-resolve's embeddings fail (the Voyage daily cap, a Voyage error), throws without changing anything.
  * Notifies the Obsidian mirror; the CLI flushes it on exit.
  */
 export async function setAuthor(ctx: Ctx, documentId: string, author: Author): Promise<SetAuthorResult> {
@@ -60,18 +62,41 @@ async function setAuthorLocked(ctx: Ctx, documentId: string, author: Author): Pr
     removedFacts: [], removedEdges: [], addedFacts: [], addedEdges: [], keptVerified: [], keptCorrected: [], restoredFacts: [], suppressedSelfItems: 0,
   };
   if (result.unchanged) return result;
+  const reresolve = !!doc.stage && RESOLVED_STAGES.has(doc.stage);
+
+  // The Voyage calls re-resolving needs come first, before anything changes. When they fail (the daily cap, a
+  // Voyage error) the author stays as it was and so does the graph, so the two never disagree: a document marked
+  // `other` whose facts about the owner are still current would break the authorship gate (spec §4.3).
+  let vectors: EntityVectors | undefined;
+  if (reresolve) {
+    try {
+      vectors = await embedEntityNames(ctx, documentId);
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const reason = isSpendCap(err)
+        ? `${SPEND_CAP_PREFIX}${raw}; set it again after 00:00 UTC or once BRAIN_VOYAGE_DAILY_TOKEN_CAP is raised (\`brain usage\` shows today's spend)`
+        : raw;
+      throw new Error(`author not changed (still ${doc.author}): ${reason}`, { cause: err });
+    }
+  }
+
   await ctx.sql`update brain.documents set author = ${author} where id = ${documentId}`;
-  if (!doc.stage || !RESOLVED_STAGES.has(doc.stage)) return result;
+  if (!reresolve) return result;
 
   let report: ResolveReport;
   try {
-    report = await runResolve(ctx, documentId, { by: "set-author" });
+    report = await runResolve(ctx, documentId, { by: "set-author", vectors });
   } catch (err) {
-    // The undo has committed and only part of the document may be re-applied. Put the job back before the
-    // resolve stage with the error, so `brain retry` re-runs resolve (which undoes and re-applies in full).
-    const message = err instanceof Error ? err.message : String(err);
+    // With the vectors in hand runResolve normally calls Voyage no more, but it can still fail after its undo has
+    // committed (a database error part-way through the writes), or embed a name the vectors lack (a node type added
+    // since). Put the job back before the resolve stage with the error, so `brain retry` re-runs resolve (which
+    // undoes and re-applies in full) under the new author.
+    // A cap refusal is not the document's failure and counts no attempt (as in src/ingest/pipeline.ts).
+    const capped = isSpendCap(err);
+    const raw = err instanceof Error ? err.message : String(err);
+    const message = capped ? SPEND_CAP_PREFIX + raw : raw;
     await ctx.sql`
-      update brain.ingest_jobs set stage = 'extracted', error = ${message}, attempts = attempts + 1, updated_at = now()
+      update brain.ingest_jobs set stage = 'extracted', error = ${message}, attempts = attempts + ${capped ? 0 : 1}, updated_at = now()
       where document_id = ${documentId}`;
     throw new Error(`author changed to ${author} but re-resolving failed: ${message}; run \`brain retry\` to finish`, { cause: err });
   }

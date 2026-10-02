@@ -1,5 +1,5 @@
 // Loads .env (dotenv) before EVAL_DATABASE_URL is read below.
-import "../config.js";
+import { config, EVAL_VOYAGE_CAP_NAME } from "../config.js";
 import { makeCtx, type Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
 
@@ -38,8 +38,15 @@ export async function assertEvalConnection(sql: Db): Promise<void> {
   }
 }
 
-/** A real context (real Voyage, real Claude Code) on the eval database, with the Obsidian mirror off. */
+/** The ledger client label of every Voyage call the eval makes; runEval reads its spend by it. */
+export const EVAL_CLIENT = "eval";
+
+/**
+ * A real context (real Voyage, real Claude Code) on the eval database, with the Obsidian mirror off. Its Voyage
+ * calls are recorded in brain_eval's own ledger, never the real base's, and capped at the eval's own cap
+ * (BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP).
+ */
 export function makeEvalCtx(): Ctx {
   assertEvalDatabase(EVAL_DATABASE_URL);
-  return makeCtx({ databaseUrl: EVAL_DATABASE_URL, obsidian: false });
+  return makeCtx({ databaseUrl: EVAL_DATABASE_URL, obsidian: false, client: EVAL_CLIENT, voyageCap: { tokens: config.evalVoyageDailyTokenCap, name: EVAL_VOYAGE_CAP_NAME } });
 }

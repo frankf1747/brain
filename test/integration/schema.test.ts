@@ -1,7 +1,9 @@
-import { describe, it, expect, afterAll } from "vitest";
-import { testDb } from "./helpers.js";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { testDb, wipe } from "./helpers.js";
 
 const sql = testDb();
+// Other files leave nodes such as Acme behind, and file order follows cached durations: start clean.
+beforeAll(() => wipe(sql));
 afterAll(() => sql.end());
 
 describe("core schema", () => {

@@ -30,3 +30,32 @@ export function isSchemaFailure(err: unknown): boolean {
 export function isRefusal(err: unknown): boolean {
   return err instanceof ModelRefusal || (err instanceof Error && err.message.startsWith("Model refused"));
 }
+
+/**
+ * A Voyage call was refused before it was sent: today's (UTC) counted tokens plus this call's estimate would pass
+ * the database's daily cap (`capName`: BRAIN_VOYAGE_DAILY_TOKEN_CAP, or BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP on
+ * brain_eval). Retrying before 00:00 UTC (or before the cap is raised) cannot help.
+ */
+export class SpendCapError extends Error {
+  readonly used: number;
+  readonly estimated: number;
+  readonly cap: number;
+  /** The .env variable that sets the cap that refused the call. */
+  readonly capName: string;
+  constructor(message: string, detail: { used: number; estimated: number; cap: number; capName?: string }) {
+    super(message);
+    this.name = "SpendCapError";
+    this.used = detail.used;
+    this.estimated = detail.estimated;
+    this.cap = detail.cap;
+    this.capName = detail.capName ?? "BRAIN_VOYAGE_DAILY_TOKEN_CAP";
+  }
+}
+
+/** True when a Voyage call was refused by the daily cap. */
+export function isSpendCap(err: unknown): boolean {
+  return err instanceof SpendCapError || (err instanceof Error && err.name === "SpendCapError");
+}
+
+/** Prefix of ingest_jobs.error when the cap stopped a document (src/ingest/pipeline.ts). */
+export const SPEND_CAP_PREFIX = "spend_cap: ";

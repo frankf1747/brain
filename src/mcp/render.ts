@@ -4,12 +4,33 @@ import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
 import type { FactDetail } from "../graph/facts.js";
 import type { SuppressedDocument } from "../ingest/set-author.js";
+import { voyageTodayLine } from "../llm/usage.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
+/** The one-line note for a degraded search, or null for a full hybrid search. */
+export function degradedNote(r: Pick<SearchResult, "degradedReason" | "capReached">): string | null {
+  switch (r.degradedReason) {
+    case "cap":
+      return "Voyage daily cap reached; keyword-only results";
+    case "embedding":
+      return "query embedding failed; keyword-only results";
+    case "rerank":
+      return r.capReached ? "Voyage daily cap reached; results in fused order" : "reranking failed; results in fused order";
+    default:
+      return null;
+  }
+}
+
+/** The search mode, as the CLI prints it on its `mode:` line. */
+export function searchMode(r: Pick<SearchResult, "degradedReason" | "capReached">): string {
+  return degradedNote(r) ?? "hybrid (vector and keyword, reranked)";
+}
+
 export function renderSearch(r: SearchResult): string {
   const out: string[] = [];
-  if (r.degraded) out.push("(embeddings unavailable: keyword-only results)");
+  const note = degradedNote(r);
+  if (note) out.push(`(${note})`);
   if (r.usedFallback) out.push("(weak match: results include raw substring hits)\n");
   if (r.passages.length === 0) out.push("No passages matched.");
   r.passages.forEach((p, i) => {
@@ -32,6 +53,7 @@ export function renderOrient(o: Orientation): string {
     `Documents by kind: ${o.documentsByKind.map((k) => `${k.kind}: ${k.count}`).join(", ") || "none"}.`,
     `Entities by type: ${o.nodesByType.map((t) => `${t.type}: ${t.count}`).join(", ") || "none"}.`,
     `Pipeline: ${o.pipeline.filter((p) => p.count).map((p) => `${p.stage} ${p.count}${p.failed ? ` (${p.failed} failed)` : ""}`).join(", ") || "idle"}.`,
+    o.voyage ? voyageTodayLine(o.voyage.tokensToday, o.voyage.cap) : "Voyage ledger unavailable (migration 010 missing?)",
     "",
     "Most recent documents:",
     ...o.recent.map((d) => `- ${d.title ?? "(untitled)"} [${d.sourceKind}] ${day(d.occurredAt) ?? day(d.ingestedAt)} (document ${d.id})`),

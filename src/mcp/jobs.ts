@@ -1,5 +1,5 @@
 import type { Ctx } from "../ctx.js";
-import { runPipeline, MAX_CONCURRENT_PIPELINES, type PipelineResult } from "../ingest/pipeline.js";
+import { runPipeline, MAX_CONCURRENT_PIPELINES, DEFERRED_MESSAGE, type PipelineResult } from "../ingest/pipeline.js";
 
 /**
  * Background pipelines this manager runs at once. One core slot stays free so a foreground
@@ -7,17 +7,33 @@ import { runPipeline, MAX_CONCURRENT_PIPELINES, type PipelineResult } from "../i
  */
 export const BACKGROUND_SLOTS = Math.max(1, MAX_CONCURRENT_PIPELINES - 1);
 
+export interface JobManagerOptions {
+  /** The clock the UTC day is read from (tests). */
+  now?: () => Date;
+}
+
 /** Runs post-chunk pipeline stages in the background inside the server process. */
 export class JobManager {
   /** Documents waiting for a background slot, in arrival order. */
   private readonly queue: string[] = [];
   private readonly running = new Map<string, Promise<PipelineResult>>();
   private idleWaiters: (() => void)[] = [];
+  /**
+   * The UTC day on which the Voyage daily cap stopped a document in this server. Documents started later that day
+   * stop before their Voyage stages without asking the ledger; the next UTC day or a restart (for a raised cap)
+   * clears it.
+   */
+  private voyageBlockedDay: string | null = null;
 
   constructor(
     private readonly ctx: Ctx,
     private readonly log: (message: string) => void = (m) => process.stderr.write(m + "\n"),
+    private readonly opts: JobManagerOptions = {},
   ) {}
+
+  private utcDay(): string {
+    return (this.opts.now?.() ?? new Date()).toISOString().slice(0, 10);
+  }
 
   /** Queued and running document ids. */
   get pending(): string[] {
@@ -33,10 +49,21 @@ export class JobManager {
   private pump(): void {
     while (this.running.size < BACKGROUND_SLOTS && this.queue.length > 0) {
       const documentId = this.queue.shift()!;
-      const run = runPipeline(this.ctx, documentId)
+      const voyageBlocked = this.voyageBlockedDay === this.utcDay();
+      const run = runPipeline(this.ctx, documentId, { voyageBlocked })
         .then((r) => {
-          // A skipped result means another runner holds the document; that is not an error.
-          if (r.error && !r.skipped) this.log(`brain: document ${documentId} stopped after ${r.stage}: ${r.error}`);
+          if (r.spendCap) {
+            // Only a real refusal blocks the day. A deferred result never asked the ledger, and one started blocked
+            // yesterday that returns after 00:00 UTC must not block today.
+            const day = this.utcDay();
+            if (r.error !== DEFERRED_MESSAGE && this.voyageBlockedDay !== day) {
+              this.voyageBlockedDay = day;
+              this.log(`brain: Voyage daily cap reached (${r.error}); queued documents stop before embedding until 00:00 UTC, then brain retry or the next brain_ingest resumes them`);
+            }
+          } else if (r.error && !r.skipped) {
+            // A skipped result means another runner holds the document; that is not an error.
+            this.log(`brain: document ${documentId} stopped after ${r.stage}: ${r.error}`);
+          }
           return r;
         })
         .catch((err: unknown) => {

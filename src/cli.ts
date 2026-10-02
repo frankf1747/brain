@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { makeCtx, type Ctx } from "./ctx.js";
 import { config } from "./config.js";
 import { readInput } from "./ingest/readers.js";
-import { redoSkipped, retryFailed, stageCounts, STAGES, type Stage } from "./ingest/pipeline.js";
+import { redoSkipped, retryFailed, stageCounts, STAGES, spendCapAdvice, type Stage } from "./ingest/pipeline.js";
 import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
@@ -57,7 +57,7 @@ program
     const author = opts.author === undefined ? undefined : parseAuthor(opts.author);
     await withCtx(async (ctx) => {
       const meta = parseMeta(opts.meta);
-      const { failed } = await ingestAll(
+      const { ok, failed } = await ingestAll(
         ctx,
         await readInput(input),
         {
@@ -78,6 +78,7 @@ program
           skip: logSkip,
         },
       );
+      if (ok.some((o) => o.result.spendCap)) console.error(spendCapAdvice(ctx.voyageCap?.name));
       if (failed.length) process.exitCode = 1;
     });
   });
@@ -113,6 +114,7 @@ program
       for (const r of results) {
         console.log(`${r.documentId} ${r.stage}${r.skipped ? " (busy, left alone)" : ""}${r.error ? " ERROR " + r.error : ""}`);
       }
+      if (results.some((r) => r.spendCap)) console.log(spendCapAdvice(ctx.voyageCap?.name));
     });
   });
 
@@ -129,6 +131,8 @@ program
     await withCtx(async (ctx) => {
       const res = await search(ctx, query, { ...searchOptions(opts), client: "cli" });
       if (opts.json) return void console.log(JSON.stringify(res, null, 2));
+      const { searchMode } = await import("./mcp/render.js");
+      console.log(`mode: ${searchMode(res)}\n`);
       if (res.usedFallback) console.log("(weak match: included raw substring hits)\n");
       res.passages.forEach((p, i) => {
         console.log(`[P${i + 1}] ${p.group} ${p.score.toFixed(3)} ${p.sourceKind}${p.documentTitle ? " · " + p.documentTitle : ""}`);
@@ -218,6 +222,26 @@ program
     });
   });
 
+program
+  .command("usage")
+  .description("Voyage tokens per UTC day and operation, refused calls, errors, and the estimated cost")
+  .option("--days <n>", "UTC days to show, today included", "30")
+  .action(async (opts) => {
+    const days = Number(opts.days);
+    if (!Number.isInteger(days) || days < 1 || days > 366) throw new Error(`--days needs a whole number from 1 to 366, got ${JSON.stringify(opts.days)}`);
+    const { usageByDay, formatUsage } = await import("./llm/usage.js");
+    const { tokensToday } = await import("./llm/ledger.js");
+    await withCtx(async (ctx) => {
+      const lines = formatUsage(await usageByDay(ctx.sql, days), {
+        days,
+        tokensToday: await tokensToday(ctx.sql),
+        cap: (ctx.voyageCap ?? { tokens: config.voyageDailyTokenCap }).tokens,
+        prices: { embed: config.voyagePricePerMTokEmbed, rerank: config.voyagePricePerMTokRerank },
+      });
+      for (const l of lines) console.log(l);
+    });
+  });
+
 const evalCmd = program.command("eval").description("Retrieval eval against the brain_eval database (never the real one)");
 
 evalCmd
@@ -245,7 +269,7 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx } = await import("./eval/db.js");
-    const { runEval, attributionGate } = await import("./eval/run.js");
+    const { runEval, attributionGate, evalVoyageLine } = await import("./eval/run.js");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { execSync } = await import("node:child_process");
@@ -276,6 +300,7 @@ evalCmd
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
         console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
         console.log(`attribution  self-facts-from-others=${run.attribution.selfFacts}  self-edges-from-others=${run.attribution.selfEdges}`);
+        console.log(evalVoyageLine(run.voyage));
         if (comparison) {
           const d = comparison.deltas;
           console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);
