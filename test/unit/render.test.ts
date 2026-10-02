@@ -65,15 +65,17 @@ describe("other renderers", () => {
     expect(renderStatus(pipeline, [], [])).not.toContain("suppressed");
   });
 
-  it("renderOrient lists counts and usage guidance", () => {
+  it("renderOrient lists counts, today's Voyage tokens against the cap, and usage guidance", () => {
     const t = renderOrient({
       totalDocuments: 2, documentsByKind: [{ kind: "news", count: 2 }], nodesByType: [{ type: "person", count: 3 }],
       recent: [{ id: "d1", title: "T", sourceKind: "news", occurredAt: null, ingestedAt: new Date("2026-09-27T00:00:00Z") }],
       facts: [{ id: "f", predicate: "p", objectText: "o", verified: false }], pipeline: [{ stage: "done", count: 2, failed: 0 }],
+      voyage: { tokensToday: 1_250_000, cap: 5_000_000 },
     });
     expect(t).toContain("2 documents");
     expect(t).toContain("news: 2");
     expect(t).toContain("person: 3");
+    expect(t.split("\n")).toContain("Voyage today: 1,250,000 of 5,000,000 tokens (25.0%)");
     expect(t).toContain("brain_search");
   });
   it("renderNode shows edges with direction and evidence", () => {

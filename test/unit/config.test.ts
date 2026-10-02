@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { config, parseTokenCap, DEFAULT_VOYAGE_DAILY_TOKEN_CAP } from "../../src/config.js";
+import { config, parseTokenCap, parsePrice, DEFAULT_VOYAGE_DAILY_TOKEN_CAP } from "../../src/config.js";
 
 describe("config", () => {
   it("pins the embedding dimension the schema was created with", () => {
@@ -32,5 +32,23 @@ describe("parseTokenCap", () => {
 
   it("is what config uses", () => {
     expect(config.voyageDailyTokenCap).toBe(parseTokenCap(process.env.BRAIN_VOYAGE_DAILY_TOKEN_CAP));
+  });
+});
+
+describe("parsePrice", () => {
+  it("defaults to 0 (tokens only) and reads non-negative decimals", () => {
+    expect(parsePrice("X", undefined)).toBe(0);
+    expect(parsePrice("X", "")).toBe(0);
+    expect(parsePrice("X", "0.12")).toBe(0.12);
+    expect(parsePrice("X", " 2 ")).toBe(2);
+  });
+  it("refuses anything else, naming the variable", () => {
+    for (const bad of ["-0.1", "$0.12", "1e-3", "abc"]) {
+      expect(() => parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED", bad), bad).toThrow(/BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED must be/);
+    }
+  });
+  it("is what config uses", () => {
+    expect(config.voyagePricePerMTokEmbed).toBe(parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED", process.env.BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED));
+    expect(config.voyagePricePerMTokRerank).toBe(parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK", process.env.BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK));
   });
 });

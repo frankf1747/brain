@@ -4,6 +4,7 @@ import type { NodeReport } from "../graph/inspect.js";
 import type { DocumentSlice } from "../retrieve/documents.js";
 import type { FactDetail } from "../graph/facts.js";
 import type { SuppressedDocument } from "../ingest/set-author.js";
+import { voyageTodayLine } from "../llm/usage.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
@@ -52,6 +53,7 @@ export function renderOrient(o: Orientation): string {
     `Documents by kind: ${o.documentsByKind.map((k) => `${k.kind}: ${k.count}`).join(", ") || "none"}.`,
     `Entities by type: ${o.nodesByType.map((t) => `${t.type}: ${t.count}`).join(", ") || "none"}.`,
     `Pipeline: ${o.pipeline.filter((p) => p.count).map((p) => `${p.stage} ${p.count}${p.failed ? ` (${p.failed} failed)` : ""}`).join(", ") || "idle"}.`,
+    voyageTodayLine(o.voyage.tokensToday, o.voyage.cap),
     "",
     "Most recent documents:",
     ...o.recent.map((d) => `- ${d.title ?? "(untitled)"} [${d.sourceKind}] ${day(d.occurredAt) ?? day(d.ingestedAt)} (document ${d.id})`),

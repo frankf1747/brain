@@ -17,9 +17,19 @@ Local Supabase uses ports 55320-55329 (set in `supabase/config.toml`) because th
 
 To use a hosted Supabase project instead: create the project, run `supabase link --project-ref <ref>` and `supabase db push`, then set `DATABASE_URL` in `.env` to the project's direct connection string.
 
-### Voyage rate limit
+### Voyage spending cap
 
-The Voyage free tier without a payment method allows 3 requests per minute. The client waits out 429 responses (messages are printed on stderr), so ingestion and search are slow until a payment method is added to the Voyage account.
+Every Voyage request (passage and summary embeddings, entity-name embeddings during resolve, query embeddings, reranking) is recorded in `brain.provider_usage` and counted against a hard daily cap: `BRAIN_VOYAGE_DAILY_TOKEN_CAP` tokens per UTC day, default 5,000,000. Before each request the client reserves its estimated tokens (characters / 4) under a database lock and refuses the request without sending it when today's total plus the estimate would pass the cap; after the response it records Voyage's own `usage.total_tokens`. A failed request is recorded at 0 tokens; a retry is a request of its own. `0` blocks every call. **There is no setting that turns the cap off**, and a value that is not a whole number stops the program at startup, so a typo can never lift it.
+
+When the cap is reached:
+- Ingestion stores, chunks and summarizes as usual and stops before embedding (or before resolving); `brain status` shows `spend_cap: …` on those jobs, and no retry attempt is used up. After the first refusal the rest of a batch stops before its Voyage stages without asking again. `brain retry` (or the next `brain_ingest`, which resumes stalled jobs) finishes them after 00:00 UTC, or at once after raising the cap.
+- Search returns keyword-only results and says "Voyage daily cap reached; keyword-only results" (or "…; results in fused order" when only the rerank was refused).
+
+`npm run brain -- usage [--days 30]` prints requests, tokens, refused calls and errors per UTC day and operation, today's tokens against the cap, and an estimated cost once `BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED` and `BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK` are set from Voyage's pricing page (default 0: tokens only). `brain_orient` shows today's tokens against the cap.
+
+The ledger lives in each database: the real knowledge base and `brain_eval` each count and cap their own calls, while Voyage bills the account, so the account's daily spend can reach the sum of both caps. Running processes read the cap when they start: restart the MCP server after changing it. A request in flight when its process dies stays counted at its estimate for the rest of the day.
+
+Search waits at most 10 seconds in total for Voyage retries (3 attempts) and then falls back; ingestion waits out rate limits (up to 6 attempts, at most 60 s per wait).
 
 ## Commands
 
@@ -27,6 +37,7 @@ The Voyage free tier without a payment method allows 3 requests per minute. The 
 npm run brain -- ingest <file|dir|url|-> [--kind note] [--author owner|other|unknown] [--title T] [--occurred-at 2026-01-01] [--meta k=v] [--until chunked]
 npm run brain -- status
 npm run brain -- retry [--stage embedded]
+npm run brain -- usage [--days 30]
 npm run brain -- search "<query>" [--kind news note] [--since 2026-01-01] [--until 2026-12-31] [--verified] [-k 10] [--json]
 npm run brain -- ask "<question>"
 npm run brain -- node "<name or id>"

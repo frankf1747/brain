@@ -1,5 +1,7 @@
 import type { Ctx } from "../ctx.js";
+import { config } from "../config.js";
 import { stageCounts } from "../ingest/pipeline.js";
+import { tokensToday } from "../llm/ledger.js";
 
 export interface Orientation {
   totalDocuments: number;
@@ -8,11 +10,13 @@ export interface Orientation {
   recent: { id: string; title: string | null; sourceKind: string; occurredAt: Date | null; ingestedAt: Date }[];
   facts: { id: string; predicate: string; objectText: string; verified: boolean }[];
   pipeline: { stage: string; count: number; failed: number }[];
+  /** Tokens counted against today's (UTC) Voyage cap in this database, and the cap. */
+  voyage: { tokensToday: number; cap: number };
 }
 
 export async function orient(ctx: Ctx): Promise<Orientation> {
   const { sql } = ctx;
-  const [kinds, types, recent, facts, pipeline] = await Promise.all([
+  const [kinds, types, recent, facts, pipeline, voyageTokens] = await Promise.all([
     sql<{ kind: string; count: string }[]>`select source_kind as kind, count(*)::text as count from brain.documents group by source_kind order by count desc`,
     sql<{ type: string; count: string }[]>`select type, count(*)::text as count from brain.nodes where merged_into is null group by type order by count desc`,
     sql<Orientation["recent"]>`
@@ -25,6 +29,7 @@ export async function orient(ctx: Ctx): Promise<Orientation> {
         order by predicate, lower(object_text), verified desc, created_at
       ) d order by verified desc, predicate limit 50`,
     stageCounts(ctx),
+    tokensToday(sql),
   ]);
   return {
     totalDocuments: kinds.reduce((s, k) => s + Number(k.count), 0),
@@ -33,5 +38,6 @@ export async function orient(ctx: Ctx): Promise<Orientation> {
     recent,
     facts: facts.map((f) => ({ id: f.id, predicate: f.predicate, objectText: f.object_text, verified: f.verified })),
     pipeline,
+    voyage: { tokensToday: voyageTokens, cap: config.voyageDailyTokenCap },
   };
 }

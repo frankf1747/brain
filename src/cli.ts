@@ -222,6 +222,26 @@ program
     });
   });
 
+program
+  .command("usage")
+  .description("Voyage tokens per UTC day and operation, refused calls, errors, and the estimated cost")
+  .option("--days <n>", "UTC days to show, today included", "30")
+  .action(async (opts) => {
+    const days = Number(opts.days);
+    if (!Number.isInteger(days) || days < 1 || days > 366) throw new Error(`--days needs a whole number from 1 to 366, got ${JSON.stringify(opts.days)}`);
+    const { usageByDay, formatUsage } = await import("./llm/usage.js");
+    const { tokensToday } = await import("./llm/ledger.js");
+    await withCtx(async (ctx) => {
+      const lines = formatUsage(await usageByDay(ctx.sql, days), {
+        days,
+        tokensToday: await tokensToday(ctx.sql),
+        cap: config.voyageDailyTokenCap,
+        prices: { embed: config.voyagePricePerMTokEmbed, rerank: config.voyagePricePerMTokRerank },
+      });
+      for (const l of lines) console.log(l);
+    });
+  });
+
 const evalCmd = program.command("eval").description("Retrieval eval against the brain_eval database (never the real one)");
 
 evalCmd

@@ -22,6 +22,14 @@ export function parseTokenCap(raw: string | undefined): number {
   return n;
 }
 
+/** A USD-per-million-tokens price from .env. Unset or empty means 0, which prints tokens only. */
+export function parsePrice(name: string, raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 0;
+  const s = raw.trim();
+  if (!/^\d+(\.\d+)?$/.test(s)) throw new Error(`${name} must be a non-negative number of US dollars per million tokens; got "${raw}"`);
+  return Number(s);
+}
+
 export const config = {
   databaseUrl:
     process.env.DATABASE_URL ??
@@ -35,6 +43,9 @@ export const config = {
   voyageRerankModel: process.env.VOYAGE_RERANK_MODEL ?? "rerank-2.5",
   /** Hard cap on Voyage tokens per UTC day, enforced before every request by src/llm/ledger.ts. */
   voyageDailyTokenCap: parseTokenCap(process.env.BRAIN_VOYAGE_DAILY_TOKEN_CAP),
+  /** US dollars per million tokens, copied from Voyage's pricing page into .env; 0 prints tokens only. */
+  voyagePricePerMTokEmbed: parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED", process.env.BRAIN_VOYAGE_PRICE_PER_MTOK_EMBED),
+  voyagePricePerMTokRerank: parsePrice("BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK", process.env.BRAIN_VOYAGE_PRICE_PER_MTOK_RERANK),
   obsidianVaultPath: process.env.OBSIDIAN_VAULT_PATH ?? "/Users/frankfu/Documents/Obsidian/General",
   obsidianFolder: process.env.OBSIDIAN_FOLDER || "Brain", // empty means unset
   embeddingDimensions: 1024,
