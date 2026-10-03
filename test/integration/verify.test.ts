@@ -102,6 +102,19 @@ describe("verifyClaims", () => {
     expect(gone.claims[0]).toMatchObject({ verdict: "bad_citation", badLabels: [{ label: "P1", reason: "P1's passage is no longer stored (its document was re-chunked or deleted)" }] });
   });
 
+  it("notes when a raw fact id names a superseded fact, and checks the claim against the stored text", async () => {
+    const ctx = await seed();
+    const res = await search(ctx, "Acme visa F-1 OPT", { k: 3 });
+    const old = res.facts[0].id;
+    const [next] = await sql<{ id: string }[]>`
+      insert into brain.facts (subject_id, predicate, object_text, confidence, source_chunk_id)
+      select subject_id, predicate, 'H-1B', confidence, source_chunk_id from brain.facts where id = ${old} returning id`;
+    await sql`update brain.facts set superseded_by = ${next.id} where id = ${old}`;
+    const v = (await verifyClaims(sql, res.retrievalId, [{ text: "My visa status is F-1 OPT.", cites: [old] }], { client: "test" }))!;
+    expect(v.claims[0]).toMatchObject({ verdict: "supported", cites: [{ kind: "fact", factId: old }] });
+    expect(v.notes).toEqual([`fact ${old} was superseded; checked against the stored text`]);
+  });
+
   it("returns null for an unknown or malformed retrieval id and writes nothing", async () => {
     expect(await verifyClaims(sql, "00000000-0000-0000-0000-000000000000", [{ text: "x", cites: [] }], { client: "test" })).toBeNull();
     expect(await verifyClaims(sql, "not-an-id", [{ text: "x", cites: [] }], { client: "test" })).toBeNull();

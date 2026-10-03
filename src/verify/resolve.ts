@@ -84,7 +84,7 @@ async function loadRetrieval(sql: Db, retrievalId: string): Promise<LoggedRetrie
 }
 
 interface ChunkText { id: string; document_id: string; heading_path: string[]; content: string; title: string | null }
-interface FactText { id: string; predicate: string; object_text: string; document_id: string | null }
+interface FactText { id: string; predicate: string; object_text: string; document_id: string | null; superseded_by: string | null }
 
 /** Resolves every claim's cites to cited texts (good) or reasons (bad), with as few lookups as the cites need. */
 async function resolveClaims(sql: Db, retrieval: LoggedRetrieval, claims: ClaimInput[]): Promise<{ toJudge: ClaimToJudge[]; notes: string[] }> {
@@ -120,7 +120,7 @@ async function resolveClaims(sql: Db, retrieval: LoggedRetrieval, claims: ClaimI
   const facts = new Map<string, FactText>();
   if (factIds.length) {
     for (const f of await sql<FactText[]>`
-      select f.id, f.predicate, f.object_text, c.document_id
+      select f.id, f.predicate, f.object_text, c.document_id, f.superseded_by
       from brain.facts f left join brain.chunks c on c.id = f.source_chunk_id
       where f.id = any(${factIds}::uuid[])`) facts.set(f.id, f);
   }
@@ -164,7 +164,11 @@ async function resolveClaims(sql: Db, retrieval: LoggedRetrieval, claims: ClaimI
         const c = chunks.get(p.id);
         const f = facts.get(p.id);
         if (c) passage(p.label, c.document_id, c.id, c.title, passageText(c.heading_path, c.content));
-        else if (f) fact(p.label, f.id, f.predicate, f.object_text, f.document_id);
+        else if (f) {
+          // A raw id is checked against the fact as stored now, which may have been superseded since.
+          if (f.superseded_by) notes.add(`fact ${f.id} was superseded; checked against the stored text`);
+          fact(p.label, f.id, f.predicate, f.object_text, f.document_id);
+        }
         else bad(p.label, "no passage or fact has this id");
       } else {
         bad(p.label, "not a label (P1, F1) or a passage or fact id");

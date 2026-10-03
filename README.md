@@ -126,9 +126,11 @@ retrieval 6f1c2a0e-… · mode: hybrid · 7 passages
 How a claim is checked:
 
 1. Cites are resolved through the search the answer came from: `P3` is the third passage of that retrieval (its text is read from `brain.chunks`; a fallback passage is cut from the document's raw text by its character window), `F1` is the first fact that search returned, as it was then. A chunk id or fact id also works. A passage's cited text is its heading path plus its content; a fact's is its predicate (underscores as spaces) plus its value.
-2. Numbers, dates and codes are read from the claim and normalised: `1,000` is `1000`; `~11%`, `11 %` and `11 percent` are `11%`; `$115k`, `$115K`, `$115,000` and `115,000 dollars` are `$115000` (k, m, b, thousand, million and billion scale the number); `Sep 29, 2026`, `29 September 2026` and `2026-09-29` are `2026-09-29`; `September 2026` is `2026-09`; `October 6` is `--10-06`; `3rd` is `3rd`; `two` to `ninety` and `two hundred` are numbers (`one` and `first` are not, since they are usually not counts); a token with a letter and a digit (`H-1B`, `F-1`, `ZX-9000`) is a code, compared as written. Every one of them must appear in the cited texts. A full date in a source also states its month, year and month-day; a sum of money also states the bare amount.
+2. Numbers, dates and codes are read from the claim and normalised: `1,000` is `1000`; `~11%`, `11 %` and `11 percent` are `11%`; `$115k`, `$115K`, `$115,000` and `115,000 dollars` are `$115000` (k, m, b, thousand, million and billion scale the number); `Sep 29, 2026`, `29 September 2026` and `2026-09-29` are `2026-09-29`; `September 2026` is `2026-09`; `October 6` is `--10-06`; `3rd` is `3rd`; `two` to `ninety` and `two hundred` are numbers (`one` and `first` are not, since they are usually not counts); a token with a letter and a digit (`H-1B`, `F-1`, `ZX-9000`, `v2.5`) is a code, compared as written. A leading minus stays with its number (`-5%` is not `5%`). Numeric dates (`3/4/2026`), dotted versions (`3.12.1`), digit groups (`555-1234`) and percent ranges (`20-30%`) are compared exactly as written, never as loose numbers; a range of two years (`2019-2023`) is two years. Every one of them must appear in the cited texts. A full date in a source also states its month, year and month-day; a sum of money also states the bare amount.
 3. Content terms are the rest of the claim's words, stemmed by Postgres (`to_tsvector('english', …)`, the same stemming as the keyword index), without stopwords, without negation words, and without answer words such as "yes", "also" and "however". Support is the share of the claim's distinct content terms that appear among the cited texts' stems.
 4. Negation: the words not, no, never, without, none, neither, nor, cannot and anything ending in n't are read from the raw text. There is a negation mismatch when the claim has one and no sentence of the cited texts has one together with a matched term, or the other way round.
+5. Polarity words: up, down, before, after, over, under, above, below, more, most, less, fewer, few, all, some, only, against, will, would, might, must, can, could and should are Postgres stopwords, so stemming alone would let "went up 11%" match "went down 11%". They are read from the raw text (`won't` counts as will, `cannot` as can), and every one in the claim must appear as a whole word in the cited texts.
+6. Counting words: when a content term of the claim that the cited texts lack is a number or ordinal word (`one`, `first`, `dozen`, `tenth`), the claim states a count or rank the source does not.
 
 Verdicts, from the first rule that applies:
 
@@ -136,11 +138,24 @@ Verdicts, from the first rule that applies:
 |---|---|
 | `bad_citation` | Every cite names nothing in that search (`P9` when it returned 5 passages; `F1` on a search logged before facts were recorded; a passage since re-chunked). Bad cites next to a good one are listed but do not change the verdict. |
 | `uncited` | No cites: the model's own statement. |
-| `supported` | Support at least 0.6, every number present, no negation mismatch. A claim with no content terms ("Yes [P1].") is supported when it has no numbers and no negation mismatch, since it states nothing the source could contradict; with numbers it is at most partial, because nothing says what the figure measures. |
-| `partial` | Support at least 0.3, or support at least 0.6 with a missing number or a negation mismatch. |
-| `unsupported` | Support below 0.3. A missing number never raises a verdict. |
+| `supported` | Support at least 0.6, every number and polarity word present, no negation mismatch, and no missing term that is a number or ordinal word. A claim with no content terms ("Yes [P1].") is supported when it has no numbers, no negation mismatch and no missing polarity word, since it states nothing the source could contradict; with numbers it is at most partial, because nothing says what the figure measures. |
+| `partial` | Support at least 0.3, or support at least 0.6 with a missing number, a missing polarity word, a missing number or ordinal word, or a negation mismatch. |
+| `unsupported` | Support below 0.3. A failed check never raises a verdict. |
 
-What it does not check: logic and reasoning; a paraphrase in different words (a correct claim can be partial or unsupported, which is the safe direction); sarcasm; certainty ("may" against "will"); relations between quantities ("more than", "fell from X to Y": the numbers are present, so the order is not checked); and an added detail when most of the claim's words match (one new word among five matching ones still passes 0.6). Slash dates (`9/29/2026`) are read as three numbers, and a bare `5m` is read as 5 million.
+What it does not check. Read `supported` as "the cited text contains this claim's words and numbers", not as proof:
+
+- It checks word overlap, not who did what to whom: reversed relations ("Acme led Beta Ventures' round") and swapped entities pass.
+- A number only has to appear somewhere in the cited text, not attached to the same thing ("Acme employs 40 people" passes against "grow its teams by 40 people").
+- All cited texts are pooled, so citing unrelated passages together can support a claim that neither supports alone.
+- Negation is checked per sentence, not per clause.
+- Antonyms ("halved" for "quadrupled") and words like "former" are not detected.
+- Up to 40% of a claim's content words can be absent at `supported`, so one added detail in a short claim can pass.
+- A bare amount ignores its unit (20 minutes matches 20 hours), though `%` and percentage points are told apart.
+- A claim made only of stopwords ("Yes.", "They did.") is vacuously supported.
+- A correct paraphrase in other words scores partial or unsupported (the safe direction).
+- A raw fact id is checked against the fact as stored now; when that fact has been superseded the verification notes it.
+
+Polarity words (up/down, before/after, more/less, all/some, only, will/might and the rest above) are now checked; reasoning, sarcasm and certainty words outside that list ("may", "probably") are not.
 
 Reading the output. Worked example: a search returned the compensation section of `eval/corpus/job_description--acme-senior-data-analyst.md` as P1 ("Base salary range $115,000 to $140,000. Acme sponsors H-1B for this role. Hybrid, three days a week in the Austin office. …", under the heading "Compensation and visa"), and the answer was "Acme sponsors H-1B visas for this role [P1]. The base salary is $115k to $150k [P1]. The role is not hybrid [P1]. The company will pay for relocation to Austin [P1]. It looks like a strong fit."
 
@@ -152,7 +167,7 @@ verification 12bf8876-… · retrieval a4cf4454-… · 5 claims
 ~ partial 1.00 — "The role is not hybrid." [P1]
     negation differs from the cited text
 ✗ unsupported 0.25 — "The company will pay for relocation to Austin." [P1]
-    missing terms: company, pay, relocation
+    missing terms: company, pay, relocation · missing polarity words: will
 ○ uncited - — "It looks like a strong fit."
     no citation: nothing from the knowledge base backs this
 Summary: 1 supported, 2 partial, 1 unsupported, 1 uncited
@@ -162,7 +177,7 @@ Each line is the verdict, the support (`-` when there is none), the claim and it
 
 `brain_verify` takes at most 50 claims of at most 2,000 characters, with at most 20 cites each. `brain ask` splits its own answer into sentences (a line break, or `.` `!` `?` followed by a word that does not start in lower case, never after `e.g.`, `Dr.`, `U.S.` or an initial, never at a decimal point), cites the `[P#]`/`[F#]` labels inside each sentence, and prints the check under its sources.
 
-How well it works is measured on `eval/verifier.jsonl`: 63 claims quoted against the eval corpus, covering restatements, paraphrases, wrong numbers, negation flips, unrelated claims, claims spanning two passages, claims without content words, facts, number and date forms, hedging, added details, and three known limits (certainty, a reversed quantity relation, one added detail) labelled not supported so they count as errors. `npm run brain -- eval verifier` prints each item, the confusion matrix, precision and recall of `supported`, and accuracy; `eval run` prints the one-line summary, and `eval run --gate` fails when precision of `supported` is below 0.9 (a claim wrongly marked supported is worse than one wrongly flagged). On 2026-10-03: precision 0.92, recall 0.97, accuracy 0.92 (34 of 37 claims marked supported were labelled supported; the three errors are the known limits). A paraphrase that is true but the method cannot recognise is labelled with the verdict the method is designed to give, so these numbers measure the stated method; a claim labelled `supported` is always one its cited text really supports. These labels were written by an agent (`labelled_by: "agent:claude"`), not by the owner: review them, and add your own with `labelled_by: "owner"`.
+How well it works is measured on `eval/verifier.jsonl`: 101 claims quoted against the eval corpus (and, for the number and polarity forms the corpus lacks, written out as facts), covering restatements, paraphrases, wrong numbers, signs, versions, numeric dates, digit groups, negation flips, polarity words, number and ordinal words, unrelated claims, claims spanning two passages, claims without content words, facts, number and date forms, hedging and added details, plus 21 known limits: reversed relations, swapped entities, numbers attached to another thing, pooling across cites, negation on the wrong clause, antonyms and "former", bare amounts with another unit, stopword-only claims, certainty and one added detail. The known limits are labelled with their true verdict (not supported), so each one the verifier passes counts as an error. `npm run brain -- eval verifier` prints each item, the confusion matrix, precision and recall of `supported`, and accuracy; `eval run` prints the one-line summary, and `eval run --gate` fails when precision of `supported` is below 0.9 (a claim wrongly marked supported is worse than one wrongly flagged). On 2026-10-03: precision 0.66, recall 0.97, accuracy 0.79 (37 of 56 claims marked supported were labelled supported; all 19 errors are known limits), so the gate currently fails on this set: the limits above are real and frequent enough to matter. A paraphrase that is true but the method cannot recognise is labelled with the verdict the method is designed to give; a claim labelled `supported` is always one its cited text really supports. These labels were written by an agent (`labelled_by: "agent:claude"`), not by the owner: review them, and add your own with `labelled_by: "owner"`.
 
 ### Claude Code (this Mac)
 

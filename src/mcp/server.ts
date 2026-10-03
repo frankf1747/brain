@@ -15,7 +15,7 @@ import { describeNode } from "../graph/inspect.js";
 import { addFact, supersedeFact, listFacts } from "../graph/facts.js";
 import { refreshMirror } from "../obsidian/auto.js";
 import { JobManager } from "./jobs.js";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, renderExplain, renderVerification } from "./render.js";
+import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, renderExplain, renderVerification, VERIFY_NOT_CHECKED } from "./render.js";
 
 export interface ServerOptions {
   client: string;
@@ -186,9 +186,9 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
       title: "Check an answer against its sources",
       description:
         "Checks each claim of an answer you wrote from a brain_search result against the passages and facts it cites, with no model call. Pass the retrieval id from the result's first line and each claim with the labels it cites (P1, F2; passage chunk ids and fact ids also work; [] for a claim of your own). " +
-        "For each claim it compares the claim's content words (Postgres English stemming, stopwords removed) with the cited texts, requires every number, date and code in the claim to appear in them (1,000 = 1000, ~11% = 11 percent, $115k = $115,000, Sep 29, 2026 = 2026-09-29), and checks that negation agrees. " +
-        "Verdicts: supported (at least 60% of the claim's content words are in the cited text, every number appears, negation agrees); partial (at least 30%, or a number is missing, or negation differs); unsupported (under 30%); uncited (no cites); bad_citation (no cite exists in that search). " +
-        "Limits: it checks vocabulary overlap, not logic. A correct paraphrase in different words can score partial or unsupported; it never scores supported when most of the claim's words are absent from the cited text. It does not check reasoning, sarcasm, certainty (may versus will), or relations between quantities (more than, fell from X to Y). " +
+        "For each claim it compares the claim's content words (Postgres English stemming, stopwords removed) with the cited texts, requires every number, date and code in the claim to appear in them (1,000 = 1000, ~11% = 11 percent, $115k = $115,000, Sep 29, 2026 = 2026-09-29; -5% is not 5%, v2.5 is not v2.7, 3/4/2026 and 555-1234 are compared as written), checks that negation agrees, and requires every polarity word of the claim (up, down, before, after, over, under, more, less, all, some, only, will, might, can, should, …) to appear in the cited text. " +
+        "Verdicts: supported (at least 60% of the claim's content words are in the cited text, every number and polarity word appears, negation agrees, and no missing word is a number or ordinal word such as one, first or dozen); partial (at least 30%, or one of those checks fails); unsupported (under 30%); uncited (no cites); bad_citation (no cite exists in that search). " +
+        `Limits: it checks vocabulary overlap, not logic. Not checked: ${VERIFY_NOT_CHECKED.join("; ")}. Treat supported as "the cited text contains this claim's words and numbers", not as proof. ` +
         `At most ${MAX_CLAIMS} claims of at most 2,000 characters each. Writes one audit row to brain.verification_log and changes nothing in the knowledge base. The same result is returned as structuredContent.`,
       inputSchema: {
         retrieval_id: z.string().min(1).describe("The id after 'retrieval' on the first line of the brain_search result the answer was written from"),

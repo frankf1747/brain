@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { extractNumbers, citedNumberSet, hasNegation, claimWords, isContentLexeme, splitSentences } from "../../src/verify/terms.js";
+import {
+  extractNumbers, citedNumberSet, hasNegation, claimWords, isContentLexeme, splitSentences, polarityWords, isNumberWord, POLARITY_WORDS,
+} from "../../src/verify/terms.js";
 
 const values = (t: string) => extractNumbers(t).values;
 
@@ -98,5 +100,54 @@ describe("splitSentences", () => {
 
   it("returns nothing for blank text", () => {
     expect(splitSentences(" \n\n ")).toEqual([]);
+  });
+});
+
+describe("extractNumbers: signs, versions, numeric dates and digit groups (review fixes)", () => {
+  it("keeps a leading minus at the start, after whitespace or after (, so -5% is not 5%", () => {
+    expect(values("-5% overall, then −3%, (-2 to 4) and -$5k")).toEqual(["-$5000", "-5%", "-3%", "-2", "4"]);
+    expect(values("-5 degrees")).toEqual(["-5"]);
+    expect(values("5 degrees")).toEqual(["5"]);
+    expect(values("- 4+ years")).toEqual(["4"]);
+  });
+
+  it("keeps dotted versions whole: v2.5 is not v2.7, 3.12.1 is not 3.12.9", () => {
+    expect(values("dbt v2.5 and V2.7")).toEqual(["V2.5", "V2.7"]);
+    expect(values("Python 3.12.1, not 3.12.9; IP 10.0.0.1")).toEqual(["3.12.1", "3.12.9", "10.0.0.1"]);
+    expect(values("1.5k orders and 2.50 hours")).toEqual(["1500", "2.5"]);
+  });
+
+  it("keeps numeric dates, digit-only hyphen groups and percent ranges exactly as written", () => {
+    expect(values("Started 3/4/2026")).toEqual(["3/4/2026"]);
+    expect(values("on 29.09.2026")).toEqual(["29.09.2026"]);
+    expect(values("call 555-1234")).toEqual(["555-1234"]);
+    expect(values("churn fell 20-30%")).toEqual(["20-30%"]);
+    expect(values("March 2026 with 4 people and 3 laptops")).toEqual(["2026-03", "4", "3"]);
+  });
+});
+
+describe("polarityWords", () => {
+  it("lists the direction, order, comparison, scope and modality words Postgres drops, as whole words, lower-cased", () => {
+    expect(POLARITY_WORDS).toEqual(expect.arrayContaining(["up", "down", "before", "after", "over", "under", "more", "less", "all", "some", "only", "will", "might"]));
+    expect([...polarityWords("Retention went UP before the launch; only some will")].sort()).toEqual(["before", "only", "some", "up", "will"]);
+    expect([...polarityWords("upper downtown overall allow cannery")]).toEqual([]);
+  });
+
+  it("reads won't, can't, cannot and shouldn't as will, can, can and should", () => {
+    expect([...polarityWords("Acme won't, can't, cannot, shouldn't")].sort()).toEqual(["can", "should", "will"]);
+  });
+});
+
+describe("isNumberWord", () => {
+  it("is true for number words and ordinal words, including hyphenated ones, in any case", () => {
+    expect(["one", "First", "dozen", "tenth", "seven", "twenty-first", "hundreds"].map(isNumberWord)).toEqual([true, true, true, true, true, true, true]);
+    expect(["patent", "someone", "often", "Acme"].map(isNumberWord)).toEqual([false, false, false, false]);
+  });
+});
+
+describe("splitSentences: month abbreviations", () => {
+  it("does not end a sentence after Jan. Feb. … Sept. Dec.", () => {
+    expect(splitSentences("He joined in Jan. 2024. He left in Sept. 2025.")).toEqual(["He joined in Jan. 2024.", "He left in Sept. 2025."]);
+    expect(splitSentences("joined in Jan. 2024. He left")).toEqual(["joined in Jan. 2024.", "He left"]);
   });
 });

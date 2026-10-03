@@ -195,7 +195,7 @@ The response lists each claim with its verdict, its support value, the missing t
 
 ### 7.3 Limits, stated in the tool description
 
-A paraphrase with different vocabulary can score `partial` even when correct; the verifier never scores `supported` when the claim's terms are absent from the citation. It checks vocabulary overlap, not logic. That is the right trade for a check that costs no model call.
+A paraphrase with different vocabulary can score `partial` even when correct. The verifier never scores `supported` when more than 40% of the claim's content terms are absent from the citation (support below 0.6); up to 40% may be absent, so one added detail in a short claim can pass. It checks vocabulary overlap, not logic: reversed relations, swapped entities, numbers attached to another thing, pooling across cites, clause-level negation, antonyms, units of bare amounts and stopword-only claims are not checked (the README lists them). That is the right trade for a check that costs no model call.
 
 The CLI `ask` command runs the same verifier on its own answer and prints the verdicts under the sources.
 

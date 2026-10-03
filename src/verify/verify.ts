@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { Db } from "../db.js";
-import { claimWords, citedNumberSet, extractNumbers, hasNegation, isContentLexeme, splitSentences, stemAll, type StemMap } from "./terms.js";
+import {
+  claimWords, citedNumberSet, extractNumbers, hasNegation, isContentLexeme, isNumberWord, polarityWords, splitSentences, stemAll, type StemMap,
+} from "./terms.js";
 
 /**
  * The citation verifier's method (spec §7.2): for one claim and the texts it cites, how much of the claim's
@@ -16,6 +18,9 @@ import { claimWords, citedNumberSet, extractNumbers, hasNegation, isContentLexem
  *  - numbers: every number, date and code in the claim must be in the cited texts' citedNumberSet.
  *  - negation mismatch: the claim has a negation word, but no sentence of the cited texts has one together with a
  *    matched term; or the claim has none, but such a sentence does.
+ *  - polarity: every polarity word of the claim (up, down, before, after, more, less, all, some, only, will, might, …;
+ *    terms.ts POLARITY_WORDS) must appear as a whole word in the cited texts, or the claim is capped at partial.
+ *  - counting words: a missing term that is a number or ordinal word (one, first, dozen, tenth) caps it at partial.
  */
 
 /** Lowest support for `supported`. */
@@ -60,6 +65,8 @@ export const ClaimResultSchema = z.object({
   /** The claim's numbers, dates and codes (canonical form) that no cited text states. */
   missingNumbers: z.array(z.string()),
   negationMismatch: z.boolean(),
+  /** The claim's polarity words (up, before, more, all, only, will, …) that no cited text contains. */
+  missingPolarity: z.array(z.string()),
   /** Cites that name nothing in that search (or in the knowledge base), with the reason. */
   badLabels: z.array(BadLabelSchema),
   /** The good cites, resolved. */
@@ -120,6 +127,8 @@ export interface ClaimCheck {
   numberCount: number;
   missingNumbers: string[];
   negationMismatch: boolean;
+  /** Polarity words of the claim that no cited text contains. */
+  missingPolarity: string[];
 }
 
 function lexemesOf(stems: StemMap, text: string): string[] {
@@ -148,6 +157,9 @@ export function checkClaim(claimText: string, cited: CitedText[], stems: StemMap
   const missingNumbers = [...new Set(numbers)].filter((n) => !citedNumbers.has(n));
 
   const matchedSet = new Set(matched);
+  const citedPolarity = new Set(cited.flatMap((c) => [...polarityWords(c.text)]));
+  const missingPolarity = [...polarityWords(claim)].filter((w) => !citedPolarity.has(w));
+
   const citedNegates = sentences.some((s) => hasNegation(s.text) && [...s.lexemes].some((l) => matchedSet.has(l)));
 
   return {
@@ -158,26 +170,31 @@ export function checkClaim(claimText: string, cited: CitedText[], stems: StemMap
     numberCount: numbers.length,
     missingNumbers,
     negationMismatch: hasNegation(claim) !== citedNegates,
+    missingPolarity,
   };
 }
 
 /**
  * The verdict, from the first rule that applies:
  *  1. no good cite: bad_citation if any cite was given (all of them bad), else uncited;
- *  2. no content terms (e.g. "Yes."): supported if it has no numbers and no negation mismatch; partial if it has
- *     numbers and the cited texts state all of them, or a negation mismatch; unsupported if a number is missing;
- *  3. support < PARTIAL_MIN: unsupported (a missing number or a negation mismatch never raises a verdict);
- *  4. support ≥ SUPPORTED_MIN, no missing number, no negation mismatch: supported;
+ *  2. no content terms (e.g. "Yes."): supported if it has no numbers, no negation mismatch and no missing polarity
+ *     word; partial if it has numbers and the cited texts state all of them, or a negation mismatch, or a missing
+ *     polarity word; unsupported if a number is missing;
+ *  3. support < PARTIAL_MIN: unsupported (a missing number, polarity word or counting word, or a negation mismatch,
+ *     never raises a verdict);
+ *  4. support ≥ SUPPORTED_MIN, no missing number, no negation mismatch, no missing polarity word, and no missing term
+ *     that is a number or ordinal word: supported;
  *  5. otherwise partial.
  */
 export function verdictOf(check: ClaimCheck, goodCites: number, badCites: number): Verdict {
   if (goodCites === 0) return badCites > 0 ? "bad_citation" : "uncited";
   if (check.support === null) {
-    if (check.numberCount === 0) return check.negationMismatch ? "partial" : "supported";
+    if (check.numberCount === 0) return check.negationMismatch || check.missingPolarity.length ? "partial" : "supported";
     return check.missingNumbers.length === 0 ? "partial" : "unsupported";
   }
   if (check.support < PARTIAL_MIN) return "unsupported";
-  if (check.support >= SUPPORTED_MIN && check.missingNumbers.length === 0 && !check.negationMismatch) return "supported";
+  const capped = check.missingNumbers.length > 0 || check.negationMismatch || check.missingPolarity.length > 0 || check.missingTerms.some(isNumberWord);
+  if (check.support >= SUPPORTED_MIN && !capped) return "supported";
   return "partial";
 }
 
@@ -194,7 +211,7 @@ const round3 = (x: number) => Math.round(x * 1000) / 1000;
 
 /** Judges one claim. Pure: `stems` must hold every string stemInputs(claim.text, claim.cited) returns. */
 export function judge(claim: ClaimToJudge, stems: StemMap): ClaimResult {
-  const empty: ClaimCheck = { termCount: 0, support: null, matchedTerms: [], missingTerms: [], numberCount: 0, missingNumbers: [], negationMismatch: false };
+  const empty: ClaimCheck = { termCount: 0, support: null, matchedTerms: [], missingTerms: [], numberCount: 0, missingNumbers: [], negationMismatch: false, missingPolarity: [] };
   const check = claim.cited.length ? checkClaim(claim.text, claim.cited, stems) : empty;
   return {
     claim: stripLabels(claim.text),
@@ -205,6 +222,7 @@ export function judge(claim: ClaimToJudge, stems: StemMap): ClaimResult {
     missingTerms: check.missingTerms,
     missingNumbers: check.missingNumbers,
     negationMismatch: check.negationMismatch,
+    missingPolarity: check.missingPolarity,
     badLabels: claim.badLabels,
     cites: claim.cites,
   };

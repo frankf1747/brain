@@ -117,14 +117,30 @@ export function verdictDetail(c: ClaimResult): string | null {
     c.missingTerms.length ? `missing terms: ${c.missingTerms.join(", ")}` : null,
     c.missingNumbers.length ? `missing numbers: ${c.missingNumbers.join(", ")}` : null,
     c.negationMismatch ? "negation differs from the cited text" : null,
+    c.missingPolarity.length ? `missing polarity words: ${c.missingPolarity.join(", ")}` : null,
     ...bad,
   ].filter((x): x is string => x !== null);
   return parts.length ? `    ${parts.join(" · ")}` : null;
 }
 
+/** What the check does not catch, in plain words: shown in brain_verify's description and under every verification. */
+export const VERIFY_NOT_CHECKED = [
+  "it checks word overlap, not who did what to whom, so reversed relations and swapped entities pass",
+  "a number only has to appear somewhere in the cited text, not attached to the same thing",
+  "all cited texts are pooled, so citing unrelated passages together can support a claim neither supports alone",
+  "negation is checked per sentence, not per clause",
+  "antonyms and words like \"former\" are not detected",
+  "up to 40% of a claim's content words can be absent at supported, so one added detail in a short claim can pass",
+  "a bare amount ignores its unit (20 minutes matches 20 hours), though % and percentage points are told apart",
+  "a claim made only of stopwords (\"Yes.\", \"They did.\") is vacuously supported",
+  "a correct paraphrase in other words scores partial or unsupported",
+  "a raw fact id is checked against the fact as stored now, which may have been superseded since",
+] as const;
+
 /** What was checked and what was not; printed under every verification. */
 export const VERIFY_LIMITS =
-  "Checked: content words (stemmed), numbers, dates and codes, and negation. Not checked: reasoning, paraphrase in other words, sarcasm, relations between quantities.";
+  "Checked: content words (stemmed), numbers, dates and codes, negation, and polarity words (up/down, before/after, more/less, all/some, only, will/might). " +
+  `Not checked: ${VERIFY_NOT_CHECKED.join("; ")}.`;
 
 /** brain_verify, `brain verify` and the check under `brain ask`: one line per claim, details for the rest, the summary. */
 export function renderVerification(v: Verification): string {

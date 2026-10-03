@@ -56,6 +56,51 @@ export function hasNegation(text: string): boolean {
   return NEGATION_RE.test(text);
 }
 
+/**
+ * Polarity words: direction, order, comparison, scope and modality. The english stopword list drops most of them
+ * ("went up 11%" and "went down 11%" have the same lexemes), so they are read from the raw text, like negation, and
+ * every one in a claim must appear in the cited text (polarityWords).
+ */
+export const POLARITY_WORDS = [
+  "up", "down", "before", "after", "over", "under", "above", "below", "more", "most", "less", "fewer", "few", "all", "some",
+  "only", "against", "will", "would", "might", "must", "can", "could", "should",
+] as const;
+const POLARITY_SET = new Set<string>(POLARITY_WORDS);
+/** Negative contractions and cannot, read as their polarity word: won't is will, can't and cannot are can. */
+const POLARITY_CONTRACTIONS: Record<string, string> = { wo: "will", ca: "can", would: "would", could: "could", should: "should", must: "must", might: "might" };
+
+/** The polarity words in a raw text, lower-cased, as whole words (won't counts as will, cannot and can't as can). */
+export function polarityWords(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/(?<![\p{L}\p{N}'’])(\p{L}+?)(?:n['’]t)?(?![\p{L}\p{N}])/gu)) {
+    const whole = m[0].toLowerCase();
+    const base = m[1].toLowerCase();
+    if (/n['’]t$/.test(whole)) {
+      const w = POLARITY_CONTRACTIONS[base];
+      if (w) out.add(w);
+    } else if (base === "cannot") out.add("can");
+    else if (POLARITY_SET.has(base)) out.add(base);
+  }
+  return out;
+}
+
+/** Counting words: when one of them is a missing term, the claim states a count or rank the cited text does not. */
+const NUMBER_WORDS = new Set([
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+  "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty",
+  "ninety", "hundred", "hundreds", "thousand", "thousands", "million", "millions", "billion", "billions", "dozen", "dozens",
+  "half", "twice", "once", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+  "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth",
+  "twentieth", "thirtieth", "fortieth", "fiftieth", "sixtieth", "seventieth", "eightieth", "ninetieth", "hundredth",
+  "thousandth", "millionth", "billionth",
+]);
+
+/** True for a number word or an ordinal word ("one", "first", "dozen", "tenth", "twenty-first"), in any case. */
+export function isNumberWord(word: string): boolean {
+  const parts = word.toLowerCase().split("-");
+  return parts.length > 0 && parts.every((p) => NUMBER_WORDS.has(p));
+}
+
 /** won't, can't, shan't and ain't do not end in their base word plus n't. */
 const CONTRACTION_BASE: Record<string, string> = { wo: "will", ca: "can", sha: "shall", ai: "is" };
 
@@ -97,6 +142,9 @@ const month = (name: string) => pad(MONTHS[name.slice(0, 3).toLowerCase()]);
 const MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?!\\p{L})\\.?";
 const DAY = "(\\d{1,2})(?:st|nd|rd|th)?";
 const NUM = "(\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.(\\d+))?";
+/** A leading minus (- or −) at the start of the text or after whitespace or "(": captured, so -5% is not 5%. */
+const SIGN = "(?:(?<=^|[\\s(])([-−]))?";
+const signed = (sign: string | undefined, v: string) => (sign ? "-" + v : v);
 
 const SCALE: Record<string, number> = { k: 1e3, thousand: 1e3, m: 1e6, mm: 1e6, million: 1e6, b: 1e9, bn: 1e9, billion: 1e9 };
 
@@ -127,12 +175,15 @@ function isCode(token: string): boolean {
   return /\p{L}/u.test(token) && /\p{N}/u.test(token) && !/^\d+(?:[.,]\d+)*(?:k|m|mm|b|bn|st|nd|rd|th)$/i.test(token);
 }
 
-type Rule = [RegExp, (m: string[]) => string | null];
+type Rule = [RegExp, (m: string[]) => string | string[] | null];
 
 /**
  * The extraction rules, applied in this order; each match is replaced by a space so later rules cannot read it again.
  * A rule returning null leaves its match in place. The canonical forms:
  *   dates     2026-09-29 (full), 2026-09 (month and year), --09-29 (month and day, no year)
+ *   as written  numeric dates (3/4/2026, 29.09.2026), dotted versions (3.12.1), digit groups (555-1234; a range of two
+ *             years, 2019-2023, is two years), percent ranges (20-30%): compared exactly as written
+ *   sign      a leading - or − at the start, after whitespace or after "(" stays with the number (-5%, -$5000, -2)
  *   money     $115000 ($115k, $115K, $115,000, 115,000 dollars, USD 115000; k/m/b and thousand/million/billion scale)
  *   percent   11% (11%, ~11%, 11 %, 11 percent, 11 per cent)
  *   codes     H-1B, F-1, ZX-9000 (upper-cased tokens with a letter and a digit)
@@ -152,18 +203,23 @@ const RULES: Rule[] = [
   // Sep 29 · 29 Sep (no year). A lower-case "may" here is the verb ("5 may help"), not the month.
   [new RegExp(`(?<![\\p{L}])${MONTH}\\s+${DAY}(?![\\p{L}\\p{N}])`, "giu"), (m) => (m[1] === "may" ? null : `--${month(m[1])}-${pad(Number(m[2]))}`)],
   [new RegExp(`(?<![\\p{L}\\p{N}])${DAY}\\s+(?:of\\s+)?${MONTH}`, "giu"), (m) => (m[2] === "may" ? null : `--${month(m[2])}-${pad(Number(m[1]))}`)],
+  // As written: numeric dates, dotted versions, percent ranges, digit-only hyphen groups.
+  [/(?<![\p{L}\p{N}.\/-])\d{1,4}[/.]\d{1,2}[/.]\d{2,4}(?![\p{L}\p{N}]|[./-]\p{N})/gu, (m) => m[0]],
+  [/(?<![\p{L}\p{N}.])\d+(?:\.\d+){2,}(?![\p{L}\p{N}]|\.\p{N})/gu, (m) => m[0]],
+  [/(?<![\p{L}\p{N}.\-$,])(\d+-\d+)\s?(?:%|percent(?!\p{L}))/giu, (m) => m[1] + "%"],
+  [/(?<![\p{L}\p{N}.\-$,/])\d+(?:-\d+)+(?![\p{L}\p{N}]|-\p{L})/gu, (m) => (/^(?:1[89]|20)\d\d-(?:1[89]|20)\d\d$/.test(m[0]) ? m[0].split("-") : m[0])],
   // Money.
-  [new RegExp(`(?:US)?\\$\\s?${NUM}(?:(k|mm|m|bn|b)(?![\\p{L}\\p{N}])|\\s?(thousand|million|billion)(?!\\p{L}))?`, "giu"), (m) => "$" + canonNumber(m[1], m[2], SCALE[(m[3] ?? m[4] ?? "").toLowerCase()] ?? 1)],
-  [new RegExp(`(?<![\\p{L}\\p{N}.])${NUM}(?:\\s?(thousand|million|billion))?\\s+(?:dollars|usd)(?!\\p{L})`, "giu"), (m) => "$" + canonNumber(m[1], m[2], SCALE[(m[3] ?? "").toLowerCase()] ?? 1)],
+  [new RegExp(`${SIGN}(?:US)?\\$\\s?${NUM}(?:(k|mm|m|bn|b)(?![\\p{L}\\p{N}])|\\s?(thousand|million|billion)(?!\\p{L}))?`, "giu"), (m) => signed(m[1], "$" + canonNumber(m[2], m[3], SCALE[(m[4] ?? m[5] ?? "").toLowerCase()] ?? 1))],
+  [new RegExp(`${SIGN}(?<![\\p{L}\\p{N}.])${NUM}(?:\\s?(thousand|million|billion))?\\s+(?:dollars|usd)(?!\\p{L})`, "giu"), (m) => signed(m[1], "$" + canonNumber(m[2], m[3], SCALE[(m[4] ?? "").toLowerCase()] ?? 1))],
   [new RegExp(`(?<![\\p{L}])usd\\s?${NUM}`, "giu"), (m) => "$" + canonNumber(m[1], m[2])],
   // Percent.
-  [new RegExp(`(?<![\\p{L}\\p{N}.])${NUM}\\s?(?:%|percent(?!\\p{L})|per\\s+cent(?!\\p{L}))`, "giu"), (m) => canonNumber(m[1], m[2]) + "%"],
+  [new RegExp(`${SIGN}(?<![\\p{L}\\p{N}.])${NUM}\\s?(?:%|percent(?!\\p{L})|per\\s+cent(?!\\p{L}))`, "giu"), (m) => signed(m[1], canonNumber(m[2], m[3]) + "%")],
   // Codes.
-  [/(?<![\p{L}\p{N}-])[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)+(?![\p{L}\p{N}])|(?<![\p{L}\p{N}-])[\p{L}\p{N}]+(?![\p{L}\p{N}-])/gu, (m) => (isCode(m[0]) ? m[0].toUpperCase() : null)],
+  [/(?<![\p{L}\p{N}-])[\p{L}\p{N}]+(?:[-.][\p{L}\p{N}]+)+(?![\p{L}\p{N}])|(?<![\p{L}\p{N}-])[\p{L}\p{N}]+(?![\p{L}\p{N}-])/gu, (m) => (isCode(m[0]) ? m[0].toUpperCase() : null)],
   // Ordinals.
   [/(?<![\p{L}\p{N}])(\d+)(?:st|nd|rd|th)(?![\p{L}\p{N}])/giu, (m) => ordinal(Number(m[1]))],
   // Plain numbers, with an attached k/m/b or a following thousand/million/billion.
-  [new RegExp(`(?<![\\p{L}\\p{N}.])${NUM}(?:(k|mm|m|bn|b)(?![\\p{L}\\p{N}])|\\s?(thousand|million|billion)(?!\\p{L}))?`, "giu"), (m) => canonNumber(m[1], m[2], SCALE[(m[3] ?? m[4] ?? "").toLowerCase()] ?? 1)],
+  [new RegExp(`${SIGN}(?<![\\p{L}\\p{N}.])${NUM}(?:(k|mm|m|bn|b)(?![\\p{L}\\p{N}])|\\s?(thousand|million|billion)(?!\\p{L}))?`, "giu"), (m) => signed(m[1], canonNumber(m[2], m[3], SCALE[(m[4] ?? m[5] ?? "").toLowerCase()] ?? 1))],
   // Number words.
   [
     /(?<![\p{L}-])(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-(one|two|three|four|five|six|seven|eight|nine))?(?:\s+(hundred|thousand|million|billion))?(?![\p{L}-])/giu,
@@ -184,7 +240,7 @@ export function extractNumbers(text: string): { values: string[]; rest: string }
       const m = [match, ...(more.slice(0, more.findIndex((x) => typeof x === "number")) as string[])];
       const v = canon(m);
       if (v === null) return match;
-      values.push(v);
+      values.push(...(Array.isArray(v) ? v : [v]));
       return " ";
     });
   }
@@ -204,13 +260,16 @@ export function citedNumberSet(values: string[]): Set<string> {
     let m: RegExpExecArray | null;
     if ((m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v))) out.add(`${m[1]}-${m[2]}`).add(m[1]).add(`--${m[2]}-${m[3]}`);
     else if ((m = /^(\d{4})-(\d{2})$/.exec(v))) out.add(m[1]);
-    else if (v.startsWith("$")) out.add(v.slice(1));
+    else if ((m = /^(-?)\$(.+)$/.exec(v))) out.add(m[1] + m[2]);
   }
   return out;
 }
 
-/** Never ends a sentence: titles, Latin abbreviations, and U.S./U.K. ("e.g. Snowflake", "Dr. Smith"). */
-const NEVER_ENDS = new Set(["mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "e.g", "i.e", "vs", "cf", "approx", "no", "fig", "u.s", "u.k"]);
+/** Never ends a sentence: titles, Latin abbreviations, U.S./U.K. and month abbreviations ("e.g. Snowflake", "Dr. Smith", "Jan. 2024"). */
+const NEVER_ENDS = new Set([
+  "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "e.g", "i.e", "vs", "cf", "approx", "no", "fig", "u.s", "u.k",
+  "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+]);
 
 /**
  * Splits text into sentences. Every line break ends a sentence, and a leading list marker (-, *, •, 1., 1)) is dropped.

@@ -77,7 +77,7 @@ describe("parseVerifierSet and toClaim", () => {
 describe("renderVerifierRun", () => {
   it("marks each item ok or MISS, prints the confusion matrix and the summary line", () => {
     const result = (verdict: Verdict, support: number | null) => ({
-      claim: "c", labels: [], verdict, support, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, badLabels: [], cites: [],
+      claim: "c", labels: [], verdict, support, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, missingPolarity: [], badLabels: [], cites: [],
     });
     const items = [
       { id: "v1", case: "exact" as const, expected: "supported" as const, predicted: "supported" as const, result: result("supported", 1) },

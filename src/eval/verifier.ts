@@ -13,7 +13,7 @@ import { VERDICTS, VerdictSchema, factText, passageText, verifyTexts, type Claim
 /** What each item exercises; the fixture test requires every case at least once. */
 export const VERIFIER_CASES = [
   "exact", "paraphrase", "wrong_number", "negation", "unrelated", "two_passages", "no_terms", "fact", "number_form", "date_form",
-  "hedged", "partial_overlap", "uncited", "bad_citation", "known_limit",
+  "hedged", "partial_overlap", "uncited", "bad_citation", "known_limit", "polarity", "number_word",
 ] as const;
 
 const PassageCiteSchema = z.object({

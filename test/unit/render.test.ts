@@ -145,7 +145,7 @@ describe("renderSources", () => {
 describe("renderVerification", () => {
   const claim = (over: Partial<ClaimResult> = {}): ClaimResult => ({
     claim: "Acme sponsors H-1B visas.", labels: ["P1"], verdict: "supported", support: 1, matchedTerms: ["Acme", "sponsors", "visas"],
-    missingTerms: [], missingNumbers: [], negationMismatch: false, badLabels: [],
+    missingTerms: [], missingNumbers: [], negationMismatch: false, missingPolarity: [], badLabels: [],
     cites: [{ label: "P1", kind: "passage", documentId: "d1", chunkId: "c1", factId: null, title: "Doc" }], ...over,
   });
 
@@ -164,6 +164,9 @@ describe("renderVerification", () => {
     );
     expect(verdictDetail(claim({ verdict: "partial", support: 0.5, missingTerms: ["Denver"], missingNumbers: ["$140000"], negationMismatch: true }))).toBe(
       "    missing terms: Denver · missing numbers: $140000 · negation differs from the cited text",
+    );
+    expect(verdictDetail(claim({ verdict: "partial", support: 1, missingPolarity: ["up", "only"] }))).toBe(
+      "    missing polarity words: up, only",
     );
     expect(verdictDetail(claim({ verdict: "partial", support: null }))).toBe("    no content words to compare");
     expect(verdictDetail(claim({ verdict: "uncited", support: null, labels: [], cites: [] }))).toBe("    no citation: nothing from the knowledge base backs this");
@@ -191,7 +194,7 @@ describe("renderVerification", () => {
 describe("renderAnswerCheck", () => {
   const v = {
     verificationId: "v1", retrievalId: "r1", notes: [],
-    claims: [{ claim: "Acme sponsors visas.", labels: ["P1"], verdict: "supported" as const, support: 1, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, badLabels: [], cites: [] }],
+    claims: [{ claim: "Acme sponsors visas.", labels: ["P1"], verdict: "supported" as const, support: 1, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, missingPolarity: [], badLabels: [], cites: [] }],
     summary: { supported: 1, partial: 0, unsupported: 0, uncited: 0, bad_citation: 0, text: "1 supported" },
   };
 

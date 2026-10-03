@@ -153,6 +153,51 @@ describe("claims without content terms", () => {
   });
 });
 
+describe("review fixes: false claims that must not be supported", () => {
+  it("a sign is part of the number: -5% is not 5%, -5 degrees is not 5 degrees", () => {
+    expect(run("Margins changed by -5%.", [P("Margins changed by 5%.")])).toMatchObject({ verdict: "partial", missingNumbers: ["-5%"] });
+    expect(run("The freezer runs at -5 degrees.", [P("The freezer runs at 5 degrees.")])).toMatchObject({ verdict: "partial", missingNumbers: ["-5"] });
+    expect(run("Margins changed by -5%.", [P("Margins changed by -5%.")]).verdict).toBe("supported");
+  });
+
+  it("a dotted version is compared whole: v2.5 is not v2.7, 3.12.1 is not 3.12.9", () => {
+    expect(run("Acme runs dbt v2.5.", [P("Acme runs dbt v2.7.")])).toMatchObject({ verdict: "partial", missingNumbers: ["V2.5"] });
+    expect(run("Acme requires Python 3.12.1.", [P("Acme requires Python 3.12.9.")])).toMatchObject({ verdict: "partial", missingNumbers: ["3.12.1"] });
+  });
+
+  it("a numeric date or a digit group is compared as written, not as loose numbers", () => {
+    expect(run("Frank started 3/4/2026.", [P("Frank started in March 2026 with 4 people and 3 laptops.")])).toMatchObject({ verdict: "partial", missingNumbers: ["3/4/2026"] });
+    expect(run("Priya's number is 555-1234.", [P("Priya's number is 555-4321, extension 1234.")])).toMatchObject({ verdict: "partial", missingNumbers: ["555-1234"] });
+    expect(run("Churn fell 20-30%.", [P("Churn fell 30% in the 20 largest accounts.")])).toMatchObject({ verdict: "partial", missingNumbers: ["20-30%"] });
+  });
+
+  it("every polarity word of the claim must be in the cited text, or the claim is capped at partial", () => {
+    const pairs: [string, string, string][] = [
+      ["Retention went up 11%.", "Retention went down 11%.", "up"],
+      ["Acme hired Dana before the round.", "Acme hired Dana after the round.", "before"],
+      ["Acme hires more analysts.", "Acme hires less analysts.", "more"],
+      ["All analysts work hybrid.", "Some analysts work hybrid.", "all"],
+      ["Acme will open a Denver office.", "Acme might open a Denver office.", "will"],
+      ["The project came in over budget.", "The project came in under budget.", "over"],
+      ["Only Acme sponsors visas.", "Acme sponsors visas.", "only"],
+    ];
+    for (const [claim, source, word] of pairs) {
+      expect([claim, run(claim, [P(source)])]).toMatchObject([claim, { verdict: "partial", missingPolarity: [word] }]);
+    }
+    expect(run("Retention went up 11%.", [P("Retention went up 11%.")])).toMatchObject({ verdict: "supported", missingPolarity: [] });
+    expect(run("Acme won't sponsor visas.", [P("Acme will not sponsor visas.")])).toMatchObject({ verdict: "supported", missingPolarity: [] });
+  });
+
+  it("a term-free claim with a polarity word the source lacks is partial", () => {
+    expect(run("It will [P1].", [P("Acme sponsors visas.")])).toMatchObject({ verdict: "partial", support: null, missingPolarity: ["will"] });
+  });
+
+  it("a missing number word or ordinal caps the claim at partial", () => {
+    expect(run("Acme holds one patent.", [P("Acme holds seven patents.")])).toMatchObject({ verdict: "partial", missingTerms: ["one"] });
+    expect(run("Dana was the first hire.", [P("Dana was the tenth hire.")])).toMatchObject({ verdict: "partial", missingTerms: ["first"] });
+  });
+});
+
 describe("helpers", () => {
   it("stripLabels removes [P1], [F2], [P1, F2] and [P1][F2], and the space they leave before punctuation", () => {
     expect(stripLabels("Acme sponsors visas [P1].")).toBe("Acme sponsors visas.");
@@ -164,7 +209,7 @@ describe("helpers", () => {
   });
 
   it("verdictOf follows the rule order in its comment", () => {
-    const base = { termCount: 2, support: 1, matchedTerms: [], missingTerms: [], numberCount: 0, missingNumbers: [], negationMismatch: false };
+    const base = { termCount: 2, support: 1, matchedTerms: [], missingTerms: [], numberCount: 0, missingNumbers: [], negationMismatch: false, missingPolarity: [] };
     expect(verdictOf(base, 0, 0)).toBe("uncited");
     expect(verdictOf(base, 0, 1)).toBe("bad_citation");
     expect(verdictOf({ ...base, support: 0.2, missingNumbers: ["5"], negationMismatch: true }, 1, 0)).toBe("unsupported");
