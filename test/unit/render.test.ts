@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
-  renderExplain, explainLine, renderSources, verdictLine, verdictDetail, renderVerification, VERIFY_LIMITS,
+  renderExplain, explainLine, renderSources, verdictLine, verdictDetail, renderVerification, VERIFY_LIMITS, renderAnswerCheck,
 } from "../../src/mcp/render.js";
 import type { ClaimResult } from "../../src/verify/verify.js";
 import { toLoggedPassages } from "../../src/retrieve/contract.js";
@@ -185,6 +185,31 @@ describe("renderVerification", () => {
       "Note: Old search.",
       VERIFY_LIMITS,
     ]);
+  });
+});
+
+describe("renderAnswerCheck", () => {
+  const v = {
+    verificationId: "v1", retrievalId: "r1", notes: [],
+    claims: [{ claim: "Acme sponsors visas.", labels: ["P1"], verdict: "supported" as const, support: 1, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, badLabels: [], cites: [] }],
+    summary: { supported: 1, partial: 0, unsupported: 0, uncited: 0, bad_citation: 0, text: "1 supported" },
+  };
+
+  it("introduces the verification, and says when sentences were left out", () => {
+    expect(renderAnswerCheck(v, null, 0).split("\n").slice(0, 3)).toEqual([
+      "Each sentence of the answer, checked against what it cites (no model call):",
+      "verification v1 · retrieval r1 · 1 claim",
+      '✓ supported 1.00 — "Acme sponsors visas." [P1]',
+    ]);
+    expect(renderAnswerCheck(v, null, 0)).not.toContain("Only the first");
+    expect(renderAnswerCheck(v, null, 4).split("\n").at(-1)).toBe("Only the first 1 sentences were checked; 4 more were not.");
+  });
+
+  it("says why the check did not run, or that there was nothing to check", () => {
+    expect(renderAnswerCheck(null, "relation \"brain.verification_log\" does not exist", 0)).toBe(
+      'Could not check the answer against its sources: relation "brain.verification_log" does not exist',
+    );
+    expect(renderAnswerCheck(null, null, 0)).toBe("The answer has no sentences to check.");
   });
 });
 

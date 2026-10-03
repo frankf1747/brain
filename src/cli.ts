@@ -7,7 +7,7 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
-import { renderSearch, renderExplain, renderSources, renderVerification } from "./mcp/render.js";
+import { renderSearch, renderExplain, renderSources, renderVerification, renderAnswerCheck } from "./mcp/render.js";
 import { explain, explainNotFound } from "./retrieve/explain.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
@@ -187,16 +187,17 @@ program
 
 program
   .command("ask <question>")
-  .description("Answer a question with citations")
+  .description("Answer a question with citations, then check each sentence against what it cites")
   .option("--kind <kind...>")
   .option("--since <date>")
   .option("--until <date>")
   .option("--verified")
   .action(async (question: string, opts) => {
     await withCtx(async (ctx) => {
-      const { answer, result } = await ask(ctx, question, searchOptions(opts));
+      const { answer, result, verification, verificationError, droppedClaims } = await ask(ctx, question, searchOptions(opts));
       console.log(answer + "\n");
       console.log(renderSources(result));
+      console.log("\n" + renderAnswerCheck(verification, verificationError, droppedClaims));
     });
   });
 

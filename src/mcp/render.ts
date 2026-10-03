@@ -141,6 +141,17 @@ export function renderVerification(v: Verification): string {
   return out.join("\n");
 }
 
+/** Printed under a `brain ask` answer and its sources: the answer checked sentence by sentence, or why it was not. */
+export function renderAnswerCheck(v: Verification | null, error: string | null, dropped: number): string {
+  if (error) return `Could not check the answer against its sources: ${error}`;
+  if (!v) return "The answer has no sentences to check.";
+  return [
+    "Each sentence of the answer, checked against what it cites (no model call):",
+    renderVerification(v),
+    ...(dropped ? [`Only the first ${v.claims.length} sentences were checked; ${dropped} more were not.`] : []),
+  ].join("\n");
+}
+
 const yesNo = (b: boolean) => (b ? "yes" : "no");
 const msText = (n: number) => `${n.toFixed(1)} ms`;
 
