@@ -28,6 +28,7 @@ export async function wipe(sql: Db): Promise<void> {
   await sql`truncate brain.documents cascade`;
   await sql`delete from brain.nodes where is_self = false`;
   await sql`truncate brain.retrieval_log`;
+  await sql`truncate brain.verification_log`;
   await sql`truncate brain.tool_calls`;
   await sql`truncate brain.provider_usage`;
 }

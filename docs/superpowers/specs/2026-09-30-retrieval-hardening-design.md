@@ -189,13 +189,13 @@ For each claim:
 1. Content terms: the claim's stems after stopword removal, using Postgres `to_tsvector('english')` so the stemming matches the index.
 2. Numbers and dates in the claim are extracted separately. Each must appear verbatim (after normalising `1,000` to `1000` and `~11%` to `11%`) in at least one cited text.
 3. Support = fraction of content terms present in the union of the cited passages' stems (passage content plus heading path; for a fact, predicate plus object text).
-4. Verdict: `supported` when support ≥ 0.6 and every number matched; `partial` when support ≥ 0.3 or a number is missing; `unsupported` below 0.3; `uncited` when `cites` is empty; `bad_citation` when a cited label does not exist in that retrieval.
+4. Verdict: `supported` when support ≥ 0.6 and every number matched; `partial` when support ≥ 0.3 or a number is missing; `unsupported` below 0.3; `uncited` when `cites` is empty; `bad_citation` only when every cite is bad (names nothing in that retrieval). With good and bad cites mixed, the claim is judged on the good ones and the bad ones are listed with their reasons.
 
 The response lists each claim with its verdict, its support value, the missing terms and missing numbers, and ends with a one-line summary (`4 supported, 1 partial, 1 unsupported`). The server instructions are extended: after composing an answer from `brain_search` results, the client calls `brain_verify` with its claims and presents anything not `supported` as the model's own addition.
 
 ### 7.3 Limits, stated in the tool description
 
-A paraphrase with different vocabulary can score `partial` even when correct; the verifier never scores `supported` when the claim's terms are absent from the citation. It checks vocabulary overlap, not logic. That is the right trade for a check that costs no model call.
+A paraphrase with different vocabulary can score `partial` even when correct. The verifier never scores `supported` when more than 40% of the claim's content terms are absent from the citation (support below 0.6); up to 40% may be absent, so one added detail in a short claim can pass. It checks vocabulary overlap, not logic: reversed relations, swapped entities, numbers attached to another thing, pooling across cites, clause-level negation, antonyms, units of bare amounts and stopword-only claims are not checked (the README lists them). That is the right trade for a check that costs no model call.
 
 The CLI `ask` command runs the same verifier on its own answer and prints the verdicts under the sources.
 

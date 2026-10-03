@@ -43,11 +43,14 @@ npm run brain -- usage [--days 30]
 npm run brain -- search "<query>" [--kind news note] [--since 2026-01-01] [--until 2026-12-31] [--verified] [-k 10] [--json]
 npm run brain -- explain <retrieval-id>
 npm run brain -- ask "<question>"
+npm run brain -- verify <retrieval-id> --claims <claims.json>
+npm run brain -- verify <retrieval-id> --claim "<text>" [--cite P1 --cite F2]
 npm run brain -- node "<name or id>"
 npm run brain -- facts [--all]
 npm run brain -- set-author <document-id> <owner|other|unknown>
 npm run brain -- eval ingest [dir]
-npm run brain -- eval run [--golden eval/golden.jsonl] [--baseline eval/baseline.json] [--compare] [--gate] [--accept] [--json]
+npm run brain -- eval run [--golden eval/golden.jsonl] [--baseline eval/baseline.json] [--verifier eval/verifier.jsonl] [--verifier-baseline eval/verifier-baseline.json] [--compare] [--gate] [--accept] [--json]
+npm run brain -- eval verifier [--file eval/verifier.jsonl] [--baseline eval/verifier-baseline.json] [--gate] [--accept] [--json]
 npm run brain -- backfill [--limit 500] [--poll 30]
 ```
 
@@ -55,7 +58,7 @@ npm run brain -- backfill [--limit 500] [--poll 30]
 
 - `npm run test:unit` needs nothing.
 - `npm run test:int` needs `npm run db:start`. It recreates a separate `brain_test` database from the migrations and runs there with fakes for Claude and Voyage, so your real knowledge base is never touched. The test helper refuses any database whose name does not end in `_test`.
-- The retrieval eval runs only against `brain_eval` and checks the live connection before any write (`npm run eval:prepare` creates it from the migrations; `--reset` recreates it). `npm run brain -- eval ingest` loads `eval/corpus`; `npm run eval:run` scores `eval/golden.jsonl` and compares with `eval/baseline.json`; `npm run eval:gate` exits 1 on a regression (recall@10 or MRR down more than 0.02, abstention down, any degraded search, a changed golden set, or no baseline). Each run also prints `voyage tokens=… requests=… refused=…`: the Voyage tokens that run used, from `brain_eval`'s own ledger and cap (not part of the baseline). After a deliberate change, `npm run brain -- eval run --accept` records the new baseline. `eval:prepare` only creates `brain_eval`; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. Metrics: set recall@1/5/10 over the top-k passages, MRR over distinct documents, nDCG@10 against all quote-bearing passages, paraphrase consistency, abstention and false-answer rate on negatives, degraded fraction, nearest-rank latency from each search's own `timings.totalMs`, and p50/p95 per stage (embed, sql, rerank, graph; recorded in baselines from Phase 4 on). Baseline on 2026-09-30 (commit `2b3426d`, before any retrieval change): recall@1 0.79, recall@10 1.00, MRR 1.00, p50 236 ms, 0% degraded, 14 questions over 6 documents. The set is small and has no negatives yet, so treat it as a regression check until Phase 6 of `docs/superpowers/specs/2026-09-30-retrieval-hardening-design.md` grows it.
+- The retrieval eval runs only against `brain_eval` and checks the live connection before any write (`npm run eval:prepare` creates it from the migrations; `--reset` recreates it). `npm run brain -- eval ingest` loads `eval/corpus`; `npm run eval:run` scores `eval/golden.jsonl` and compares with `eval/baseline.json`; `npm run eval:gate` exits 1 on a regression (recall@10 or MRR down more than 0.02, abstention down, any degraded search, a changed golden set, no baseline, or the citation verifier failing its gate on `eval/verifier.jsonl`: regular precision of `supported` below 0.9, full precision more than 0.02 below `eval/verifier-baseline.json`, a changed verifier set, or no verifier baseline; see "Checking an answer against its sources"). Each run also prints `voyage tokens=… requests=… refused=…`: the Voyage tokens that run used, from `brain_eval`'s own ledger and cap (not part of the baseline). After a deliberate change, `npm run brain -- eval run --accept` records the new baseline. `eval:prepare` only creates `brain_eval`; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. Metrics: set recall@1/5/10 over the top-k passages, MRR over distinct documents, nDCG@10 against all quote-bearing passages, paraphrase consistency, abstention and false-answer rate on negatives, degraded fraction, nearest-rank latency from each search's own `timings.totalMs`, and p50/p95 per stage (embed, sql, rerank, graph; recorded in baselines from Phase 4 on). Baseline on 2026-09-30 (commit `2b3426d`, before any retrieval change): recall@1 0.79, recall@10 1.00, MRR 1.00, p50 236 ms, 0% degraded, 14 questions over 6 documents. The set is small and has no negatives yet, so treat it as a regression check until Phase 6 of `docs/superpowers/specs/2026-09-30-retrieval-hardening-design.md` grows it.
 
 ## Layout
 
@@ -63,7 +66,9 @@ See the file structure section of `docs/superpowers/plans/2026-09-27-knowledge-b
 
 ## MCP
 
-The server exposes the knowledge base as ten tools:
+The server runs against the real database (`DATABASE_URL`). Before you check out or run code that needs a new migration (for example `20261003000012_verification_log.sql`, which `brain_search` and `brain_verify` write to), apply it to the real database with `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/<file>`; otherwise searches fail on the missing column or table.
+
+The server exposes the knowledge base as eleven tools:
 
 - `brain_orient`: what the base holds (counts, recent documents, facts about you) and which tool to use; call first.
 - `brain_search`: hybrid keyword, vector and graph search.
@@ -73,11 +78,12 @@ The server exposes the knowledge base as ten tools:
 - `brain_get_facts`: list current facts.
 - `brain_status`: pipeline progress for documents.
 - `brain_explain`: replay a logged search from its retrieval id: mode, candidate counts, timings, and each passage's ranks and score.
+- `brain_verify`: check each claim of an answer against the passages and facts it cites in a logged search, with no model call (see "Checking an answer against its sources").
 - `brain_ingest`: save text such as a note, pasted article or conversation (a URL can be recorded as its origin, not fetched). Pass `author: "other"` for anything you did not write.
 - `brain_add_fact`: record a fact.
 - `brain_supersede_fact`: replace a fact with a corrected one.
 
-With `BRAIN_MCP_READONLY=1` only the seven read tools (the first seven) are exposed.
+With `BRAIN_MCP_READONLY=1` only the eight read tools (the first eight) are exposed. `brain_verify` counts as a read tool: it changes nothing in the knowledge base and only writes its audit row, as `brain_search` writes `brain.retrieval_log`.
 
 `brain_ingest` returns once the document is stored and chunked. Summary, embeddings and extraction continue in the background, at most 2 pipelines at once so a slot stays free for new saves. `brain_status` shows progress; unfinished work resumes on later saves or with `npm run brain -- retry`.
 
@@ -111,9 +117,78 @@ retrieval 6f1c2a0e-… · mode: hybrid · 7 passages
 - How found: `vector#n` and `keyword#n` are the passage's rank among each branch's candidates (up to 60 per branch). `graph via <entity>`: the passage mentions an entity named in the query; a ranked passage that also mentions one shows both, e.g. `vector#2 keyword#5 graph via Acme Corp`, and keeps its score. `fallback "<term>"`: the document contains an exact-string term from the query (a code, figure or version); the passage is a window of the raw document, not a stored chunk, so it has a character range instead of a chunk id.
 - `author`: who wrote the document (`owner`, `other`, `unknown`). A passage by someone else says what they wrote, not what is true of you.
 - Facts: `verified` once you confirmed it with `verify-fact`. `from <kind> <doc id>` means the extractor read it from that document; `stated by owner` means it was recorded on your word (`brain_add_fact`, or by hand) with no source passage. `confirmed by owner` means you verified it and it has no stored source passage (verifying replaces who recorded it with your name). `extracted; source passage no longer stored` means the extractor wrote it but its passage was re-chunked or deleted.
-- Knowledge base or model: passages and facts come from the base, with ids you can open. In an answer, anything without a `[P…]` or `[F…]` citation is the model's own; the server instructions ask clients to make that split clear. `brain ask` gives its model the same mode, scores and authors, and prints its sources under the answer.
+- Knowledge base or model: passages and facts come from the base, with ids you can open. In an answer, anything without a `[P…]` or `[F…]` citation is the model's own; the server instructions ask clients to make that split clear. `brain ask` gives its model the same mode, scores and authors, prints its sources under the answer, and checks each sentence against what it cites. `brain_verify` does the same check for any MCP client.
 
-`brain.retrieval_log` keeps, per search, the query, filters, client, time, `mode`, `degraded` (`embedding`, `rerank`, `capReached`), `candidates` (`vector`, `keyword`, `fused`), `timings` (`embedMs`, `sqlMs`, `rerankMs`, `graphMs`, `totalMs`), `k`, and `results`: every returned passage in rank order with everything above except its text. Rows logged before migration 011 have only chunk ids, layers and a top score (which may be an RRF value); explain says "logged before evidence v2".
+`brain.retrieval_log` keeps, per search, the query, filters, client, time, `mode`, `degraded` (`embedding`, `rerank`, `capReached`), `candidates` (`vector`, `keyword`, `fused`), `timings` (`embedMs`, `sqlMs`, `rerankMs`, `graphMs`, `totalMs`), `k`, and `results`: every returned passage in rank order with everything above except its text. Rows logged before migration 011 have only chunk ids, layers and a top score (which may be an RRF value); explain says "logged before evidence v2". From migration 012 each row also keeps `facts`, the facts the search returned in order (index 0 is F1), which `brain_verify` resolves F labels from.
+
+### Checking an answer against its sources
+
+`brain_verify` (MCP), `npm run brain -- verify` and `brain ask` check an answer claim by claim against the passages and facts each claim cites, so you can see what came from the knowledge base and what the model added. The check is deterministic: no model is called, so it costs nothing per query and gives the same verdict every time. The code is `src/verify/` (`terms.ts` for the extraction, `verify.ts` for the method, `resolve.ts` for looking up cites); every verification is logged to `brain.verification_log`.
+
+How a claim is checked:
+
+1. Cites are resolved through the search the answer came from: `P3` is the third passage of that retrieval (its text is read from `brain.chunks`; a fallback passage is cut from the document's raw text by its character window), `F1` is the first fact that search returned, as it was then. A chunk id or fact id also works. A passage's cited text is its heading path plus its content; a fact's is its predicate (underscores as spaces) plus its value.
+2. Numbers, dates and codes are read from the claim and normalised: `1,000` is `1000`; `~11%`, `11 %` and `11 percent` are `11%`; `$115k`, `$115K`, `$115,000` and `115,000 dollars` are `$115000` (k, m, b, thousand, million and billion scale the number); `Sep 29, 2026`, `29 September 2026` and `2026-09-29` are `2026-09-29`; `September 2026` is `2026-09`; `October 6` is `--10-06`; `3rd` is `3rd`; `two` to `ninety` and `two hundred` are numbers (`one` and `first` are not, since they are usually not counts); a token with a letter and a digit (`H-1B`, `F-1`, `ZX-9000`, `v2.5`) is a code, compared as written. A leading minus stays with its number (`-5%` is not `5%`). Numeric dates (`3/4/2026`), dotted versions (`3.12.1`), digit groups (`555-1234`) and percent ranges (`20-30%`) are compared exactly as written, never as loose numbers; a range of two years (`2019-2023`) is two years. Every one of them must appear in the cited texts. A full date in a source also states its month, year and month-day; a sum of money also states the bare amount.
+3. Content terms are the rest of the claim's words, stemmed by Postgres (`to_tsvector('english', …)`, the same stemming as the keyword index), without stopwords, without negation words, and without answer words such as "yes", "also" and "however". Support is the share of the claim's distinct content terms that appear among the cited texts' stems.
+4. Negation: the words not, no, never, without, none, neither, nor, cannot and anything ending in n't are read from the raw text. The claim is compared with its anchor sentences, the cited sentences that best match it: every cited sentence holding at least half of the claim's matched terms, or, when none does, the sentence or sentences holding the most. There is a negation mismatch when the claim has a negation word and no anchor sentence has one, or the claim has none and an anchor sentence has one. A negation in a cited sentence that shares only a word or two with the claim does not count.
+5. Polarity words: up, down, before, after, over, under, above, below, more, most, less, fewer, few, all, some, only, against, will, would, might, must, can, could and should are Postgres stopwords, so stemming alone would let "went up 11%" match "went down 11%". They are read from the raw text (`won't` counts as will, `cannot` as can), and every one in the claim must appear as a whole word in the cited texts.
+6. Counting words: when a content term of the claim that the cited texts lack is a number or ordinal word (`one`, `first`, `dozen`, `tenth`), the claim states a count or rank the source does not.
+
+Verdicts, from the first rule that applies:
+
+| Verdict | Rule |
+|---|---|
+| `bad_citation` | Every cite names nothing in that search (`P9` when it returned 5 passages; `F1` on a search logged before facts were recorded; a passage since re-chunked). Bad cites next to a good one are listed but do not change the verdict. |
+| `uncited` | No cites: the model's own statement. |
+| `supported` | Support at least 0.6, every number and polarity word present, no negation mismatch, and no missing term that is a number or ordinal word. A claim with no content terms ("Yes [P1].") is supported when it has no numbers, no negation mismatch and no missing polarity word, since it states nothing the source could contradict; with numbers it is at most partial, because nothing says what the figure measures. |
+| `partial` | Support at least 0.3, or support at least 0.6 with a missing number, a missing polarity word, a missing number or ordinal word, or a negation mismatch. |
+| `unsupported` | Support below 0.3. A failed check never raises a verdict. |
+
+What it does not check. Read `supported` as "the cited text contains this claim's words and numbers", not as proof:
+
+- It checks word overlap, not who did what to whom: reversed relations ("Acme led Beta Ventures' round") and swapped entities pass.
+- A number only has to appear somewhere in the cited text, not attached to the same thing ("Acme employs 40 people" passes against "grow its teams by 40 people").
+- All cited texts are pooled, so citing unrelated passages together can support a claim that neither supports alone.
+- Negation is compared only with the anchor sentences (those holding at least half of the claim's matched terms, or else the ones holding the most), per sentence, not per clause.
+- Antonyms ("halved" for "quadrupled") and words like "former" are not detected.
+- Up to 40% of a claim's content words can be absent at `supported`, so one added detail in a short claim can pass.
+- A bare amount ignores its unit (20 minutes matches 20 hours), though `%` and percentage points are told apart.
+- A claim made only of stopwords ("Yes.", "They did.") is vacuously supported.
+- A correct paraphrase in other words scores partial or unsupported (the safe direction).
+- A raw fact id is checked against the fact as stored now; when that fact has been superseded the verification notes it.
+
+Polarity words (up/down, before/after, more/less, all/some, only, will/might and the rest above) are now checked; reasoning, sarcasm and certainty words outside that list ("may", "probably") are not.
+
+Reading the output. Worked example: a search returned the compensation section of `eval/corpus/job_description--acme-senior-data-analyst.md` as P1 ("Base salary range $115,000 to $140,000. Acme sponsors H-1B for this role. Hybrid, three days a week in the Austin office. …", under the heading "Compensation and visa"), and the answer was "Acme sponsors H-1B visas for this role [P1]. The base salary is $115k to $150k [P1]. The role is not hybrid [P1]. The company will pay for relocation to Austin [P1]. It looks like a strong fit."
+
+```
+verification 12bf8876-… · retrieval a4cf4454-… · 5 claims
+✓ supported 1.00 — "Acme sponsors H-1B visas for this role." [P1]
+~ partial 1.00 — "The base salary is $115k to $150k." [P1]
+    missing numbers: $150000
+~ partial 1.00 — "The role is not hybrid." [P1]
+    negation differs from the cited text
+✗ unsupported 0.25 — "The company will pay for relocation to Austin." [P1]
+    missing terms: company, pay, relocation · missing polarity words: will
+○ uncited - — "It looks like a strong fit."
+    no citation: nothing from the knowledge base backs this
+Summary: 1 supported, 2 partial, 1 unsupported, 1 uncited
+```
+
+Each line is the verdict, the support (`-` when there is none), the claim and its cites. The line under a claim says what its cited text lacks: terms in the claim's own words, numbers in their normalised form. "visas" in the first claim matched the heading. `$115k` matched `$115,000`; `$150k` did not. Present anything not `supported` as the model's own or as weakly supported; the server instructions ask MCP clients to do exactly that after calling `brain_verify`.
+
+`brain_verify` takes at most 50 claims of at most 2,000 characters, with at most 20 cites each. `brain ask` splits its own answer into sentences (a line break, or `.` `!` `?` followed by a word that does not start in lower case, never after `e.g.`, `Dr.`, `U.S.` or an initial, never at a decimal point), cites the `[P#]`/`[F#]` labels inside each sentence, and prints the check under its sources.
+
+How well it works is measured on `eval/verifier.jsonl`: 104 claims quoted against the eval corpus (and, for the number and polarity forms the corpus lacks, written out as facts), covering restatements, inflected paraphrases, wrong numbers, signs, versions, numeric dates, digit groups, negation flips and verbatim quotes beside a negated sentence, polarity words, number and ordinal words, unrelated claims, claims spanning two passages, claims without content words, facts, number and date forms, hedging and added details, plus 27 known limits. 21 are false claims the method passes: reversed relations, swapped entities, numbers attached to another thing, pooling across cites, negation on the wrong clause, antonyms and "former", bare amounts with another unit, stopword-only claims, certainty and one added detail. 6 are true claims it cannot recognise: four paraphrases in other words, a bare figure the source states, and "No." to "Is the role fully remote?". Every item is labelled with its true verdict, so each known limit the verifier gets wrong counts as an error: a precision error for the false ones, a recall error for the true ones.
+
+The verifier is scored two ways:
+
+- **Regular** leaves out the known limits. It says how often a `supported` verdict is right on the cases the method is designed for. On 2026-10-03: precision 1.00 (40 of 40 claims marked supported were labelled supported), recall 0.98, accuracy 0.97, n=77.
+- **Full** includes the documented limits. It is the honest overall figure for real answers, where reversed relations, swapped entities, paraphrases and the rest do occur. On 2026-10-03: precision 0.67 (40 of 60), recall 0.85 (40 of 47), accuracy 0.73, n=104; 20 of the 21 false known-limit claims are still marked supported, and none of the 6 true ones is.
+
+`npm run brain -- eval verifier` prints each item, a confusion matrix for each view, both summary lines and the known-limits count; `eval run` prints the two summary lines. `--gate` (on either command) fails when regular precision of `supported` is below 0.9, a fixed bar that catches real regressions (a claim wrongly marked supported is worse than one wrongly flagged); when full precision falls more than 0.02 below the one recorded in `eval/verifier-baseline.json`; when the set of items changed since that baseline, including an item edited in place ("verifier set changed; review and run `eval verifier --accept`"); or when there is no baseline. `npm run brain -- eval verifier --accept` records the baseline (full precision, recall, accuracy, each item's id and sha256, and the commit), and refuses, exiting 1, when the regular bar fails.
+
+A claim labelled `supported` is always one its cited text really supports, and a true claim is labelled `supported` even when the method cannot see it. These labels were written by an agent (`labelled_by: "agent:claude"`), not by the owner: review them, and add your own with `labelled_by: "owner"`.
 
 ### Claude Code (this Mac)
 

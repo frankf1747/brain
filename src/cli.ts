@@ -7,7 +7,7 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
-import { renderSearch, renderExplain, renderSources } from "./mcp/render.js";
+import { renderSearch, renderExplain, renderSources, renderVerification, renderAnswerCheck } from "./mcp/render.js";
 import { explain, explainNotFound } from "./retrieve/explain.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
@@ -154,17 +154,50 @@ program
   });
 
 program
+  .command("verify <retrievalId>")
+  .description("Check claims against the passages and facts they cite in a logged search (no model call)")
+  .option("--claims <file>", 'JSON file with an array of {"text": "...", "cites": ["P1", "F2"]}')
+  .option("--claim <text>", "a single claim; give each label it cites with --cite")
+  .option("--cite <label>", "a label the --claim cites: P1, F2, or a chunk or fact id; repeat for more", (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option("--json", "print the verification as JSON")
+  .action(async (retrievalId: string, opts: { claims?: string; claim?: string; cite: string[]; json?: boolean }) => {
+    if (Boolean(opts.claims) === Boolean(opts.claim)) throw new Error('Pass either --claims <file.json> or --claim "<text>" (with --cite for each label it cites)');
+    if (opts.claims && opts.cite.length) throw new Error("--cite goes with --claim; in a --claims file each claim lists its own cites");
+    const { verifyClaims } = await import("./verify/resolve.js");
+    let claims: unknown = [{ text: opts.claim, cites: opts.cite }];
+    if (opts.claims) {
+      const { readFile } = await import("node:fs/promises");
+      try {
+        claims = JSON.parse(await readFile(opts.claims, "utf8"));
+      } catch (e) {
+        throw new Error(`Cannot read ${opts.claims} as JSON: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    await withCtx(async (ctx) => {
+      // verifyClaims validates the claims (an array of {text, cites}, at most 50) and says what is wrong.
+      const v = await verifyClaims(ctx.sql, retrievalId, claims as never, { client: "cli" });
+      if (!v) {
+        console.error(explainNotFound(retrievalId));
+        process.exitCode = 1;
+        return;
+      }
+      console.log(opts.json ? JSON.stringify(v, null, 2) : renderVerification(v));
+    });
+  });
+
+program
   .command("ask <question>")
-  .description("Answer a question with citations")
+  .description("Answer a question with citations, then check each sentence against what it cites")
   .option("--kind <kind...>")
   .option("--since <date>")
   .option("--until <date>")
   .option("--verified")
   .action(async (question: string, opts) => {
     await withCtx(async (ctx) => {
-      const { answer, result } = await ask(ctx, question, searchOptions(opts));
+      const { answer, result, verification, verificationError, droppedClaims } = await ask(ctx, question, searchOptions(opts));
       console.log(answer + "\n");
       console.log(renderSources(result));
+      console.log("\n" + renderAnswerCheck(verification, verificationError, droppedClaims));
     });
   });
 
@@ -271,6 +304,8 @@ evalCmd
   .description("Run the golden set and report metrics; --compare shows deltas against eval/baseline.json")
   .option("--golden <path>", "golden set file", "eval/golden.jsonl")
   .option("--baseline <path>", "baseline file", "eval/baseline.json")
+  .option("--verifier <path>", "citation verifier set", "eval/verifier.jsonl")
+  .option("--verifier-baseline <path>", "citation verifier baseline", "eval/verifier-baseline.json")
   .option("--compare", "compare against the baseline")
   .option("--gate", "exit 1 when the comparison fails the gate (implies --compare)")
   .option("--accept", "overwrite the baseline with this run")
@@ -280,15 +315,18 @@ evalCmd
     const { runEval, attributionGate, evalVoyageLine, stageLatencyLine } = await import("./eval/run.js");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
+    const { verifierGate, verifierLine, loadVerifierBaseline } = await import("./eval/verifier.js");
     const { execSync } = await import("node:child_process");
     const ctx = makeEvalCtx();
     try {
-      const run = await runEval(ctx, opts.golden);
+      const run = await runEval(ctx, opts.golden, opts.verifier);
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
       const failures = gateFailures(comparison, { gate: !!opts.gate, accept: !!opts.accept, baselinePath: opts.baseline });
       if (opts.gate) failures.push(...attributionGate(run.attribution));
+      const verifierBase = run.verifier ? await loadVerifierBaseline(opts.verifierBaseline) : null;
+      if (opts.gate && run.verifier) failures.push(...verifierGate(run.verifier, verifierBase, { path: opts.verifierBaseline }));
       if (opts.json) {
         console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
       } else {
@@ -311,6 +349,8 @@ evalCmd
         if (stages) console.log(stages);
         console.log(`attribution  self-facts-from-others=${run.attribution.selfFacts}  self-edges-from-others=${run.attribution.selfEdges}`);
         console.log(evalVoyageLine(run.voyage));
+        if (run.verifier) for (const line of verifierLine(run.verifier, verifierBase)) console.log(line);
+        else console.log(`verifier  no set at ${opts.verifier}`);
         if (comparison) {
           const d = comparison.deltas;
           console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);
@@ -328,6 +368,50 @@ evalCmd
         const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
         await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);
+      }
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
+evalCmd
+  .command("verifier")
+  .description("Score the citation verifier on its labelled set: each item, the confusion matrices, precision and recall of supported on the regular and full views (no model or Voyage call)")
+  .option("--file <path>", "verifier set", "eval/verifier.jsonl")
+  .option("--baseline <path>", "verifier baseline", "eval/verifier-baseline.json")
+  .option("--gate", "exit 1 when regular precision of supported is below 0.9, full precision is more than 0.02 below the baseline, the set changed, or there is no baseline")
+  .option("--accept", "record this run's full view as the verifier baseline")
+  .option("--json")
+  .action(async (opts) => {
+    const { makeEvalCtx, assertEvalConnection } = await import("./eval/db.js");
+    const { runVerifierFile, renderVerifierRun, verifierGate, verifierAcceptRefusal, loadVerifierBaseline, saveVerifierBaseline, verifierBaselineOf } = await import("./eval/verifier.js");
+    const { execSync } = await import("node:child_process");
+    const ctx = makeEvalCtx();
+    try {
+      await assertEvalConnection(ctx.sql);
+      const run = await runVerifierFile(ctx.sql, opts.file);
+      if (!run) throw new Error(`No verifier set at ${opts.file}`);
+      // --accept replaces the baseline, so a malformed one (e.g. an older format) is reported and ignored instead of fatal.
+      const baseline = await loadVerifierBaseline(opts.baseline).catch((e: unknown) => {
+        if (!opts.accept) throw e;
+        console.error(`${e instanceof Error ? e.message : String(e)} (ignored: --accept replaces it)`);
+        return null;
+      });
+      const failures = opts.gate ? verifierGate(run, baseline, { accept: !!opts.accept, path: opts.baseline }) : [];
+      if (opts.json) console.log(JSON.stringify({ ...run, baseline, failures }, null, 2));
+      else for (const line of [...renderVerifierRun(run, baseline), ...failures.map((f) => `GATE: ${f}`)]) console.log(line);
+      if (failures.length) process.exitCode = 1;
+      if (opts.accept) {
+        // A baseline is a floor for later runs: never record one the regular bar rejects.
+        const refusal = verifierAcceptRefusal(run);
+        if (refusal.length) {
+          for (const r of refusal) console.error(`verifier baseline not written: ${r}`);
+          process.exitCode = 1;
+          return;
+        }
+        const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+        await saveVerifierBaseline(opts.baseline, verifierBaselineOf(run, commit));
+        console.log(`verifier baseline written to ${opts.baseline} at ${commit}`);
       }
     } finally {
       await ctx.sql.end();

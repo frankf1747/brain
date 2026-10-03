@@ -6,6 +6,8 @@ import type { DocumentSlice } from "../retrieve/documents.js";
 import type { FactDetail } from "../graph/facts.js";
 import type { SuppressedDocument } from "../ingest/set-author.js";
 import { voyageTodayLine } from "../llm/usage.js";
+import type { ClaimResult, Verdict } from "../verify/verify.js";
+import type { Verification } from "../verify/resolve.js";
 
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
@@ -93,6 +95,79 @@ export function renderSources(r: SearchResult): string {
   ].join("\n");
 }
 
+const VERDICT_MARK: Record<Verdict, string> = { supported: "✓", partial: "~", unsupported: "✗", uncited: "○", bad_citation: "!" };
+
+/** One checked claim: mark, verdict, support with two decimals (- when there is none), the claim, and its cites. */
+export function verdictLine(c: ClaimResult): string {
+  const support = c.support === null ? "-" : c.support.toFixed(2);
+  return `${VERDICT_MARK[c.verdict]} ${c.verdict.replace("_", " ")} ${support} — "${c.claim}"${c.labels.length ? ` [${c.labels.join(", ")}]` : ""}`;
+}
+
+/**
+ * The line under a claim that is not supported: what its cited texts lack (terms as the claim wrote them, numbers in
+ * canonical form), whether negation differs, and why any cite is bad. Under a supported claim only its bad cites are
+ * listed, and nothing when it has none.
+ */
+export function verdictDetail(c: ClaimResult): string | null {
+  if (c.verdict === "uncited") return "    no citation: nothing from the knowledge base backs this";
+  const bad = c.badLabels.map((b) => `bad citation ${b.label}: ${b.reason}`);
+  if (c.verdict === "supported") return bad.length ? `    ${bad.join(" · ")}` : null;
+  const parts = [
+    c.support === null && c.verdict !== "bad_citation" ? "no content words to compare" : null,
+    c.missingTerms.length ? `missing terms: ${c.missingTerms.join(", ")}` : null,
+    c.missingNumbers.length ? `missing numbers: ${c.missingNumbers.join(", ")}` : null,
+    c.negationMismatch ? "negation differs from the cited text" : null,
+    c.missingPolarity.length ? `missing polarity words: ${c.missingPolarity.join(", ")}` : null,
+    ...bad,
+  ].filter((x): x is string => x !== null);
+  return parts.length ? `    ${parts.join(" · ")}` : null;
+}
+
+/** What the check does not catch, in plain words: shown in brain_verify's description and under every verification. */
+export const VERIFY_NOT_CHECKED = [
+  "it checks word overlap, not who did what to whom, so reversed relations and swapped entities pass",
+  "a number only has to appear somewhere in the cited text, not attached to the same thing",
+  "all cited texts are pooled, so citing unrelated passages together can support a claim neither supports alone",
+  "negation is compared only with the cited sentences that best match the claim (those holding at least half its matched words, or else the ones holding the most), per sentence, not per clause",
+  "antonyms and words like \"former\" are not detected",
+  "up to 40% of a claim's content words can be absent at supported, so one added detail in a short claim can pass",
+  "a bare amount ignores its unit (20 minutes matches 20 hours), though % and percentage points are told apart",
+  "a claim made only of stopwords (\"Yes.\", \"They did.\") is vacuously supported",
+  "a correct paraphrase in other words scores partial or unsupported",
+  "a raw fact id is checked against the fact as stored now, which may have been superseded since",
+] as const;
+
+/** What was checked and what was not; printed under every verification. */
+export const VERIFY_LIMITS =
+  "Checked: content words (stemmed), numbers, dates and codes, negation, and polarity words (up/down, before/after, more/less, all/some, only, will/might). " +
+  `Not checked: ${VERIFY_NOT_CHECKED.join("; ")}.`;
+
+/** brain_verify, `brain verify` and the check under `brain ask`: one line per claim, details for the rest, the summary. */
+export function renderVerification(v: Verification): string {
+  const n = v.claims.length;
+  const out = [`verification ${v.verificationId} · retrieval ${v.retrievalId} · ${n} claim${n === 1 ? "" : "s"}`];
+  for (const c of v.claims) {
+    out.push(verdictLine(c));
+    const detail = verdictDetail(c);
+    if (detail) out.push(detail);
+  }
+  out.push(`Summary: ${v.summary.text}`);
+  for (const note of v.notes) out.push(`Note: ${note}`);
+  out.push(VERIFY_LIMITS);
+  return out.join("\n");
+}
+
+/** Printed under a `brain ask` answer and its sources: the answer checked sentence by sentence, or why it was not. */
+export function renderAnswerCheck(v: Verification | null, error: string | null, dropped: number): string {
+  if (error) return `Could not check the answer against its sources: ${error}`;
+  if (!v) return "The answer has no sentences to check.";
+  return [
+    "Each sentence of the answer, checked against what it cites (no model call):",
+    renderVerification(v),
+    ...(dropped ? [`Only the first ${v.claims.length} sentences were checked; ${dropped} more were not.`] : []),
+  ].join("\n");
+}
+
 const yesNo = (b: boolean) => (b ? "yes" : "no");
 const msText = (n: number) => `${n.toFixed(1)} ms`;
 
@@ -165,7 +240,7 @@ export function renderOrient(o: Orientation): string {
     "Current facts about the owner:",
     ...(o.facts.length ? o.facts.map((f) => `- ${f.predicate}: ${f.objectText}${f.verified ? "" : " (unverified)"}`) : ["- none yet"]),
     "",
-    "How to use: brain_search for anything the owner may have read, written or discussed; brain_get_node for a person, company or topic; brain_get_document to read more of a hit; brain_explain to see how a search ranked its passages; brain_ingest to save new material; brain_add_fact to record something the owner states about themselves.",
+    "How to use: brain_search for anything the owner may have read, written or discussed; brain_get_node for a person, company or topic; brain_get_document to read more of a hit; brain_explain to see how a search ranked its passages; brain_verify to check an answer's claims against the passages and facts they cite; brain_ingest to save new material; brain_add_fact to record something the owner states about themselves.",
   ].join("\n");
 }
 

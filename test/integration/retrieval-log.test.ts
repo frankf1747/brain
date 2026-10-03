@@ -34,7 +34,8 @@ describe("brain.retrieval_log v2 (migration 011)", () => {
       conn.release();
     }
     const [{ n }] = await sql<{ n: number }[]>`
-      select count(*)::int as n from pg_constraint where conrelid = 'brain.retrieval_log'::regclass and conname like 'retrieval_log_%_check'`;
+      select count(*)::int as n from pg_constraint
+      where conrelid = 'brain.retrieval_log'::regclass and conname in ('retrieval_log_mode_check', 'retrieval_log_results_check')`;
     expect(n).toBe(2);
   });
 
