@@ -12,6 +12,7 @@ import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, t
 import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
 import { voyageSpendSince, type VoyageSpend } from "../llm/usage.js";
 import { parseAuthor, type Author } from "../ingest/author.js";
+import { runVerifierFile, type VerifierRun } from "./verifier.js";
 
 export function kindFromFilename(name: string): string {
   const i = name.indexOf("--");
@@ -193,10 +194,15 @@ export interface EvalRun {
   attribution: AttributionLeaks;
   /** Voyage spend of this run (searches and anything else under the eval client) in brain_eval's ledger. Kept out of Report. */
   voyage: VoyageSpend;
+  /** The citation verifier scored on its own labelled set (no model or Voyage call); null when the file is missing. Kept out of Report. */
+  verifier: VerifierRun | null;
 }
 
-/** Runs every golden item (and its paraphrases) against the context's database, which must be the eval database. */
-export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
+/**
+ * Runs every golden item (and its paraphrases) against the context's database, which must be the eval database, then
+ * scores the citation verifier on verifierPath with that database's stems.
+ */
+export async function runEval(ctx: Ctx, goldenPath: string, verifierPath = "eval/verifier.jsonl"): Promise<EvalRun> {
   await assertEvalConnection(ctx.sql);
   // The database's clock, so the window matches the ledger's created_at exactly.
   const [{ startedAt }] = await ctx.sql<{ startedAt: Date }[]>`select clock_timestamp() as "startedAt"`;
@@ -222,6 +228,7 @@ export async function runEval(ctx: Ctx, goldenPath: string): Promise<EvalRun> {
     ranks,
     attribution: await attributionLeaks(ctx.sql),
     voyage: await voyageSpendSince(ctx.sql, startedAt, EVAL_CLIENT),
+    verifier: await runVerifierFile(ctx.sql, verifierPath),
   };
 }
 

@@ -304,6 +304,7 @@ evalCmd
   .description("Run the golden set and report metrics; --compare shows deltas against eval/baseline.json")
   .option("--golden <path>", "golden set file", "eval/golden.jsonl")
   .option("--baseline <path>", "baseline file", "eval/baseline.json")
+  .option("--verifier <path>", "citation verifier set", "eval/verifier.jsonl")
   .option("--compare", "compare against the baseline")
   .option("--gate", "exit 1 when the comparison fails the gate (implies --compare)")
   .option("--accept", "overwrite the baseline with this run")
@@ -313,15 +314,17 @@ evalCmd
     const { runEval, attributionGate, evalVoyageLine, stageLatencyLine } = await import("./eval/run.js");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
+    const { verifierGate, verifierLine } = await import("./eval/verifier.js");
     const { execSync } = await import("node:child_process");
     const ctx = makeEvalCtx();
     try {
-      const run = await runEval(ctx, opts.golden);
+      const run = await runEval(ctx, opts.golden, opts.verifier);
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
       const failures = gateFailures(comparison, { gate: !!opts.gate, accept: !!opts.accept, baselinePath: opts.baseline });
       if (opts.gate) failures.push(...attributionGate(run.attribution));
+      if (opts.gate && run.verifier) failures.push(...verifierGate(run.verifier.report));
       if (opts.json) {
         console.log(JSON.stringify({ ...run, comparison, failures }, null, 2));
       } else {
@@ -344,6 +347,7 @@ evalCmd
         if (stages) console.log(stages);
         console.log(`attribution  self-facts-from-others=${run.attribution.selfFacts}  self-edges-from-others=${run.attribution.selfEdges}`);
         console.log(evalVoyageLine(run.voyage));
+        console.log(run.verifier ? verifierLine(run.verifier.report) : `verifier  no set at ${opts.verifier}`);
         if (comparison) {
           const d = comparison.deltas;
           console.log(`\nvs baseline  recall@10 ${d.recallAt10 >= 0 ? "+" : ""}${d.recallAt10.toFixed(3)}  mrr ${d.mrr >= 0 ? "+" : ""}${d.mrr.toFixed(3)}`);
@@ -362,6 +366,29 @@ evalCmd
         await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);
       }
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
+evalCmd
+  .command("verifier")
+  .description("Score the citation verifier on its labelled set: each item, the confusion matrix, precision and recall of supported (no model or Voyage call)")
+  .option("--file <path>", "verifier set", "eval/verifier.jsonl")
+  .option("--gate", "exit 1 when precision of supported is below 0.9")
+  .option("--json")
+  .action(async (opts) => {
+    const { makeEvalCtx, assertEvalConnection } = await import("./eval/db.js");
+    const { runVerifierFile, renderVerifierRun, verifierGate } = await import("./eval/verifier.js");
+    const ctx = makeEvalCtx();
+    try {
+      await assertEvalConnection(ctx.sql);
+      const run = await runVerifierFile(ctx.sql, opts.file);
+      if (!run) throw new Error(`No verifier set at ${opts.file}`);
+      const failures = opts.gate ? verifierGate(run.report) : [];
+      if (opts.json) console.log(JSON.stringify({ ...run, failures }, null, 2));
+      else for (const line of [...renderVerifierRun(run), ...failures.map((f) => `GATE: ${f}`)]) console.log(line);
+      if (failures.length) process.exitCode = 1;
     } finally {
       await ctx.sql.end();
     }
