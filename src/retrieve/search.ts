@@ -234,7 +234,8 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   }
 
   const mode = searchMode(degraded);
-  // The v1 columns stay filled for compatibility; results, degraded, candidates, timings, k and mode are v2 (spec §6.2).
+  // The v1 columns stay filled for compatibility; results, degraded, candidates, timings, k and mode are v2 (spec §6.2);
+  // facts (migration 012) lets brain_verify resolve F labels as this search showed them.
   const layers = [
     "hybrid", "summary", ...(entities.length ? ["graph"] : []), ...(facts.length ? ["facts"] : []), ...(fallbackUsed ? ["fallback"] : []),
     ...(isDegraded(degraded) ? ["degraded"] : []), ...(degraded.capReached ? ["cap_reached"] : []),
@@ -248,11 +249,11 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   timings.totalMs = tenth(elapsed(started));
   const [logged] = await sql<{ id: string }[]>`
     insert into brain.retrieval_log
-      (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client, results, degraded, candidates, timings, k, mode)
+      (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client, results, degraded, candidates, timings, k, mode, facts)
     values (${query}, ${json(logFilters)}, ${layers}::text[],
             ${passages.map((p) => p.chunkId).filter((id): id is string => id !== null)}::uuid[],
             ${entities.map((e) => e.id)}::uuid[], ${topScore}, ${fallbackUsed}, ${opts.client ?? "cli"},
-            ${json(toLoggedPassages(passages))}, ${json(degraded)}, ${json(candidates)}, ${json(timings)}, ${k}, ${mode})
+            ${json(toLoggedPassages(passages))}, ${json(degraded)}, ${json(candidates)}, ${json(timings)}, ${k}, ${mode}, ${json(facts)})
     returning id`;
 
   return { retrievalId: logged.id, query, k, mode, degraded, fallbackUsed, topScore, passages, documents, entities, facts, candidates, timings };
