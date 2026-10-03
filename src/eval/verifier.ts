@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { Db } from "../db.js";
 import { VERDICTS, VerdictSchema, factText, passageText, verifyTexts, type ClaimResult, type ClaimToJudge, type Verdict } from "../verify/verify.js";
@@ -104,23 +104,17 @@ export function verifierReport(pairs: { expected: Verdict; predicted: Verdict }[
   };
 }
 
-/** The gate's floor for precision of `supported`: a claim wrongly marked supported is worse than one wrongly flagged. */
+/**
+ * The gate (eval verifier --gate, eval run --gate) reads two views of the set:
+ *  - regular: every item except case known_limit, the claims the method is designed for. Precision of supported must
+ *    be at least VERIFIER_PRECISION_MIN, a fixed bar that catches real regressions.
+ *  - full: every item, the documented limits included, so the honest overall figure for real answers. Its precision
+ *    of supported must not fall more than VERIFIER_FULL_TOLERANCE below the one recorded in eval/verifier-baseline.json.
+ */
 export const VERIFIER_PRECISION_MIN = 0.9;
+export const VERIFIER_FULL_TOLERANCE = 0.02;
+export const VERIFIER_BASELINE_PATH = "eval/verifier-baseline.json";
 const EPSILON = 1e-9;
-
-/** Reasons the verifier set fails the gate; empty means pass. */
-export function verifierGate(r: VerifierReport): string[] {
-  if (r.precision === null) return ["verifier: no claim was marked supported, so precision of supported is undefined"];
-  if (r.precision < VERIFIER_PRECISION_MIN - EPSILON) return [`verifier: precision of supported is ${r.precision.toFixed(3)}, below ${VERIFIER_PRECISION_MIN}`];
-  return [];
-}
-
-const ratio = (x: number | null) => (x === null ? "n/a" : x.toFixed(2));
-
-/** The one line `eval run` prints. */
-export function verifierLine(r: VerifierReport): string {
-  return `verifier  n=${r.n}  supported precision=${ratio(r.precision)} recall=${ratio(r.recall)}  accuracy=${ratio(r.accuracy)}`;
-}
 
 export interface VerifierItemResult {
   id: string;
@@ -132,14 +126,107 @@ export interface VerifierItemResult {
 
 export interface VerifierRun {
   items: VerifierItemResult[];
-  report: VerifierReport;
+  /** Every item except case known_limit. */
+  regular: VerifierReport;
+  /** Every item. */
+  full: VerifierReport;
+}
+
+/** Both views of a set of judged items. */
+export function summarizeVerifierRun(items: VerifierItemResult[]): VerifierRun {
+  return { items, regular: verifierReport(items.filter((i) => i.case !== "known_limit")), full: verifierReport(items) };
+}
+
+/** eval/verifier-baseline.json: the full view as last accepted, and the items it was measured on. */
+export const VerifierBaselineSchema = z.object({
+  recordedAt: z.string(),
+  commit: z.string(),
+  itemIds: z.array(z.string()),
+  precision: z.number().nullable(),
+  recall: z.number().nullable(),
+  accuracy: z.number(),
+}).strict();
+export type VerifierBaseline = z.infer<typeof VerifierBaselineSchema>;
+
+/** The baseline at path; null when the file does not exist; throws on a malformed one. */
+export async function loadVerifierBaseline(path: string): Promise<VerifierBaseline | null> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`malformed verifier baseline ${path}: invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const parsed = VerifierBaselineSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+    throw new Error(`malformed verifier baseline ${path}: ${issues}; re-record it with \`eval verifier --accept\``);
+  }
+  return parsed.data;
+}
+
+export async function saveVerifierBaseline(path: string, b: VerifierBaseline): Promise<void> {
+  await writeFile(path, JSON.stringify({ ...b, itemIds: [...b.itemIds].sort() }, null, 2) + "\n");
+}
+
+/** The baseline this run would record. */
+export function verifierBaselineOf(run: VerifierRun, commit: string): VerifierBaseline {
+  return {
+    recordedAt: new Date().toISOString(), commit, itemIds: run.items.map((i) => i.id).sort(),
+    precision: run.full.precision, recall: run.full.recall, accuracy: run.full.accuracy,
+  };
+}
+
+/**
+ * Reasons the verifier fails the gate; empty means pass. The regular bar always applies. The baseline checks (no
+ * baseline, set changed, full precision more than VERIFIER_FULL_TOLERANCE below it) are skipped when this run records
+ * a new baseline (accept), as the retrieval gate does.
+ */
+export function verifierGate(run: VerifierRun, baseline: VerifierBaseline | null, opts: { accept?: boolean; path?: string } = {}): string[] {
+  const failures: string[] = [];
+  const r = run.regular.precision;
+  if (r === null) failures.push("verifier: no regular claim was marked supported, so its precision of supported is undefined");
+  else if (r < VERIFIER_PRECISION_MIN - EPSILON) failures.push(`verifier: regular precision of supported is ${r.toFixed(3)}, below ${VERIFIER_PRECISION_MIN}`);
+  if (opts.accept) return failures;
+  if (!baseline) return [...failures, `no verifier baseline at ${opts.path ?? VERIFIER_BASELINE_PATH}; record one with \`eval verifier --accept\``];
+  const ids = run.items.map((i) => i.id).sort();
+  const before = [...baseline.itemIds].sort();
+  if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) return [...failures, "verifier set changed; review and run `eval verifier --accept`"];
+  const f = run.full.precision;
+  if (baseline.precision !== null && (f === null || f < baseline.precision - VERIFIER_FULL_TOLERANCE - EPSILON)) {
+    failures.push(`verifier: full precision of supported is ${f === null ? "undefined" : f.toFixed(3)}, more than ${VERIFIER_FULL_TOLERANCE} below the baseline ${baseline.precision.toFixed(3)}`);
+  }
+  return failures;
+}
+
+const ratio = (x: number | null) => (x === null ? "n/a" : x.toFixed(2));
+const stats = (r: VerifierReport) => `supported precision=${ratio(r.precision)} recall=${ratio(r.recall)} accuracy=${ratio(r.accuracy)}`;
+
+/** The two summary lines `eval run` and `eval verifier` print: regular with its gate, full with its baseline. */
+export function verifierLine(run: VerifierRun, baseline: VerifierBaseline | null): [string, string] {
+  return [
+    `verifier regular n=${run.regular.n} ${stats(run.regular)} (gate ≥ ${VERIFIER_PRECISION_MIN.toFixed(2)})`,
+    `verifier full    n=${run.full.n} ${stats(run.full)} (${baseline ? `baseline ${ratio(baseline.precision)}` : "no baseline"})`,
+  ];
+}
+
+/** How many known_limit items the verifier still marks supported. */
+export function knownLimitLine(run: VerifierRun): string {
+  const limits = run.items.filter((i) => i.case === "known_limit");
+  return `known limits: ${limits.filter((i) => i.predicted === "supported").length} of ${limits.length} still marked supported (documented in README)`;
 }
 
 /** Judges every item with one stem query. Read-only: it writes nothing (not even verification_log). */
 export async function runVerifierSet(sql: Db, items: VerifierItem[]): Promise<VerifierRun> {
   const results = await verifyTexts(sql, items.map(toClaim));
   const out = items.map((it, i) => ({ id: it.id, case: it.case, expected: it.expected_verdict, predicted: results[i].verdict, result: results[i] }));
-  return { items: out, report: verifierReport(out) };
+  return summarizeVerifierRun(out);
 }
 
 /** runVerifierSet on a file; null when the file does not exist. */
@@ -154,8 +241,8 @@ export async function runVerifierFile(sql: Db, path: string): Promise<VerifierRu
   return runVerifierSet(sql, parseVerifierSet(text));
 }
 
-/** `brain eval verifier`: one line per item (ok or MISS), the confusion matrix, and the summary line. */
-export function renderVerifierRun(run: VerifierRun): string[] {
+/** `brain eval verifier`: one line per item (ok or MISS), the confusion matrix of each view, and the summary lines. */
+export function renderVerifierRun(run: VerifierRun, baseline: VerifierBaseline | null): string[] {
   const support = (s: number | null) => (s === null ? "-" : s.toFixed(2));
   const lines = run.items.map((i) =>
     i.expected === i.predicted
@@ -163,8 +250,10 @@ export function renderVerifierRun(run: VerifierRun): string[] {
       : `MISS  ${i.id.padEnd(5)} ${i.case.padEnd(15)} expected ${i.expected}, got ${i.predicted} ${support(i.result.support)}`,
   );
   const w = 13;
-  lines.push("", "confusion (rows: labelled, columns: verifier)", "".padEnd(w) + VERDICTS.map((v) => v.padStart(w)).join(""));
-  for (const e of VERDICTS) lines.push(e.padEnd(w) + VERDICTS.map((p) => String(run.report.confusion[e][p]).padStart(w)).join(""));
-  lines.push("", verifierLine(run.report));
+  for (const [name, r] of [["regular", run.regular], ["full", run.full]] as const) {
+    lines.push("", `confusion, ${name} (rows: labelled, columns: verifier)`, "".padEnd(w) + VERDICTS.map((v) => v.padStart(w)).join(""));
+    for (const e of VERDICTS) lines.push(e.padEnd(w) + VERDICTS.map((p) => String(r.confusion[e][p]).padStart(w)).join(""));
+  }
+  lines.push("", ...verifierLine(run, baseline), knownLimitLine(run));
   return lines;
 }

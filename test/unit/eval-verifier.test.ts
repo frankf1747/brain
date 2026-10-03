@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  parseVerifierSet, toClaim, verifierReport, verifierGate, verifierLine, renderVerifierRun, VERIFIER_PRECISION_MIN, type VerifierItem,
+  parseVerifierSet, toClaim, verifierReport, verifierGate, verifierLine, renderVerifierRun, summarizeVerifierRun, knownLimitLine,
+  loadVerifierBaseline, saveVerifierBaseline, VERIFIER_PRECISION_MIN, VERIFIER_FULL_TOLERANCE,
+  type VerifierItem, type VerifierItemResult, type VerifierBaseline,
 } from "../../src/eval/verifier.js";
 import type { Verdict } from "../../src/verify/verify.js";
 
@@ -30,19 +35,91 @@ describe("verifierReport", () => {
   });
 });
 
-describe("verifierGate and verifierLine", () => {
-  it("fails below 0.9 precision of supported, passes at exactly 0.9, and fails when precision is undefined", () => {
+const result = (verdict: Verdict, support: number | null = 1) => ({
+  claim: "c", labels: [], verdict, support, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, missingPolarity: [], badLabels: [], cites: [],
+});
+/** Items from [case, expected, predicted, count] rows, ids v1, v2, … in order. */
+function items(spec: [VerifierItem["case"], Verdict, Verdict, number][]): VerifierItemResult[] {
+  let i = 0;
+  return spec.flatMap(([c, expected, predicted, n]) =>
+    Array.from({ length: n }, () => ({ id: `v${++i}`, case: c, expected, predicted, result: result(predicted) })));
+}
+const baselineFor = (precision: number | null, ids: string[]): VerifierBaseline => ({ recordedAt: "2026-10-03T00:00:00.000Z", commit: "abc1234", itemIds: ids, precision, recall: 1, accuracy: 1 });
+// Regular: 9 of 9 supported right. Full: plus 4 known limits marked supported, so precision 9/13.
+const healthy = items([["exact", "supported", "supported", 9], ["exact", "partial", "partial", 3], ["known_limit", "partial", "supported", 4], ["known_limit", "partial", "partial", 1]]);
+const ids = healthy.map((i) => i.id);
+
+describe("summarizeVerifierRun", () => {
+  it("scores two views: regular (every case but known_limit) and full (every item)", () => {
+    const run = summarizeVerifierRun(healthy);
+    expect(run.regular).toMatchObject({ n: 12, precision: 1, recall: 1, accuracy: 1 });
+    expect(run.full.n).toBe(17);
+    expect(run.full.precision).toBeCloseTo(9 / 13, 10);
+    expect(run.full.confusion.partial.supported).toBe(4);
+    expect(run.regular.confusion.partial.supported).toBe(0);
+  });
+});
+
+describe("verifierGate", () => {
+  it("passes when regular precision is at least 0.9 and full precision is within 0.02 of the baseline", () => {
     expect(VERIFIER_PRECISION_MIN).toBe(0.9);
-    expect(verifierGate(verifierReport(pairs([["supported", "supported", 9], ["partial", "supported", 1]])))).toEqual([]);
-    expect(verifierGate(verifierReport(pairs([["supported", "supported", 8], ["partial", "supported", 2]])))).toEqual(["verifier: precision of supported is 0.800, below 0.9"]);
-    expect(verifierGate(verifierReport(pairs([["supported", "partial", 3]])))).toEqual(["verifier: no claim was marked supported, so precision of supported is undefined"]);
+    expect(VERIFIER_FULL_TOLERANCE).toBe(0.02);
+    const run = summarizeVerifierRun(healthy);
+    expect(verifierGate(run, baselineFor(9 / 13, ids))).toEqual([]);
+    expect(verifierGate(run, baselineFor(9 / 13 + 0.02, ids))).toEqual([]);
   });
 
-  it("prints n, precision, recall and accuracy on one line", () => {
-    expect(verifierLine(verifierReport(pairs([["supported", "supported", 9], ["partial", "supported", 1], ["supported", "partial", 1]])))).toBe(
-      "verifier  n=11  supported precision=0.90 recall=0.90  accuracy=0.82",
-    );
-    expect(verifierLine(verifierReport([]))).toBe("verifier  n=0  supported precision=n/a recall=n/a  accuracy=0.00");
+  it("fails when regular precision of supported is below 0.9, or undefined", () => {
+    const worse = summarizeVerifierRun(items([["exact", "supported", "supported", 8], ["exact", "partial", "supported", 2]]));
+    expect(verifierGate(worse, baselineFor(0.8, worse.items.map((i) => i.id)))).toEqual(["verifier: regular precision of supported is 0.800, below 0.9"]);
+    const none = summarizeVerifierRun(items([["exact", "supported", "partial", 3]]));
+    expect(verifierGate(none, baselineFor(null, none.items.map((i) => i.id)))).toEqual(["verifier: no regular claim was marked supported, so its precision of supported is undefined"]);
+  });
+
+  it("fails when full precision drops more than 0.02 below the baseline", () => {
+    const run = summarizeVerifierRun(healthy);
+    expect(verifierGate(run, baselineFor(0.75, ids))).toEqual(["verifier: full precision of supported is 0.692, more than 0.02 below the baseline 0.750"]);
+  });
+
+  it("fails when the item set changed since the baseline", () => {
+    const run = summarizeVerifierRun(healthy);
+    expect(verifierGate(run, baselineFor(9 / 13, [...ids, "v99"]))).toEqual(["verifier set changed; review and run `eval verifier --accept`"]);
+    expect(verifierGate(run, baselineFor(9 / 13, ids.slice(1)))).toEqual(["verifier set changed; review and run `eval verifier --accept`"]);
+  });
+
+  it("fails without a baseline, unless this run records one", () => {
+    const run = summarizeVerifierRun(healthy);
+    expect(verifierGate(run, null)).toEqual(["no verifier baseline at eval/verifier-baseline.json; record one with `eval verifier --accept`"]);
+    expect(verifierGate(run, null, { accept: true })).toEqual([]);
+    expect(verifierGate(run, baselineFor(0.99, ids), { accept: true })).toEqual([]);
+  });
+});
+
+describe("verifier lines", () => {
+  it("prints the regular line with its gate, the full line with its baseline, and the known limits still passed", () => {
+    const run = summarizeVerifierRun(healthy);
+    expect(verifierLine(run, baselineFor(9 / 13, ids))).toEqual([
+      "verifier regular n=12 supported precision=1.00 recall=1.00 accuracy=1.00 (gate ≥ 0.90)",
+      "verifier full    n=17 supported precision=0.69 recall=1.00 accuracy=0.76 (baseline 0.69)",
+    ]);
+    expect(verifierLine(run, null)[1]).toBe("verifier full    n=17 supported precision=0.69 recall=1.00 accuracy=0.76 (no baseline)");
+    expect(knownLimitLine(run)).toBe("known limits: 4 of 5 still marked supported (documented in README)");
+    const empty = summarizeVerifierRun([]);
+    expect(verifierLine(empty, null)[0]).toBe("verifier regular n=0 supported precision=n/a recall=n/a accuracy=0.00 (gate ≥ 0.90)");
+  });
+});
+
+describe("verifier baseline file", () => {
+  it("round-trips through save and load with sorted ids, returns null when missing, and rejects a malformed file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "verifier-baseline-"));
+    const path = join(dir, "b.json");
+    expect(await loadVerifierBaseline(path)).toBeNull();
+    await saveVerifierBaseline(path, baselineFor(0.5, ["v2", "v10", "v1"]));
+    expect(await loadVerifierBaseline(path)).toEqual(baselineFor(0.5, ["v1", "v10", "v2"]));
+    await writeFile(path, JSON.stringify({ commit: "x" }));
+    await expect(loadVerifierBaseline(path)).rejects.toThrow(/^malformed verifier baseline .*: .*eval verifier --accept/);
+    await writeFile(path, "{");
+    await expect(loadVerifierBaseline(path)).rejects.toThrow(/^malformed verifier baseline .*invalid JSON/);
   });
 });
 
@@ -75,21 +152,23 @@ describe("parseVerifierSet and toClaim", () => {
 });
 
 describe("renderVerifierRun", () => {
-  it("marks each item ok or MISS, prints the confusion matrix and the summary line", () => {
-    const result = (verdict: Verdict, support: number | null) => ({
-      claim: "c", labels: [], verdict, support, matchedTerms: [], missingTerms: [], missingNumbers: [], negationMismatch: false, missingPolarity: [], badLabels: [], cites: [],
-    });
-    const items = [
+  it("marks each item ok or MISS, prints both confusion matrices and the summary lines", () => {
+    const two = [
       { id: "v1", case: "exact" as const, expected: "supported" as const, predicted: "supported" as const, result: result("supported", 1) },
       { id: "v2", case: "known_limit" as const, expected: "partial" as const, predicted: "supported" as const, result: result("supported", 0.75) },
     ];
-    const lines = renderVerifierRun({ items, report: verifierReport(items) });
+    const lines = renderVerifierRun(summarizeVerifierRun(two), null);
     expect(lines.slice(0, 2)).toEqual([
       "ok    v1    exact           supported 1.00",
       "MISS  v2    known_limit     expected partial, got supported 0.75",
     ]);
-    expect(lines).toContain("confusion (rows: labelled, columns: verifier)");
+    expect(lines).toContain("confusion, regular (rows: labelled, columns: verifier)");
+    expect(lines).toContain("confusion, full (rows: labelled, columns: verifier)");
     expect(lines).toContain("partial" + " ".repeat(6) + "            1            0            0            0            0");
-    expect(lines.at(-1)).toBe("verifier  n=2  supported precision=0.50 recall=1.00  accuracy=0.50");
+    expect(lines.slice(-3)).toEqual([
+      "verifier regular n=1 supported precision=1.00 recall=1.00 accuracy=1.00 (gate ≥ 0.90)",
+      "verifier full    n=2 supported precision=0.50 recall=1.00 accuracy=0.50 (no baseline)",
+      "known limits: 1 of 1 still marked supported (documented in README)",
+    ]);
   });
 });
