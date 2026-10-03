@@ -128,7 +128,7 @@ export const VERIFY_NOT_CHECKED = [
   "it checks word overlap, not who did what to whom, so reversed relations and swapped entities pass",
   "a number only has to appear somewhere in the cited text, not attached to the same thing",
   "all cited texts are pooled, so citing unrelated passages together can support a claim neither supports alone",
-  "negation is checked per sentence, not per clause",
+  "negation is compared only with the cited sentences that best match the claim (those holding at least half its matched words, or else the ones holding the most), per sentence, not per clause",
   "antonyms and words like \"former\" are not detected",
   "up to 40% of a claim's content words can be absent at supported, so one added detail in a short claim can pass",
   "a bare amount ignores its unit (20 minutes matches 20 hours), though % and percentage points are told apart",

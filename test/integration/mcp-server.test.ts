@@ -176,6 +176,7 @@ describe("brain MCP server", () => {
     const verifyTool = (await s.client.listTools()).tools.find((t) => t.name === "brain_verify")!;
     expect(verifyTool.description).toContain("it checks vocabulary overlap, not logic");
     expect(verifyTool.description).toContain("At most 50 claims of at most 2,000 characters each");
+    expect(verifyTool.description).toContain("and 20 cites each");
     expect(verifyTool.outputSchema).toBeDefined();
     expect(searchTool.outputSchema).toBeDefined();
     await s.close();

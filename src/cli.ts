@@ -384,19 +384,31 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx, assertEvalConnection } = await import("./eval/db.js");
-    const { runVerifierFile, renderVerifierRun, verifierGate, loadVerifierBaseline, saveVerifierBaseline, verifierBaselineOf } = await import("./eval/verifier.js");
+    const { runVerifierFile, renderVerifierRun, verifierGate, verifierAcceptRefusal, loadVerifierBaseline, saveVerifierBaseline, verifierBaselineOf } = await import("./eval/verifier.js");
     const { execSync } = await import("node:child_process");
     const ctx = makeEvalCtx();
     try {
       await assertEvalConnection(ctx.sql);
       const run = await runVerifierFile(ctx.sql, opts.file);
       if (!run) throw new Error(`No verifier set at ${opts.file}`);
-      const baseline = await loadVerifierBaseline(opts.baseline);
+      // --accept replaces the baseline, so a malformed one (e.g. an older format) is reported and ignored instead of fatal.
+      const baseline = await loadVerifierBaseline(opts.baseline).catch((e: unknown) => {
+        if (!opts.accept) throw e;
+        console.error(`${e instanceof Error ? e.message : String(e)} (ignored: --accept replaces it)`);
+        return null;
+      });
       const failures = opts.gate ? verifierGate(run, baseline, { accept: !!opts.accept, path: opts.baseline }) : [];
       if (opts.json) console.log(JSON.stringify({ ...run, baseline, failures }, null, 2));
       else for (const line of [...renderVerifierRun(run, baseline), ...failures.map((f) => `GATE: ${f}`)]) console.log(line);
       if (failures.length) process.exitCode = 1;
       if (opts.accept) {
+        // A baseline is a floor for later runs: never record one the regular bar rejects.
+        const refusal = verifierAcceptRefusal(run);
+        if (refusal.length) {
+          for (const r of refusal) console.error(`verifier baseline not written: ${r}`);
+          process.exitCode = 1;
+          return;
+        }
         const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
         await saveVerifierBaseline(opts.baseline, verifierBaselineOf(run, commit));
         console.log(`verifier baseline written to ${opts.baseline} at ${commit}`);

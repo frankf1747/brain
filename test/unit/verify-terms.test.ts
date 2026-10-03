@@ -142,6 +142,7 @@ describe("isNumberWord", () => {
   it("is true for number words and ordinal words, including hyphenated ones, in any case", () => {
     expect(["one", "First", "dozen", "tenth", "seven", "twenty-first", "hundreds"].map(isNumberWord)).toEqual([true, true, true, true, true, true, true]);
     expect(["patent", "someone", "often", "Acme"].map(isNumberWord)).toEqual([false, false, false, false]);
+    expect(["single", "couple", "pair", "several"].map(isNumberWord)).toEqual([true, true, true, true]);
   });
 });
 

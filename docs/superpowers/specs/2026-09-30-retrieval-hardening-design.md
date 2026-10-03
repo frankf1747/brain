@@ -189,7 +189,7 @@ For each claim:
 1. Content terms: the claim's stems after stopword removal, using Postgres `to_tsvector('english')` so the stemming matches the index.
 2. Numbers and dates in the claim are extracted separately. Each must appear verbatim (after normalising `1,000` to `1000` and `~11%` to `11%`) in at least one cited text.
 3. Support = fraction of content terms present in the union of the cited passages' stems (passage content plus heading path; for a fact, predicate plus object text).
-4. Verdict: `supported` when support ≥ 0.6 and every number matched; `partial` when support ≥ 0.3 or a number is missing; `unsupported` below 0.3; `uncited` when `cites` is empty; `bad_citation` when a cited label does not exist in that retrieval.
+4. Verdict: `supported` when support ≥ 0.6 and every number matched; `partial` when support ≥ 0.3 or a number is missing; `unsupported` below 0.3; `uncited` when `cites` is empty; `bad_citation` only when every cite is bad (names nothing in that retrieval). With good and bad cites mixed, the claim is judged on the good ones and the bad ones are listed with their reasons.
 
 The response lists each claim with its verdict, its support value, the missing terms and missing numbers, and ends with a one-line summary (`4 supported, 1 partial, 1 unsupported`). The server instructions are extended: after composing an answer from `brain_search` results, the client calls `brain_verify` with its claims and presents anything not `supported` as the model's own addition.
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseVerifierSet, toClaim, verifierReport, verifierGate, verifierLine, renderVerifierRun, summarizeVerifierRun, knownLimitLine,
-  loadVerifierBaseline, saveVerifierBaseline, VERIFIER_PRECISION_MIN, VERIFIER_FULL_TOLERANCE,
+  loadVerifierBaseline, saveVerifierBaseline, verifierAcceptRefusal, itemSha256, VERIFIER_PRECISION_MIN, VERIFIER_FULL_TOLERANCE,
   type VerifierItem, type VerifierItemResult, type VerifierBaseline,
 } from "../../src/eval/verifier.js";
 import type { Verdict } from "../../src/verify/verify.js";
@@ -42,12 +42,14 @@ const result = (verdict: Verdict, support: number | null = 1) => ({
 function items(spec: [VerifierItem["case"], Verdict, Verdict, number][]): VerifierItemResult[] {
   let i = 0;
   return spec.flatMap(([c, expected, predicted, n]) =>
-    Array.from({ length: n }, () => ({ id: `v${++i}`, case: c, expected, predicted, result: result(predicted) })));
+    Array.from({ length: n }, () => ({ id: `v${++i}`, sha256: `sha-v${i}`, case: c, expected, predicted, result: result(predicted) })));
 }
-const baselineFor = (precision: number | null, ids: string[]): VerifierBaseline => ({ recordedAt: "2026-10-03T00:00:00.000Z", commit: "abc1234", itemIds: ids, precision, recall: 1, accuracy: 1 });
+type Entry = { id: string; sha256: string };
+const baselineFor = (precision: number | null, entries: Entry[]): VerifierBaseline => ({ recordedAt: "2026-10-03T00:00:00.000Z", commit: "abc1234", items: entries, precision, recall: 1, accuracy: 1 });
+const entriesOf = (run: { items: VerifierItemResult[] }): Entry[] => run.items.map((i) => ({ id: i.id, sha256: i.sha256 }));
 // Regular: 9 of 9 supported right. Full: plus 4 known limits marked supported, so precision 9/13.
 const healthy = items([["exact", "supported", "supported", 9], ["exact", "partial", "partial", 3], ["known_limit", "partial", "supported", 4], ["known_limit", "partial", "partial", 1]]);
-const ids = healthy.map((i) => i.id);
+const ids = entriesOf({ items: healthy });
 
 describe("summarizeVerifierRun", () => {
   it("scores two views: regular (every case but known_limit) and full (every item)", () => {
@@ -71,9 +73,9 @@ describe("verifierGate", () => {
 
   it("fails when regular precision of supported is below 0.9, or undefined", () => {
     const worse = summarizeVerifierRun(items([["exact", "supported", "supported", 8], ["exact", "partial", "supported", 2]]));
-    expect(verifierGate(worse, baselineFor(0.8, worse.items.map((i) => i.id)))).toEqual(["verifier: regular precision of supported is 0.800, below 0.9"]);
+    expect(verifierGate(worse, baselineFor(0.8, entriesOf(worse)))).toEqual(["verifier: regular precision of supported is 0.800, below 0.9"]);
     const none = summarizeVerifierRun(items([["exact", "supported", "partial", 3]]));
-    expect(verifierGate(none, baselineFor(null, none.items.map((i) => i.id)))).toEqual(["verifier: no regular claim was marked supported, so its precision of supported is undefined"]);
+    expect(verifierGate(none, baselineFor(null, entriesOf(none)))).toEqual(["verifier: no regular claim was marked supported, so its precision of supported is undefined"]);
   });
 
   it("fails when full precision drops more than 0.02 below the baseline", () => {
@@ -83,8 +85,16 @@ describe("verifierGate", () => {
 
   it("fails when the item set changed since the baseline", () => {
     const run = summarizeVerifierRun(healthy);
-    expect(verifierGate(run, baselineFor(9 / 13, [...ids, "v99"]))).toEqual(["verifier set changed; review and run `eval verifier --accept`"]);
+    expect(verifierGate(run, baselineFor(9 / 13, [...ids, { id: "v99", sha256: "x" }]))).toEqual(["verifier set changed; review and run `eval verifier --accept`"]);
+    // An item edited in place keeps its id but not its hash.
+    expect(verifierGate(run, baselineFor(9 / 13, ids.map((e, i) => (i === 3 ? { ...e, sha256: "edited" } : e))))).toEqual(["verifier set changed; review and run `eval verifier --accept`"]);
     expect(verifierGate(run, baselineFor(9 / 13, ids.slice(1)))).toEqual(["verifier set changed; review and run `eval verifier --accept`"]);
+  });
+
+  it("refuses to record a baseline when the regular bar fails", () => {
+    expect(verifierAcceptRefusal(summarizeVerifierRun(healthy))).toEqual([]);
+    const worse = summarizeVerifierRun(items([["exact", "supported", "supported", 8], ["exact", "partial", "supported", 2]]));
+    expect(verifierAcceptRefusal(worse)).toEqual(["verifier: regular precision of supported is 0.800, below 0.9"]);
   });
 
   it("fails without a baseline, unless this run records one", () => {
@@ -103,7 +113,9 @@ describe("verifier lines", () => {
       "verifier full    n=17 supported precision=0.69 recall=1.00 accuracy=0.76 (baseline 0.69)",
     ]);
     expect(verifierLine(run, null)[1]).toBe("verifier full    n=17 supported precision=0.69 recall=1.00 accuracy=0.76 (no baseline)");
-    expect(knownLimitLine(run)).toBe("known limits: 4 of 5 still marked supported (documented in README)");
+    expect(knownLimitLine(run)).toBe("known limits: 4 of 5 false claims still marked supported (documented in README)");
+    const withTrue = summarizeVerifierRun(items([["known_limit", "partial", "supported", 2], ["known_limit", "supported", "partial", 3], ["known_limit", "supported", "supported", 1]]));
+    expect(knownLimitLine(withTrue)).toBe("known limits: 2 of 2 false claims still marked supported, 3 of 4 true claims still not marked supported (documented in README)");
     const empty = summarizeVerifierRun([]);
     expect(verifierLine(empty, null)[0]).toBe("verifier regular n=0 supported precision=n/a recall=n/a accuracy=0.00 (gate ≥ 0.90)");
   });
@@ -114,12 +126,21 @@ describe("verifier baseline file", () => {
     const dir = await mkdtemp(join(tmpdir(), "verifier-baseline-"));
     const path = join(dir, "b.json");
     expect(await loadVerifierBaseline(path)).toBeNull();
-    await saveVerifierBaseline(path, baselineFor(0.5, ["v2", "v10", "v1"]));
-    expect(await loadVerifierBaseline(path)).toEqual(baselineFor(0.5, ["v1", "v10", "v2"]));
+    const e = (id: string): Entry => ({ id, sha256: id.length === 2 ? "a".repeat(64) : "b".repeat(64) });
+    await saveVerifierBaseline(path, baselineFor(0.5, [e("v2"), e("v10"), e("v1")]));
+    expect(await loadVerifierBaseline(path)).toEqual(baselineFor(0.5, [e("v1"), e("v10"), e("v2")]));
     await writeFile(path, JSON.stringify({ commit: "x" }));
     await expect(loadVerifierBaseline(path)).rejects.toThrow(/^malformed verifier baseline .*: .*eval verifier --accept/);
     await writeFile(path, "{");
     await expect(loadVerifierBaseline(path)).rejects.toThrow(/^malformed verifier baseline .*invalid JSON/);
+  });
+});
+
+describe("itemSha256", () => {
+  it("is the sha256 of the item's JSON: stable, and different when any field is edited", () => {
+    expect(itemSha256(item())).toMatch(/^[0-9a-f]{64}$/);
+    expect(itemSha256(item())).toBe(itemSha256(item()));
+    expect(itemSha256(item({ note: "edited" }))).not.toBe(itemSha256(item()));
   });
 });
 
@@ -154,8 +175,8 @@ describe("parseVerifierSet and toClaim", () => {
 describe("renderVerifierRun", () => {
   it("marks each item ok or MISS, prints both confusion matrices and the summary lines", () => {
     const two = [
-      { id: "v1", case: "exact" as const, expected: "supported" as const, predicted: "supported" as const, result: result("supported", 1) },
-      { id: "v2", case: "known_limit" as const, expected: "partial" as const, predicted: "supported" as const, result: result("supported", 0.75) },
+      { id: "v1", sha256: "a", case: "exact" as const, expected: "supported" as const, predicted: "supported" as const, result: result("supported", 1) },
+      { id: "v2", sha256: "b", case: "known_limit" as const, expected: "partial" as const, predicted: "supported" as const, result: result("supported", 0.75) },
     ];
     const lines = renderVerifierRun(summarizeVerifierRun(two), null);
     expect(lines.slice(0, 2)).toEqual([
@@ -168,7 +189,7 @@ describe("renderVerifierRun", () => {
     expect(lines.slice(-3)).toEqual([
       "verifier regular n=1 supported precision=1.00 recall=1.00 accuracy=1.00 (gate ≥ 0.90)",
       "verifier full    n=2 supported precision=0.50 recall=1.00 accuracy=0.50 (no baseline)",
-      "known limits: 1 of 1 still marked supported (documented in README)",
+      "known limits: 1 of 1 false claims still marked supported (documented in README)",
     ]);
   });
 });

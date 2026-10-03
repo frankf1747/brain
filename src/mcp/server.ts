@@ -10,7 +10,7 @@ import { SearchResultSchema } from "../retrieve/contract.js";
 import { orient } from "../retrieve/orient.js";
 import { getDocument } from "../retrieve/documents.js";
 import { explain, explainNotFound } from "../retrieve/explain.js";
-import { verifyClaims, VerificationSchema, ClaimInputSchema, MAX_CLAIMS } from "../verify/resolve.js";
+import { verifyClaims, VerificationSchema, ClaimInputSchema, MAX_CLAIMS, MAX_CITES } from "../verify/resolve.js";
 import { describeNode } from "../graph/inspect.js";
 import { addFact, supersedeFact, listFacts } from "../graph/facts.js";
 import { refreshMirror } from "../obsidian/auto.js";
@@ -189,7 +189,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         "For each claim it compares the claim's content words (Postgres English stemming, stopwords removed) with the cited texts, requires every number, date and code in the claim to appear in them (1,000 = 1000, ~11% = 11 percent, $115k = $115,000, Sep 29, 2026 = 2026-09-29; -5% is not 5%, v2.5 is not v2.7, 3/4/2026 and 555-1234 are compared as written), checks that negation agrees, and requires every polarity word of the claim (up, down, before, after, over, under, more, less, all, some, only, will, might, can, should, …) to appear in the cited text. " +
         "Verdicts: supported (at least 60% of the claim's content words are in the cited text, every number and polarity word appears, negation agrees, and no missing word is a number or ordinal word such as one, first or dozen); partial (at least 30%, or one of those checks fails); unsupported (under 30%); uncited (no cites); bad_citation (no cite exists in that search). " +
         `Limits: it checks vocabulary overlap, not logic. Not checked: ${VERIFY_NOT_CHECKED.join("; ")}. Treat supported as "the cited text contains this claim's words and numbers", not as proof. ` +
-        `At most ${MAX_CLAIMS} claims of at most 2,000 characters each. Writes one audit row to brain.verification_log and changes nothing in the knowledge base. The same result is returned as structuredContent.`,
+        `At most ${MAX_CLAIMS} claims of at most 2,000 characters each, and ${MAX_CITES} cites each. Writes one audit row to brain.verification_log and changes nothing in the knowledge base. The same result is returned as structuredContent.`,
       inputSchema: {
         retrieval_id: z.string().min(1).describe("The id after 'retrieval' on the first line of the brain_search result the answer was written from"),
         claims: z.array(ClaimInputSchema).min(1).max(MAX_CLAIMS).describe("The answer split into claims (one sentence each is usual), each with the labels it cites"),

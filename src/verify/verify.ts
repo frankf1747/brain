@@ -16,12 +16,18 @@ import {
  *    a fact's is its predicate with underscores as spaces, a colon, and its object text.
  *  - support: |content terms ∩ cited stems| / |content terms|; null when the claim has no content terms.
  *  - numbers: every number, date and code in the claim must be in the cited texts' citedNumberSet.
- *  - negation mismatch: the claim has a negation word, but no sentence of the cited texts has one together with a
- *    matched term; or the claim has none, but such a sentence does.
+ *  - anchor sentences: the cited sentences that best match the claim. Every cited sentence holding at least
+ *    NEGATION_ANCHOR_SHARE (half) of the claim's matched terms; when none does, the sentence or sentences holding the
+ *    most matched terms. With no matched terms there are none.
+ *  - negation mismatch: the claim has a negation word and no anchor sentence has one, or the claim has none and an
+ *    anchor sentence has one. Sentences that share only a word or two with the claim do not count.
  *  - polarity: every polarity word of the claim (up, down, before, after, more, less, all, some, only, will, might, …;
  *    terms.ts POLARITY_WORDS) must appear as a whole word in the cited texts, or the claim is capped at partial.
  *  - counting words: a missing term that is a number or ordinal word (one, first, dozen, tenth) caps it at partial.
  */
+
+/** Share of the claim's matched terms a cited sentence must hold to be an anchor for the negation check. */
+export const NEGATION_ANCHOR_SHARE = 0.5;
 
 /** Lowest support for `supported`. */
 export const SUPPORTED_MIN = 0.6;
@@ -160,7 +166,14 @@ export function checkClaim(claimText: string, cited: CitedText[], stems: StemMap
   const citedPolarity = new Set(cited.flatMap((c) => [...polarityWords(c.text)]));
   const missingPolarity = [...polarityWords(claim)].filter((w) => !citedPolarity.has(w));
 
-  const citedNegates = sentences.some((s) => hasNegation(s.text) && [...s.lexemes].some((l) => matchedSet.has(l)));
+  const held = sentences.map((s) => [...s.lexemes].filter((l) => matchedSet.has(l)).length);
+  const most = Math.max(0, ...held);
+  const anchors = matched.length === 0
+    ? []
+    : held.some((h) => h >= NEGATION_ANCHOR_SHARE * matched.length)
+      ? sentences.filter((_, i) => held[i] >= NEGATION_ANCHOR_SHARE * matched.length)
+      : sentences.filter((_, i) => held[i] === most);
+  const citedNegates = anchors.some((s) => hasNegation(s.text));
 
   return {
     termCount: word.size,

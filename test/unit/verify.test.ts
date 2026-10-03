@@ -129,6 +129,21 @@ describe("negation", () => {
     expect(run("Acme doesn't sponsor visas.", [P("Acme does not sponsor visas.")])).toMatchObject({ verdict: "supported", negationMismatch: false });
   });
 
+  it("a verbatim sentence is supported even when another cited sentence negates one of its words", () => {
+    const src = P("Each squad created its own cluster and nobody shut them down. Because no cluster carried a tag, spend was unknown.");
+    expect(run("Each squad created its own cluster.", [src])).toMatchObject({ verdict: "supported", negationMismatch: false });
+  });
+
+  it("negation is compared with the best-matching sentences only: a negation elsewhere does not excuse a negated claim", () => {
+    expect(run("Acme does not sponsor visas.", [P("Acme sponsors visas. Not every visa is approved.")])).toMatchObject({ verdict: "partial", negationMismatch: true });
+  });
+
+  it("when no sentence holds half the matched terms, the sentences holding the most decide", () => {
+    const claim = "Alpha bravo charlie delta echo.";
+    expect(run(claim, [P("Alpha bravo is not here. Charlie. Delta. Echo.")])).toMatchObject({ verdict: "partial", negationMismatch: true });
+    expect(run(claim, [P("Alpha bravo here. Charlie is not. Delta. Echo.")])).toMatchObject({ verdict: "supported", negationMismatch: false });
+  });
+
   it("a negation in a source sentence without a matched term does not count", () => {
     expect(run("Acme sponsors visas.", [P("Acme sponsors visas. The weather was not warm.")])).toMatchObject({ verdict: "supported", negationMismatch: false });
   });

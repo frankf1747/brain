@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { Db } from "../db.js";
@@ -118,6 +119,8 @@ const EPSILON = 1e-9;
 
 export interface VerifierItemResult {
   id: string;
+  /** itemSha256 of the item, so an item edited in place counts as a changed set. */
+  sha256: string;
   case: VerifierItem["case"];
   expected: Verdict;
   predicted: Verdict;
@@ -137,11 +140,16 @@ export function summarizeVerifierRun(items: VerifierItemResult[]): VerifierRun {
   return { items, regular: verifierReport(items.filter((i) => i.case !== "known_limit")), full: verifierReport(items) };
 }
 
-/** eval/verifier-baseline.json: the full view as last accepted, and the items it was measured on. */
+/** The sha256 of an item's JSON (as parsed), so any edit to an item changes it. */
+export function itemSha256(item: VerifierItem): string {
+  return createHash("sha256").update(JSON.stringify(item)).digest("hex");
+}
+
+/** eval/verifier-baseline.json: the full view as last accepted, and the items (id and hash) it was measured on. */
 export const VerifierBaselineSchema = z.object({
   recordedAt: z.string(),
   commit: z.string(),
-  itemIds: z.array(z.string()),
+  items: z.array(z.object({ id: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict()),
   precision: z.number().nullable(),
   recall: z.number().nullable(),
   accuracy: z.number(),
@@ -172,15 +180,24 @@ export async function loadVerifierBaseline(path: string): Promise<VerifierBaseli
 }
 
 export async function saveVerifierBaseline(path: string, b: VerifierBaseline): Promise<void> {
-  await writeFile(path, JSON.stringify({ ...b, itemIds: [...b.itemIds].sort() }, null, 2) + "\n");
+  const items = [...b.items].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  await writeFile(path, JSON.stringify({ ...b, items }, null, 2) + "\n");
 }
 
 /** The baseline this run would record. */
 export function verifierBaselineOf(run: VerifierRun, commit: string): VerifierBaseline {
   return {
-    recordedAt: new Date().toISOString(), commit, itemIds: run.items.map((i) => i.id).sort(),
+    recordedAt: new Date().toISOString(), commit, items: run.items.map((i) => ({ id: i.id, sha256: i.sha256 })),
     precision: run.full.precision, recall: run.full.recall, accuracy: run.full.accuracy,
   };
+}
+
+/** The regular bar alone: why this run may not be recorded as the baseline (eval verifier --accept); empty means it may. */
+export function verifierAcceptRefusal(run: VerifierRun): string[] {
+  const r = run.regular.precision;
+  if (r === null) return ["verifier: no regular claim was marked supported, so its precision of supported is undefined"];
+  if (r < VERIFIER_PRECISION_MIN - EPSILON) return [`verifier: regular precision of supported is ${r.toFixed(3)}, below ${VERIFIER_PRECISION_MIN}`];
+  return [];
 }
 
 /**
@@ -189,15 +206,13 @@ export function verifierBaselineOf(run: VerifierRun, commit: string): VerifierBa
  * a new baseline (accept), as the retrieval gate does.
  */
 export function verifierGate(run: VerifierRun, baseline: VerifierBaseline | null, opts: { accept?: boolean; path?: string } = {}): string[] {
-  const failures: string[] = [];
-  const r = run.regular.precision;
-  if (r === null) failures.push("verifier: no regular claim was marked supported, so its precision of supported is undefined");
-  else if (r < VERIFIER_PRECISION_MIN - EPSILON) failures.push(`verifier: regular precision of supported is ${r.toFixed(3)}, below ${VERIFIER_PRECISION_MIN}`);
+  const failures = verifierAcceptRefusal(run);
   if (opts.accept) return failures;
   if (!baseline) return [...failures, `no verifier baseline at ${opts.path ?? VERIFIER_BASELINE_PATH}; record one with \`eval verifier --accept\``];
-  const ids = run.items.map((i) => i.id).sort();
-  const before = [...baseline.itemIds].sort();
-  if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) return [...failures, "verifier set changed; review and run `eval verifier --accept`"];
+  const key = (e: { id: string; sha256: string }) => `${e.id} ${e.sha256}`;
+  const now = run.items.map(key).sort();
+  const before = baseline.items.map(key).sort();
+  if (now.length !== before.length || now.some((k, i) => k !== before[i])) return [...failures, "verifier set changed; review and run `eval verifier --accept`"];
   const f = run.full.precision;
   if (baseline.precision !== null && (f === null || f < baseline.precision - VERIFIER_FULL_TOLERANCE - EPSILON)) {
     failures.push(`verifier: full precision of supported is ${f === null ? "undefined" : f.toFixed(3)}, more than ${VERIFIER_FULL_TOLERANCE} below the baseline ${baseline.precision.toFixed(3)}`);
@@ -216,16 +231,25 @@ export function verifierLine(run: VerifierRun, baseline: VerifierBaseline | null
   ];
 }
 
-/** How many known_limit items the verifier still marks supported. */
+/**
+ * How the known_limit items fare: false claims the verifier still marks supported (precision errors) and true claims
+ * it still does not (recall errors).
+ */
 export function knownLimitLine(run: VerifierRun): string {
   const limits = run.items.filter((i) => i.case === "known_limit");
-  return `known limits: ${limits.filter((i) => i.predicted === "supported").length} of ${limits.length} still marked supported (documented in README)`;
+  const falseOnes = limits.filter((i) => i.expected !== "supported");
+  const trueOnes = limits.filter((i) => i.expected === "supported");
+  const passed = falseOnes.filter((i) => i.predicted === "supported").length;
+  const missed = trueOnes.filter((i) => i.predicted !== "supported").length;
+  const parts = [`${passed} of ${falseOnes.length} false claims still marked supported`];
+  if (trueOnes.length) parts.push(`${missed} of ${trueOnes.length} true claims still not marked supported`);
+  return `known limits: ${parts.join(", ")} (documented in README)`;
 }
 
 /** Judges every item with one stem query. Read-only: it writes nothing (not even verification_log). */
 export async function runVerifierSet(sql: Db, items: VerifierItem[]): Promise<VerifierRun> {
   const results = await verifyTexts(sql, items.map(toClaim));
-  const out = items.map((it, i) => ({ id: it.id, case: it.case, expected: it.expected_verdict, predicted: results[i].verdict, result: results[i] }));
+  const out = items.map((it, i) => ({ id: it.id, sha256: itemSha256(it), case: it.case, expected: it.expected_verdict, predicted: results[i].verdict, result: results[i] }));
   return summarizeVerifierRun(out);
 }
 
