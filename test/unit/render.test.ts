@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
-  renderExplain, explainLine, renderSources,
+  renderExplain, explainLine, renderSources, verdictLine, verdictDetail, renderVerification, VERIFY_LIMITS,
 } from "../../src/mcp/render.js";
+import type { ClaimResult } from "../../src/verify/verify.js";
 import { toLoggedPassages } from "../../src/retrieve/contract.js";
 import type { Explanation } from "../../src/retrieve/explain.js";
 import { passage, fact, searchResult } from "./search-fixture.js";
@@ -141,6 +142,52 @@ describe("renderSources", () => {
   });
 });
 
+describe("renderVerification", () => {
+  const claim = (over: Partial<ClaimResult> = {}): ClaimResult => ({
+    claim: "Acme sponsors H-1B visas.", labels: ["P1"], verdict: "supported", support: 1, matchedTerms: ["Acme", "sponsors", "visas"],
+    missingTerms: [], missingNumbers: [], negationMismatch: false, badLabels: [],
+    cites: [{ label: "P1", kind: "passage", documentId: "d1", chunkId: "c1", factId: null, title: "Doc" }], ...over,
+  });
+
+  it("prints one line per claim with its mark, verdict, support and cites", () => {
+    expect(verdictLine(claim({ support: 0.833 }))).toBe('✓ supported 0.83 — "Acme sponsors H-1B visas." [P1]');
+    expect(verdictLine(claim({ verdict: "partial", support: 0.5, labels: ["P1", "F2"] }))).toBe('~ partial 0.50 — "Acme sponsors H-1B visas." [P1, F2]');
+    expect(verdictLine(claim({ verdict: "unsupported", support: 0 }))).toBe('✗ unsupported 0.00 — "Acme sponsors H-1B visas." [P1]');
+    expect(verdictLine(claim({ verdict: "uncited", support: null, labels: [], cites: [] }))).toBe('○ uncited - — "Acme sponsors H-1B visas."');
+    expect(verdictLine(claim({ verdict: "bad_citation", support: null, labels: ["P9"], cites: [] }))).toBe('! bad citation - — "Acme sponsors H-1B visas." [P9]');
+  });
+
+  it("says under each claim that is not supported what its cited text lacks, and lists bad cites under any claim", () => {
+    expect(verdictDetail(claim())).toBeNull();
+    expect(verdictDetail(claim({ badLabels: [{ label: "P9", reason: "no P9 in this search (it returned 3 passages)" }] }))).toBe(
+      "    bad citation P9: no P9 in this search (it returned 3 passages)",
+    );
+    expect(verdictDetail(claim({ verdict: "partial", support: 0.5, missingTerms: ["Denver"], missingNumbers: ["$140000"], negationMismatch: true }))).toBe(
+      "    missing terms: Denver · missing numbers: $140000 · negation differs from the cited text",
+    );
+    expect(verdictDetail(claim({ verdict: "partial", support: null }))).toBe("    no content words to compare");
+    expect(verdictDetail(claim({ verdict: "uncited", support: null, labels: [], cites: [] }))).toBe("    no citation: nothing from the knowledge base backs this");
+    expect(verdictDetail(claim({ verdict: "bad_citation", support: null, cites: [], badLabels: [{ label: "P9", reason: "r" }] }))).toBe("    bad citation P9: r");
+  });
+
+  it("renders the whole verification: header, claims, summary, notes and what was not checked", () => {
+    const text = renderVerification({
+      verificationId: "v1", retrievalId: "r1", notes: ["Old search."],
+      claims: [claim(), claim({ claim: "Acme pays $150,000.", verdict: "partial", support: 1, missingNumbers: ["$150000"] })],
+      summary: { supported: 1, partial: 1, unsupported: 0, uncited: 0, bad_citation: 0, text: "1 supported, 1 partial" },
+    });
+    expect(text.split("\n")).toEqual([
+      "verification v1 · retrieval r1 · 2 claims",
+      '✓ supported 1.00 — "Acme sponsors H-1B visas." [P1]',
+      '~ partial 1.00 — "Acme pays $150,000." [P1]',
+      "    missing numbers: $150000",
+      "Summary: 1 supported, 1 partial",
+      "Note: Old search.",
+      VERIFY_LIMITS,
+    ]);
+  });
+});
+
 describe("renderExplain", () => {
   const base: Explanation = {
     retrievalId: "r1", query: "acme X-90", client: "mcp-stdio", createdAt: "2026-10-02T09:15:00.000Z",
@@ -226,6 +273,7 @@ describe("other renderers", () => {
     expect(t).toContain("person: 3");
     expect(t.split("\n")).toContain("Voyage today: 1,250,000 of 5,000,000 tokens (25.0%)");
     expect(t).toContain("brain_search");
+    expect(t).toContain("brain_verify to check an answer's claims against the passages and facts they cite");
   });
   it("renderOrient says the Voyage ledger is unavailable instead of failing", () => {
     const t = renderOrient({

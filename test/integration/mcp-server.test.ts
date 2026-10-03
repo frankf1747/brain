@@ -9,7 +9,8 @@ import { JobManager } from "../../src/mcp/jobs.js";
 import { storeDocument } from "../../src/ingest/store.js";
 import type { ObsidianAutoProjector } from "../../src/obsidian/auto.js";
 import { SearchResultSchema } from "../../src/retrieve/contract.js";
-import { renderSearch } from "../../src/mcp/render.js";
+import { renderSearch, renderVerification } from "../../src/mcp/render.js";
+import { VerificationSchema } from "../../src/verify/resolve.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -72,15 +73,15 @@ describe("brain MCP server", () => {
     await s.close();
   });
 
-  it("lists ten tools, or seven when read-only (brain_explain is read-only)", async () => {
+  it("lists eleven tools, or eight when read-only (brain_explain and brain_verify are read-only)", async () => {
     const a = await connect();
     expect((await a.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
-      "brain_add_fact", "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_ingest", "brain_orient", "brain_search", "brain_status", "brain_supersede_fact",
+      "brain_add_fact", "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_ingest", "brain_orient", "brain_search", "brain_status", "brain_supersede_fact", "brain_verify",
     ]);
     await a.close();
     const b = await connect(true);
     expect((await b.client.listTools()).tools.map((t) => t.name).sort()).toEqual([
-      "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_orient", "brain_search", "brain_status",
+      "brain_explain", "brain_get_document", "brain_get_facts", "brain_get_node", "brain_orient", "brain_search", "brain_status", "brain_verify",
     ]);
     await b.close();
   });
@@ -106,6 +107,49 @@ describe("brain MCP server", () => {
     await ro.close();
   });
 
+  it("brain_verify checks an answer's claims against a brain_search result, read-only, and logs one audit row", async () => {
+    const s = await connect();
+    await s.call("brain_ingest", { text: "I applied to Acme Corp in September. I am on F-1 OPT.", source_kind: "note" });
+    await s.jobs.drain();
+    const found = await s.call("brain_search", { query: "Acme Corp visa", k: 5 });
+    const id = /^retrieval ([0-9a-f-]{36}) · mode: hybrid/.exec(found.text)![1];
+    await s.close();
+    const ro = await connect(true);
+    await ro.client.listTools(); // the client validates structuredContent against the advertised outputSchema
+    const res = await ro.client.callTool({
+      name: "brain_verify",
+      arguments: {
+        retrieval_id: id,
+        claims: [
+          { text: "I applied to Acme Corp in September.", cites: ["P1"] },
+          { text: "Northwind builds rockets in Ohio.", cites: ["P1"] },
+        ],
+      },
+    });
+    expect(res.isError).toBeFalsy();
+    const text = (res.content as { type: string; text: string }[]).map((c) => c.text).join("\n");
+    const v = VerificationSchema.parse(res.structuredContent);
+    expect(v.claims.map((c) => c.verdict)).toEqual(["supported", "unsupported"]);
+    expect(renderVerification(v)).toBe(text);
+    expect(text).toContain('✓ supported 1.00 — "I applied to Acme Corp in September." [P1]');
+    expect(text).toContain('✗ unsupported 0.00 — "Northwind builds rockets in Ohio." [P1]\n    missing terms: Northwind, builds, rockets, Ohio');
+    expect(text).toContain("Summary: 1 supported, 1 unsupported");
+    const [row] = await sql<{ retrieval_id: string; client: string }[]>`select retrieval_id, client from brain.verification_log where id = ${v.verificationId}`;
+    expect(row).toEqual({ retrieval_id: id, client: "test" });
+    const [call] = await sql<{ args: Record<string, unknown> }[]>`select args from brain.tool_calls where tool = 'brain_verify'`;
+    expect(call.args).toEqual({ retrieval_id: id, claims_n: 2 });
+
+    const missing = await ro.call("brain_verify", { retrieval_id: "00000000-0000-0000-0000-000000000000", claims: [{ text: "x", cites: [] }] });
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toContain('No logged search has retrieval id "00000000-0000-0000-0000-000000000000"');
+    const tooMany = await ro.call("brain_verify", { retrieval_id: id, claims: Array.from({ length: 51 }, () => ({ text: "x", cites: [] })) });
+    expect(tooMany.isError).toBe(true);
+    const tooLong = await ro.call("brain_verify", { retrieval_id: id, claims: [{ text: "x".repeat(2001), cites: [] }] });
+    expect(tooLong.isError).toBe(true);
+    expect((await sql`select id from brain.verification_log`).length).toBe(1);
+    await ro.close();
+  });
+
   it("tells clients to route questions about the owner through orient then search", async () => {
     const s = await connect();
     const instructions = s.client.getInstructions() ?? "";
@@ -125,6 +169,14 @@ describe("brain MCP server", () => {
     expect(searchTool.description).toContain("structuredContent");
     expect(searchTool.description).toContain("brain_explain");
     expect(instructions).toContain("brain_explain with the retrieval id replays how that search ranked its passages");
+    expect(instructions).toContain("After composing an answer from brain_search results, call brain_verify with the retrieval id and the answer's claims");
+    expect(instructions).toContain("mark every claim whose verdict is not supported as your own addition or as weakly supported");
+    expect(instructions.indexOf("brain_search")).toBeLessThan(instructions.indexOf("brain_verify"));
+    expect(searchTool.description).toContain("brain_verify");
+    const verifyTool = (await s.client.listTools()).tools.find((t) => t.name === "brain_verify")!;
+    expect(verifyTool.description).toContain("it checks vocabulary overlap, not logic");
+    expect(verifyTool.description).toContain("At most 50 claims of at most 2,000 characters each");
+    expect(verifyTool.outputSchema).toBeDefined();
     expect(searchTool.outputSchema).toBeDefined();
     await s.close();
   });

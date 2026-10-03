@@ -10,11 +10,12 @@ import { SearchResultSchema } from "../retrieve/contract.js";
 import { orient } from "../retrieve/orient.js";
 import { getDocument } from "../retrieve/documents.js";
 import { explain, explainNotFound } from "../retrieve/explain.js";
+import { verifyClaims, VerificationSchema, ClaimInputSchema, MAX_CLAIMS } from "../verify/resolve.js";
 import { describeNode } from "../graph/inspect.js";
 import { addFact, supersedeFact, listFacts } from "../graph/facts.js";
 import { refreshMirror } from "../obsidian/auto.js";
 import { JobManager } from "./jobs.js";
-import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, renderExplain } from "./render.js";
+import { renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, renderExplain, renderVerification } from "./render.js";
 
 export interface ServerOptions {
   client: string;
@@ -43,6 +44,7 @@ function instructions(readOnly: boolean): string {
     "2. Call brain_search with the user's question in plain words. Do not add names or terms the user did not mention. Narrow with source_kinds or dates when orient shows it helps.",
     "3. For a named person, organization, or project, call brain_get_node. For the full text of a result, call brain_get_document with its document id.",
     "4. Answer from the returned passages and cite them as [P1], [F1]. Make clear which parts of the answer come from the knowledge base and which are your own. If nothing relevant comes back, say so rather than answering from elsewhere, and name any other source you use.",
+    "5. After composing an answer from brain_search results, call brain_verify with the retrieval id and the answer's claims, each with the labels it cites. When presenting the answer, mark every claim whose verdict is not supported as your own addition or as weakly supported.",
     "Every brain_search result starts with `retrieval <id> · mode: <mode>`. Mode hybrid is a full search; keyword-only and fused-order mean part of it fell back, so treat its ranking as weaker. Each passage shows its score and score kind (rerank: 0 to 1, higher is stronger; rrf: reranking was skipped; -: found through a named entity or a literal match, unscored), the search branches that found it with their ranks, and who wrote it, so you can tell strong evidence from weak. brain_explain with the retrieval id replays how that search ranked its passages.",
   ];
   if (!readOnly) {
@@ -59,10 +61,15 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
   const jobs = opts.jobs ?? new JobManager(ctx);
   const by = `agent:${opts.client}`;
 
-  /** Records each call in brain.tool_calls. Saved text is logged as its length only; a failed log write never fails the tool. */
+  /**
+   * Records each call in brain.tool_calls. Saved text is logged as its length only, and brain_verify's claims as their
+   * count (brain.verification_log keeps them); a failed log write never fails the tool.
+   */
   const record = async (tool: string, args: Record<string, unknown>, started: number, res: ToolResult) => {
-    const { text: body, ...rest } = args;
-    const logged = typeof body === "string" ? { ...rest, text_chars: body.length } : args;
+    const { text: body, claims, ...rest } = args;
+    const logged: Record<string, unknown> = { ...rest };
+    if (typeof body === "string") logged.text_chars = body.length;
+    if (Array.isArray(claims)) logged.claims_n = claims.length;
     try {
       await ctx.sql`
         insert into brain.tool_calls (client, tool, args, ok, error, duration_ms)
@@ -95,7 +102,8 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
       description:
         "Hybrid keyword and semantic search over everything the owner has saved. Expands entities named in the query (neighbours and up to 5 passages that mention each), and returns up to 10 of the owner's facts that share a term with the query or point at a named entity; use brain_get_facts or brain_orient for the full fact list. " +
         "The first line is `retrieval <id> · mode: hybrid | keyword-only | fused-order · <n> passages`. Each passage line reads `[P1] <score> <score kind> · <how found> · <source kind> · author: <owner|other|unknown> · \"<title>\" · <date> (doc <id>, chunk <id>)`: score kind rerank is 0 to 1 (higher is stronger), rrf means reranking was skipped, and - marks a passage found through a named entity (graph via <entity>) or a literal match (fallback \"<term>\"); how found lists vector#<rank> and keyword#<rank>, plus graph via <entity> when the graph also reached a ranked passage. Each fact says verified or unverified and where it came from: read from a document (from <kind> <doc id>), stated by owner, confirmed by owner (verified, no stored source passage), or extracted from a passage no longer stored. " +
-        "Pass the retrieval id to brain_explain to see how the passages were ranked. The same result is returned as structuredContent.",
+        "Pass the retrieval id to brain_explain to see how the passages were ranked. The same result is returned as structuredContent. " +
+        "After answering, pass the retrieval id and your answer's claims to brain_verify, which checks each claim against the passages and facts it cites.",
       inputSchema: {
         query: z.string().min(1),
         k: z.number().int().min(1).max(30).optional().describe("Number of passages, default 10"),
@@ -168,6 +176,30 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
       try {
         const e = await explain(ctx.sql, a.retrieval_id);
         return e ? text(renderExplain(e)) : fail(new Error(explainNotFound(a.retrieval_id)));
+      } catch (e) { return fail(e); }
+    },
+  );
+
+  register(
+    "brain_verify",
+    {
+      title: "Check an answer against its sources",
+      description:
+        "Checks each claim of an answer you wrote from a brain_search result against the passages and facts it cites, with no model call. Pass the retrieval id from the result's first line and each claim with the labels it cites (P1, F2; passage chunk ids and fact ids also work; [] for a claim of your own). " +
+        "For each claim it compares the claim's content words (Postgres English stemming, stopwords removed) with the cited texts, requires every number, date and code in the claim to appear in them (1,000 = 1000, ~11% = 11 percent, $115k = $115,000, Sep 29, 2026 = 2026-09-29), and checks that negation agrees. " +
+        "Verdicts: supported (at least 60% of the claim's content words are in the cited text, every number appears, negation agrees); partial (at least 30%, or a number is missing, or negation differs); unsupported (under 30%); uncited (no cites); bad_citation (no cite exists in that search). " +
+        "Limits: it checks vocabulary overlap, not logic. A correct paraphrase in different words can score partial or unsupported; it never scores supported when most of the claim's words are absent from the cited text. It does not check reasoning, sarcasm, certainty (may versus will), or relations between quantities (more than, fell from X to Y). " +
+        `At most ${MAX_CLAIMS} claims of at most 2,000 characters each. Writes one audit row to brain.verification_log and changes nothing in the knowledge base. The same result is returned as structuredContent.`,
+      inputSchema: {
+        retrieval_id: z.string().min(1).describe("The id after 'retrieval' on the first line of the brain_search result the answer was written from"),
+        claims: z.array(ClaimInputSchema).min(1).max(MAX_CLAIMS).describe("The answer split into claims (one sentence each is usual), each with the labels it cites"),
+      },
+      outputSchema: VerificationSchema,
+    },
+    async (a) => {
+      try {
+        const v = await verifyClaims(ctx.sql, a.retrieval_id, a.claims, { client: opts.client });
+        return v ? { content: [{ type: "text", text: renderVerification(v) }], structuredContent: v } : fail(new Error(explainNotFound(a.retrieval_id)));
       } catch (e) { return fail(e); }
     },
   );

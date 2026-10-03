@@ -7,7 +7,7 @@ import { ingestAll, ingestLine, logSkip } from "./ingest/batch.js";
 import { parseAuthor } from "./ingest/author.js";
 import { search, type SearchOptions } from "./retrieve/search.js";
 import { ask } from "./retrieve/ask.js";
-import { renderSearch, renderExplain, renderSources } from "./mcp/render.js";
+import { renderSearch, renderExplain, renderSources, renderVerification } from "./mcp/render.js";
 import { explain, explainNotFound } from "./retrieve/explain.js";
 
 function parseMeta(pairs: string[] | undefined): Record<string, string> {
@@ -150,6 +150,38 @@ program
         return;
       }
       console.log(renderExplain(e));
+    });
+  });
+
+program
+  .command("verify <retrievalId>")
+  .description("Check claims against the passages and facts they cite in a logged search (no model call)")
+  .option("--claims <file>", 'JSON file with an array of {"text": "...", "cites": ["P1", "F2"]}')
+  .option("--claim <text>", "a single claim; give each label it cites with --cite")
+  .option("--cite <label>", "a label the --claim cites: P1, F2, or a chunk or fact id; repeat for more", (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option("--json", "print the verification as JSON")
+  .action(async (retrievalId: string, opts: { claims?: string; claim?: string; cite: string[]; json?: boolean }) => {
+    if (Boolean(opts.claims) === Boolean(opts.claim)) throw new Error('Pass either --claims <file.json> or --claim "<text>" (with --cite for each label it cites)');
+    if (opts.claims && opts.cite.length) throw new Error("--cite goes with --claim; in a --claims file each claim lists its own cites");
+    const { verifyClaims } = await import("./verify/resolve.js");
+    let claims: unknown = [{ text: opts.claim, cites: opts.cite }];
+    if (opts.claims) {
+      const { readFile } = await import("node:fs/promises");
+      try {
+        claims = JSON.parse(await readFile(opts.claims, "utf8"));
+      } catch (e) {
+        throw new Error(`Cannot read ${opts.claims} as JSON: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    await withCtx(async (ctx) => {
+      // verifyClaims validates the claims (an array of {text, cites}, at most 50) and says what is wrong.
+      const v = await verifyClaims(ctx.sql, retrievalId, claims as never, { client: "cli" });
+      if (!v) {
+        console.error(explainNotFound(retrievalId));
+        process.exitCode = 1;
+        return;
+      }
+      console.log(opts.json ? JSON.stringify(v, null, 2) : renderVerification(v));
     });
   });
 
