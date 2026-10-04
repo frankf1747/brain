@@ -33,6 +33,9 @@ const ReportSchema = z.object({
   latencyMs: PercentilesSchema,
   // Added in Phase 4; baselines recorded before it have none and still load.
   stageLatencyMs: z.object({ embed: PercentilesSchema, sql: PercentilesSchema, rerank: PercentilesSchema, graph: PercentilesSchema }).optional(),
+  // Added in Phase 6; earlier baselines have neither and still load.
+  bySource: z.record(z.string(), RankMetricsSchema).optional(),
+  approvals: z.object({ owner: z.number(), agent: z.number() }).optional(),
 });
 
 const BaselineSchema = z.object({

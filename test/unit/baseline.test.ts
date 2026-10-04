@@ -76,15 +76,23 @@ describe("loadBaseline", () => {
     expect(await loadBaseline(join(dir, "b.json"))).toEqual(base);
     expect(await loadBaseline(join(dir, "missing.json"))).toBeNull();
   });
-  it("loads a baseline with per-stage latency, and one recorded before Phase 4 without it", async () => {
+  it("loads a baseline with per-stage latency, per-source metrics and approvals, and one recorded before them", async () => {
     const dir = await mkdtemp(join(tmpdir(), "baseline-"));
     const p50p95 = { p50: 1, p95: 2 };
-    const withStages: Baseline = { ...base, report: report({}, { stageLatencyMs: { embed: p50p95, sql: p50p95, rerank: p50p95, graph: p50p95 } }) };
-    await saveBaseline(join(dir, "b.json"), withStages);
-    expect(await loadBaseline(join(dir, "b.json"))).toEqual(withStages);
-    const committed = await loadBaseline("eval/baseline.json");
-    expect(committed).not.toBeNull();
-    expect(committed!.report.stageLatencyMs).toBeUndefined();
+    const m = { n: 1, recallAt1: 1, recallAt5: 1, recallAt10: 1, mrr: 1, ndcgAt10: null };
+    const full: Baseline = {
+      ...base,
+      report: report({}, { stageLatencyMs: { embed: p50p95, sql: p50p95, rerank: p50p95, graph: p50p95 }, bySource: { fixture: m }, approvals: { owner: 0, agent: 1 } }),
+    };
+    await saveBaseline(join(dir, "b.json"), full);
+    expect(await loadBaseline(join(dir, "b.json"))).toEqual(full);
+    const { stageLatencyMs: _s, bySource: _b, approvals: _a, ...older } = full.report;
+    await saveBaseline(join(dir, "old.json"), { ...base, report: older });
+    const loaded = await loadBaseline(join(dir, "old.json"));
+    expect(loaded!.report.stageLatencyMs).toBeUndefined();
+    expect(loaded!.report.bySource).toBeUndefined();
+    expect(loaded!.report.approvals).toBeUndefined();
+    expect(await loadBaseline("eval/baseline.json")).not.toBeNull();
   });
   it("throws a clear error on a malformed file", async () => {
     const dir = await mkdtemp(join(tmpdir(), "baseline-"));

@@ -283,7 +283,14 @@ program
     });
   });
 
-const evalCmd = program.command("eval").description("Retrieval eval against the brain_eval database (never the real one)");
+const evalCmd = program.command("eval").description("Retrieval eval against brain_eval (the fixture corpus) or brain_real_eval (a copy of the real base); never the real database itself");
+
+/** --corpus fixtures (brain_eval, eval/corpus) or real (brain_real_eval, filled by `eval sync`). */
+function corpusOption(value: string | undefined): "fixtures" | "real" {
+  const v = value ?? "fixtures";
+  if (v !== "fixtures" && v !== "real") throw new Error(`--corpus must be fixtures or real, got ${JSON.stringify(value)}`);
+  return v;
+}
 
 evalCmd
   .command("ingest [dir]")
@@ -301,9 +308,10 @@ evalCmd
 
 evalCmd
   .command("run")
-  .description("Run the golden set and report metrics; --compare shows deltas against eval/baseline.json")
-  .option("--golden <path>", "golden set file", "eval/golden.jsonl")
-  .option("--baseline <path>", "baseline file", "eval/baseline.json")
+  .description("Run the golden set's items for one corpus and report metrics; --compare shows deltas against the baseline")
+  .option("--corpus <corpus>", "fixtures (brain_eval) or real (brain_real_eval, after eval sync)", "fixtures")
+  .option("--golden <path>", "golden set file (default eval/golden.jsonl, or the gitignored eval/golden-real.jsonl with --corpus real)")
+  .option("--baseline <path>", "baseline file (default eval/baseline.json, or eval/baseline-real.json with --corpus real)")
   .option("--verifier <path>", "citation verifier set", "eval/verifier.jsonl")
   .option("--verifier-baseline <path>", "citation verifier baseline", "eval/verifier-baseline.json")
   .option("--compare", "compare against the baseline")
@@ -311,15 +319,21 @@ evalCmd
   .option("--accept", "overwrite the baseline with this run")
   .option("--json")
   .action(async (opts) => {
-    const { makeEvalCtx } = await import("./eval/db.js");
-    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine } = await import("./eval/run.js");
+    const { makeEvalCtx, evalDatabaseHint } = await import("./eval/db.js");
+    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine, breakdownLines, noItemsMessage } = await import("./eval/run.js");
+    const { GOLDEN_FILES } = await import("./eval/golden.js");
+    const { existsSync } = await import("node:fs");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { verifierGate, verifierLine, loadVerifierBaseline } = await import("./eval/verifier.js");
     const { execSync } = await import("node:child_process");
-    const ctx = makeEvalCtx();
+    const corpus = corpusOption(opts.corpus);
+    opts.golden ??= GOLDEN_FILES[corpus];
+    opts.baseline ??= corpus === "real" ? "eval/baseline-real.json" : "eval/baseline.json";
+    const ctx = makeEvalCtx(corpus);
     try {
-      const run = await runEval(ctx, opts.golden, opts.verifier);
+      const run = await runEval(ctx, opts.golden, opts.verifier, corpus);
+      if (run.results.length === 0) console.error(noItemsMessage(opts.golden, corpus, existsSync(opts.golden)));
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
@@ -341,6 +355,7 @@ evalCmd
         const o = run.report.overall;
         console.log(`\noverall  n=${o.n}  recall@1=${o.recallAt1.toFixed(2)}  recall@5=${o.recallAt5.toFixed(2)}  recall@10=${o.recallAt10.toFixed(2)}  mrr=${o.mrr.toFixed(2)}  ndcg@10=${o.ndcgAt10 === null ? "n/a" : o.ndcgAt10.toFixed(2)}`);
         for (const [kind, m] of Object.entries(run.report.byKind)) console.log(`${kind.padEnd(11)} n=${m.n}  recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}`);
+        for (const line of breakdownLines(run.report)) console.log(line);
         const ng = run.report.negatives;
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
@@ -369,6 +384,8 @@ evalCmd
         await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);
       }
+    } catch (e) {
+      throw evalDatabaseHint(e, corpus);
     } finally {
       await ctx.sql.end();
     }

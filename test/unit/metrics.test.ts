@@ -6,7 +6,7 @@ const exp = (...origins: string[]) => origins.map((origin) => ({ origin: `${orig
 
 function result(partial: Partial<QuestionResult>): QuestionResult {
   return {
-    id: "q", kind: "keyword", negative: false, expected: [], ranked: [], totalRelevant: 0, topScore: 0.9, hasGraphPassage: false,
+    id: "q", kind: "keyword", source: "fixture", approvedBy: "agent", negative: false, expected: [], ranked: [], totalRelevant: 0, topScore: 0.9, hasGraphPassage: false,
     degraded: false, totalMs: 10, timings: { embedMs: 1, sqlMs: 2, rerankMs: 3, graphMs: 0, totalMs: 10 },
     paraphraseRanked: [], paraphraseDegraded: [], ...partial,
   };
@@ -116,6 +116,18 @@ describe("summarize", () => {
       rerank: { p50: 220, p95: 250 },
       graph: { p50: 1, p95: 2 },
     });
+  });
+  it("breaks rank metrics down by golden source over positive items, and counts every item by approver", () => {
+    const r = summarize([
+      result({ id: "1", source: "fixture", approvedBy: "agent", expected: exp("a"), ranked: ranked("a") }),
+      result({ id: "2", source: "generated", approvedBy: "owner", expected: exp("a"), ranked: ranked("b", "a") }),
+      result({ id: "3", source: "generated", approvedBy: "owner", expected: exp("z"), ranked: ranked("b") }),
+      result({ id: "4", source: "captured", approvedBy: "owner", kind: "negative", negative: true, topScore: 0.1 }),
+    ], 0.3);
+    expect(Object.keys(r.bySource!).sort()).toEqual(["fixture", "generated"]);
+    expect(r.bySource!.fixture).toMatchObject({ n: 1, recallAt10: 1, mrr: 1 });
+    expect(r.bySource!.generated).toMatchObject({ n: 2, recallAt10: 0.5, mrr: 0.25 });
+    expect(r.approvals).toEqual({ owner: 3, agent: 1 });
   });
   it("counts paraphrase searches in the degraded fraction", () => {
     const r = summarize([

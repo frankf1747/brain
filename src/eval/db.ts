@@ -2,6 +2,7 @@
 import { config, EVAL_VOYAGE_CAP_NAME } from "../config.js";
 import { makeCtx, type Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
+import type { Corpus } from "./golden.js";
 
 /**
  * The eval ingests fictional documents and logs hundreds of searches, so it only ever runs against a
@@ -10,6 +11,25 @@ import type { Db } from "../db.js";
  */
 export const EVAL_DATABASE_URL =
   process.env.EVAL_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:55322/brain_eval";
+
+/**
+ * The copy of the real knowledge base that `brain eval sync` fills (`eval run --corpus real` runs against it). Kept
+ * apart from brain_eval so fixture evals and real-base evals both keep working; its name must end in _eval too.
+ */
+export const EVAL_REAL_DATABASE_URL =
+  process.env.EVAL_REAL_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:55322/brain_real_eval";
+
+/** The eval database a corpus runs against. */
+export function evalDatabaseUrl(corpus: Corpus): string {
+  return corpus === "real" ? EVAL_REAL_DATABASE_URL : EVAL_DATABASE_URL;
+}
+
+/** A "database does not exist" error (SQLSTATE 3D000) gains the commands that create that corpus's eval database. */
+export function evalDatabaseHint(err: unknown, corpus: Corpus): unknown {
+  if ((err as { code?: string } | null)?.code !== "3D000") return err;
+  const how = corpus === "real" ? "npm run eval:prepare-real, then npm run brain -- eval sync" : "npm run eval:prepare, then npm run brain -- eval ingest";
+  return new Error(`${err instanceof Error ? err.message : String(err)}; create it with ${how}`);
+}
 
 /**
  * postgres.js copies unknown URL query parameters into the startup message, so `?database=postgres`
@@ -42,11 +62,12 @@ export async function assertEvalConnection(sql: Db): Promise<void> {
 export const EVAL_CLIENT = "eval";
 
 /**
- * A real context (real Voyage, real Claude Code) on the eval database, with the Obsidian mirror off. Its Voyage
- * calls are recorded in brain_eval's own ledger, never the real base's, and capped at the eval's own cap
- * (BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP).
+ * A real context (real Voyage, real Claude Code) on a corpus's eval database, with the Obsidian mirror off. Its Voyage
+ * calls are recorded in that eval database's own ledger, never the real base's, and capped at the eval's own cap
+ * (BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP, counted per eval database).
  */
-export function makeEvalCtx(): Ctx {
-  assertEvalDatabase(EVAL_DATABASE_URL);
-  return makeCtx({ databaseUrl: EVAL_DATABASE_URL, obsidian: false, client: EVAL_CLIENT, voyageCap: { tokens: config.evalVoyageDailyTokenCap, name: EVAL_VOYAGE_CAP_NAME } });
+export function makeEvalCtx(corpus: Corpus = "fixtures"): Ctx {
+  const url = evalDatabaseUrl(corpus);
+  assertEvalDatabase(url);
+  return makeCtx({ databaseUrl: url, obsidian: false, client: EVAL_CLIENT, voyageCap: { tokens: config.evalVoyageDailyTokenCap, name: EVAL_VOYAGE_CAP_NAME } });
 }
