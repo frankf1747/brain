@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFile, readdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { parseGolden } from "../../src/eval/golden.js";
+import { parseGolden, approvalCounts, GOLDEN_KINDS } from "../../src/eval/golden.js";
 import { splitFrontMatter, normalizeWhitespace, kindFromFilename } from "../../src/eval/run.js";
 import { defaultAuthor } from "../../src/ingest/author.js";
 
@@ -36,6 +36,18 @@ describe("eval/golden.jsonl against eval/corpus", () => {
       for (const e of a.expected) expect([a.id, (await fixture(e.origin!)).author ?? defaultAuthor(kindFromFilename(e.origin!))]).toEqual([a.id, "other"]);
     }
     expect(items.some((i) => i.negative)).toBe(true);
+  });
+  it("meets the Phase 6 target (spec §8.3): at least 60 items, 10 negative, 5 attribution, every kind, and the owner's approvals", async () => {
+    const items = await golden();
+    const count = (kind: string) => items.filter((i) => i.kind === kind).length;
+    expect({
+      items: items.length >= 60,
+      negative: count("negative") >= 10,
+      attribution: count("attribution") >= 5,
+      everyKind: GOLDEN_KINDS.every((k) => count(k) > 0),
+      ownerApproved: approvalCounts(items).owner > 0,
+      generatedOrCapturedByOwner: items.filter((i) => i.source !== "fixture").every((i) => i.approved_by === "owner"),
+    }).toEqual({ items: true, negative: true, attribution: true, everyKind: true, ownerApproved: true, generatedOrCapturedByOwner: true });
   });
   it("keeps real-corpus items, drafts and review sheets out of git, since the repository is public", async () => {
     const ignored = (await readFile(".gitignore", "utf8")).split("\n").map((l) => l.trim());
