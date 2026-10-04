@@ -2,11 +2,19 @@ import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { Report } from "./metrics.js";
 
+/** One golden item as a baseline records it: its id and the hash of its canonical line. */
+export interface GoldenRef {
+  id: string;
+  sha256: string;
+}
+
 export interface Baseline {
   recordedAt: string;
   commit: string;
   /** Ids of every golden item the baseline was recorded on, sorted. */
   goldenIds: string[];
+  /** Each item's id and goldenItemSha256, sorted by id. Optional: baselines recorded before Phase 7 have none. */
+  goldenItems?: GoldenRef[];
   report: Report;
   /** 1-based rank of the first expected document per question id; null is a miss. */
   ranks: Record<string, number | null>;
@@ -23,6 +31,10 @@ const RankMetricsSchema = z.object({
 
 const PercentilesSchema = z.object({ p50: z.number(), p95: z.number() });
 
+const SplitAbstentionSchema = z.object({
+  negatives: z.number(), abstentionRate: z.number(), falseAnswerRate: z.number(), positives: z.number(), falseAbstentionRate: z.number(),
+});
+
 const ReportSchema = z.object({
   n: z.number(),
   overall: RankMetricsSchema,
@@ -36,12 +48,15 @@ const ReportSchema = z.object({
   // Added in Phase 6; earlier baselines have neither and still load.
   bySource: z.record(z.string(), RankMetricsSchema).optional(),
   approvals: z.object({ owner: z.number(), agent: z.number() }).optional(),
+  // Added in Phase 7.
+  abstention: z.object({ calibration: SplitAbstentionSchema.optional(), heldout: SplitAbstentionSchema.optional() }).optional(),
 });
 
 const BaselineSchema = z.object({
   recordedAt: z.string(),
   commit: z.string(),
   goldenIds: z.array(z.string()),
+  goldenItems: z.array(z.object({ id: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict()).optional(),
   report: ReportSchema,
   ranks: z.record(z.string(), z.number().nullable()),
 });
@@ -58,7 +73,10 @@ export interface Comparison {
   deltas: { recallAt1: number; recallAt5: number; recallAt10: number; mrr: number };
   regressions: RankChange[];
   improvements: RankChange[];
-  /** True when the current golden ids differ from the baseline's; the metrics then compare different sets. */
+  /**
+   * True when the current golden ids differ from the baseline's, or (when both sides carry hashes) any item was edited
+   * in place; the metrics then compare different sets.
+   */
   goldenChanged: boolean;
 }
 
@@ -79,7 +97,11 @@ function sameIds(a: string[], b: string[]): boolean {
   return x.length === y.length && x.every((id, i) => id === y[i]);
 }
 
-export function compare(base: Baseline, after: Report, ranks: Record<string, number | null>, goldenIds: string[]): Comparison {
+function sameItems(a: GoldenRef[], b: GoldenRef[]): boolean {
+  return sameIds(a.map((i) => `${i.id} ${i.sha256}`), b.map((i) => `${i.id} ${i.sha256}`));
+}
+
+export function compare(base: Baseline, after: Report, ranks: Record<string, number | null>, goldenIds: string[], goldenItems?: GoldenRef[]): Comparison {
   const regressions: RankChange[] = [];
   const improvements: RankChange[] = [];
   for (const id of Object.keys(ranks)) {
@@ -101,7 +123,7 @@ export function compare(base: Baseline, after: Report, ranks: Record<string, num
     },
     regressions,
     improvements,
-    goldenChanged: !sameIds(base.goldenIds, goldenIds),
+    goldenChanged: !sameIds(base.goldenIds, goldenIds) || (!!base.goldenItems && !!goldenItems && !sameItems(base.goldenItems, goldenItems)),
   };
 }
 
@@ -114,6 +136,14 @@ export function gate(c: Comparison): string[] {
   if (c.before.negatives.n > 0 && c.after.negatives.n === 0) failures.push("negative items disappeared");
   if (c.after.negatives.n > 0 && c.after.negatives.abstentionRate < c.before.negatives.abstentionRate) {
     failures.push(`abstention rate fell from ${c.before.negatives.abstentionRate.toFixed(2)} to ${c.after.negatives.abstentionRate.toFixed(2)}`);
+  }
+  for (const split of ["calibration", "heldout"] as const) {
+    const b = c.before.abstention?.[split];
+    const a = c.after.abstention?.[split];
+    if (!b || !a || b.positives === 0 || a.positives === 0) continue;
+    if (a.falseAbstentionRate > b.falseAbstentionRate + TOLERANCE + EPSILON) {
+      failures.push(`${split}: answerable items judged weak rose from ${b.falseAbstentionRate.toFixed(2)} to ${a.falseAbstentionRate.toFixed(2)} (tolerance ${TOLERANCE})`);
+    }
   }
   if (c.after.degradedFraction > 0) failures.push(`${Math.round(c.after.degradedFraction * 100)}% of searches ran degraded; must be 0`);
   return failures;
@@ -153,5 +183,6 @@ export async function loadBaseline(path: string): Promise<Baseline | null> {
 }
 
 export async function saveBaseline(path: string, b: Baseline): Promise<void> {
-  await writeFile(path, JSON.stringify({ ...b, goldenIds: [...b.goldenIds].sort() }, null, 2) + "\n");
+  const goldenItems = b.goldenItems ? { goldenItems: [...b.goldenItems].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0)) } : {};
+  await writeFile(path, JSON.stringify({ ...b, goldenIds: [...b.goldenIds].sort(), ...goldenItems }, null, 2) + "\n");
 }

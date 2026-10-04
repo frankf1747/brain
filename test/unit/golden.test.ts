@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseGolden, validateGoldenItem, goldenLine, appendGolden, loadGolden, loadGoldenAll, forCorpus, approvalCounts, GOLDEN_FILES, goldenFileFor,
-  goldenFileCorpus, type GoldenItem,
+  goldenFileCorpus, goldenItemSha256, splitOf, type GoldenItem,
 } from "../../src/eval/golden.js";
 
 const base = {
@@ -129,6 +129,24 @@ describe("goldenLine, appendGolden, loadGolden", () => {
     const path = join(dir, "new.jsonl");
     await appendGolden(path, parseGolden(ok));
     expect(await readFile(path, "utf8")).toBe(`${goldenLine(parseGolden(ok)[0])}\n`);
+  });
+});
+
+describe("split and goldenItemSha256", () => {
+  it("marks held-out items with split heldout; an item without split is calibration", () => {
+    const [cal, held] = parseGolden(`${ok}\n${line({ id: "q02", split: "heldout" })}`);
+    expect(splitOf(cal)).toBe("calibration");
+    expect(splitOf(held)).toBe("heldout");
+    expect(goldenLine(held)).toContain('"approved_at":"2026-09-30","split":"heldout"');
+    expect(goldenLine(cal)).not.toContain("split");
+    expect(() => parseGolden(line({ split: "test" }))).toThrow(/split/);
+  });
+  it("hashes the item's canonical line, so any edit changes it and adding the split field later does not", () => {
+    const [a] = parseGolden(ok);
+    const [b] = parseGolden(line({ question: "What is the salary range, roughly?" }));
+    expect(goldenItemSha256(a)).toMatch(/^[0-9a-f]{64}$/);
+    expect(goldenItemSha256(a)).toBe(goldenItemSha256(parseGolden(goldenLine(a))[0]));
+    expect(goldenItemSha256(b)).not.toBe(goldenItemSha256(a));
   });
 });
 

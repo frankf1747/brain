@@ -2,12 +2,12 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
-import { config } from "../config.js";
 import { readInput } from "../ingest/readers.js";
 import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
-import { isDegraded, isHybrid } from "../retrieve/contract.js";
-import { parseGolden, loadGolden, goldenFileCorpus, GOLDEN_FILES, type Corpus, type Expected, type GoldenItem } from "./golden.js";
+import { isDegraded } from "../retrieve/contract.js";
+import { parseGolden, loadGolden, goldenFileCorpus, goldenItemSha256, splitOf, GOLDEN_FILES, type Corpus, type Expected, type GoldenItem } from "./golden.js";
+import type { GoldenRef } from "./baseline.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
 import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
 import { voyageSpendSince, type VoyageSpend } from "../llm/usage.js";
@@ -105,6 +105,23 @@ export function breakdownLines(report: Report): string[] {
   return out;
 }
 
+/**
+ * The eval output lines for abstention per split (calibration, then heldout): negatives abstained on and answered
+ * falsely, and answerable items the search judged weak. The answer threshold was chosen on calibration only.
+ */
+export function abstentionLines(report: Report): string[] {
+  const out: string[] = [];
+  for (const split of ["calibration", "heldout"] as const) {
+    const a = report.abstention?.[split];
+    if (!a) continue;
+    out.push(
+      `abstain ${split.padEnd(11)} negatives n=${a.negatives} abstention=${a.abstentionRate.toFixed(2)} false-answer=${a.falseAnswerRate.toFixed(2)}` +
+        `  positives n=${a.positives} judged-weak=${a.falseAbstentionRate.toFixed(2)}`,
+    );
+  }
+  return out;
+}
+
 /** 1-based rank of the first expected document among distinct ranked documents, or null. */
 export function firstExpectedRank(q: QuestionResult): number | null {
   const m = mrr(q.expected, q.ranked);
@@ -167,9 +184,8 @@ export function toQuestionResult(
     ranked,
     totalRelevant,
     topScore: res.topScore,
-    // A passage only the graph found: the entity has material ranking missed. A ranked passage that the graph also
-    // reached is judged by its score, as it was before passages could carry both (keeps abstention comparable).
-    hasGraphPassage: res.passages.some((p) => p.layers.includes("graph") && !isHybrid(p)),
+    evidence: res.evidence.level,
+    split: splitOf(item),
     degraded: isDegraded(res.degraded),
     totalMs: res.timings.totalMs,
     timings: res.timings,
@@ -213,6 +229,8 @@ export interface EvalRun {
   results: QuestionResult[];
   report: Report;
   ranks: Record<string, number | null>;
+  /** Every item run, with the hash of its canonical line, so the baseline can tell an item edited in place. */
+  golden: GoldenRef[];
   /** Kept out of Report so eval/baseline.json's schema does not change. */
   attribution: AttributionLeaks;
   /** Voyage spend of this run (searches and anything else under the eval client) in brain_eval's ledger. Kept out of Report. */
@@ -278,8 +296,9 @@ export async function runEval(ctx: Ctx, goldenPath: string, verifierPath = "eval
   for (const r of results) if (!r.negative) ranks[r.id] = firstExpectedRank(r);
   return {
     results,
-    report: summarize(results, config.retrieval.fallbackThreshold),
+    report: summarize(results),
     ranks,
+    golden: golden.map((g) => ({ id: g.id, sha256: goldenItemSha256(g) })),
     attribution: await attributionLeaks(ctx.sql),
     voyage: await voyageSpendSince(ctx.sql, startedAt, EVAL_CLIENT),
     verifier: await runVerifierFile(ctx.sql, verifierPath),

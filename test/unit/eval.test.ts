@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning, evalVoyageLine, stageLatencyLine, breakdownLines,
-  goldenForRun, noItemsMessage, acceptRefusal,
+  goldenForRun, noItemsMessage, acceptRefusal, abstentionLines,
 } from "../../src/eval/run.js";
 import { summarize } from "../../src/eval/metrics.js";
 import type { GoldenItem } from "../../src/eval/golden.js";
@@ -30,7 +30,7 @@ function searchResult(passages: P[], degraded = false, totalMs = 7): SearchResul
 }
 
 describe("toQuestionResult", () => {
-  it("records ranked documents with origins, quote hits, top score and graph presence", () => {
+  it("records ranked documents with origins, quote hits and top score", () => {
     const res = searchResult([
       { documentId: "d1", layers: ["vector"], content: "Demographic parity asks that positive rates match.", score: 0.4 },
       { documentId: "d2", layers: ["vector"], content: "shows you cannot satisfy all three when base rates differ", score: 0.3 },
@@ -41,7 +41,6 @@ describe("toQuestionResult", () => {
     expect(q.ranked.map((d) => d.documentId)).toEqual(["d1", "d2", "d3"]);
     expect(q.ranked.map((d) => d.containsQuote)).toEqual([false, true, false]);
     expect(q.topScore).toBe(0.4);
-    expect(q.hasGraphPassage).toBe(true);
     expect(q.totalMs).toBe(42);
     expect(q.timings).toEqual(res.timings);
     expect(q.totalRelevant).toBe(2);
@@ -74,12 +73,6 @@ describe("toQuestionResult", () => {
     const q = toQuestionResult(item, searchResult([], true), new Map(), [], 0, []);
     expect(q.degraded).toBe(true);
     expect(q.topScore).toBeNull();
-  });
-  it("counts only a passage the graph alone found as a graph passage, as before a ranked passage could carry graph", () => {
-    const ranked = searchResult([{ documentId: "d1", layers: ["vector", "keyword", "graph"], content: "x", score: 0.1 }]);
-    expect(toQuestionResult(item, ranked, new Map([["d1", "/c/z.md"]]), [], 0, []).hasGraphPassage).toBe(false);
-    const graphOnly = searchResult([{ documentId: "d1", layers: ["graph"], content: "x", score: 0 }]);
-    expect(toQuestionResult(item, graphOnly, new Map([["d1", "/c/z.md"]]), [], 0, []).hasGraphPassage).toBe(true);
   });
   it("rank is null on a miss", () => {
     const q = toQuestionResult(item, searchResult([{ documentId: "d9", layers: ["vector"], content: "x", score: 0.9 }]), new Map([["d9", "/c/z.md"]]), [], 0, []);
@@ -115,7 +108,7 @@ describe("missingQuoteWarning", () => {
 describe("stageLatencyLine", () => {
   it("prints p50 and p95 per stage, and nothing for a report from before Phase 4", () => {
     const res = searchResult([{ documentId: "d1", layers: ["vector"], content: "x", score: 0.9 }]);
-    const report = summarize([toQuestionResult(item, res, new Map(), [], 0, [])], 0.3);
+    const report = summarize([toQuestionResult(item, res, new Map(), [], 0, [])]);
     expect(stageLatencyLine(report)).toBe("stages  embed p50=1ms p95=1ms  sql p50=2ms p95=2ms  rerank p50=3ms p95=3ms  graph p50=0.5ms p95=0.5ms");
     const { stageLatencyMs: _drop, ...old } = report;
     expect(stageLatencyLine(old)).toBeNull();
@@ -128,13 +121,18 @@ describe("source and approver", () => {
     const q = toQuestionResult({ ...item, source: "generated", approved_by: "owner", edited: false }, res, new Map(), [], 0, []);
     expect(q).toMatchObject({ source: "generated", approvedBy: "owner" });
   });
+  it("carries the search's evidence level and the item's split", () => {
+    const res = { ...searchResult([{ documentId: "d1", layers: ["vector"], content: "x", score: 0.4 }]), evidence: { level: "weak" as const, basis: "rerank" as const, threshold: 0.56 } };
+    expect(toQuestionResult(item, res, new Map(), [], 0, [])).toMatchObject({ evidence: "weak", split: "calibration" });
+    expect(toQuestionResult({ ...item, split: "heldout" }, res, new Map(), [], 0, [])).toMatchObject({ split: "heldout" });
+  });
   it("prints one line per source in the order fixture, generated, captured, then the approval counts", () => {
     const res = searchResult([{ documentId: "d2", layers: ["vector"], content: "x", score: 0.9 }]);
     const origins = new Map([["d2", "/c/note--fairness-in-ml.md"]]);
     const report = summarize([
       toQuestionResult({ ...item, id: "g", source: "generated", approved_by: "owner" }, res, origins, [], 0, []),
       toQuestionResult(item, res, origins, [], 0, []),
-    ], 0.3);
+    ]);
     expect(breakdownLines(report)).toEqual([
       "source fixture    n=1  recall@10=1.00  mrr=1.00",
       "source generated  n=1  recall@10=1.00  mrr=1.00",
@@ -142,6 +140,20 @@ describe("source and approver", () => {
     ]);
     const { bySource: _b, approvals: _a, ...older } = report;
     expect(breakdownLines(older)).toEqual([]);
+  });
+});
+
+describe("abstentionLines", () => {
+  it("prints calibration then heldout, and nothing for a report from before Phase 7", () => {
+    const a = { negatives: 2, abstentionRate: 0.5, falseAnswerRate: 0.5, positives: 4, falseAbstentionRate: 0.25 };
+    const res = searchResult([{ documentId: "d1", layers: ["vector"], content: "x", score: 0.9 }]);
+    const report = { ...summarize([toQuestionResult(item, res, new Map(), [], 0, [])]), abstention: { heldout: a, calibration: a } };
+    expect(abstentionLines(report)).toEqual([
+      "abstain calibration negatives n=2 abstention=0.50 false-answer=0.50  positives n=4 judged-weak=0.25",
+      "abstain heldout     negatives n=2 abstention=0.50 false-answer=0.50  positives n=4 judged-weak=0.25",
+    ]);
+    const { abstention: _a, ...old } = report;
+    expect(abstentionLines(old)).toEqual([]);
   });
 });
 

@@ -39,6 +39,15 @@ describe("compare", () => {
     expect(compare(base, report(), base.ranks, ["q1", "q2"]).goldenChanged).toBe(true);
     expect(compare(base, report(), base.ranks, ["q1", "q2", "q4"]).goldenChanged).toBe(true);
   });
+  it("records an item edited in place when the baseline holds each item's hash", () => {
+    const h = (c: string) => c.repeat(64);
+    const hashed: Baseline = { ...base, goldenItems: [{ id: "q1", sha256: h("a") }, { id: "q2", sha256: h("b") }, { id: "q3", sha256: h("c") }] };
+    const same = [{ id: "q3", sha256: h("c") }, { id: "q1", sha256: h("a") }, { id: "q2", sha256: h("b") }];
+    expect(compare(hashed, report(), base.ranks, ids, same).goldenChanged).toBe(false);
+    expect(compare(hashed, report(), base.ranks, ids, [...same.slice(0, 2), { id: "q2", sha256: h("d") }]).goldenChanged).toBe(true);
+    // A baseline recorded before hashes compares ids only.
+    expect(compare(base, report(), base.ranks, ids, [...same.slice(0, 2), { id: "q2", sha256: h("d") }]).goldenChanged).toBe(false);
+  });
 });
 
 describe("gate", () => {
@@ -63,6 +72,16 @@ describe("gate", () => {
       "golden set changed since the baseline; review and run `eval run --accept`",
     ]);
   });
+  it("fails when wrong abstentions on answerable items rise more than 0.02 in a split both runs report", () => {
+    const split = (falseAbstentionRate: number) => ({ negatives: 4, abstentionRate: 0.5, falseAnswerRate: 0.5, positives: 20, falseAbstentionRate });
+    const before: Baseline = { ...base, report: report({}, { abstention: { calibration: split(0), heldout: split(0.05) } }) };
+    expect(gate(compare(before, report({}, { abstention: { calibration: split(0.02), heldout: split(0.07) } }), base.ranks, ids))).toEqual([]);
+    expect(gate(compare(before, report({}, { abstention: { calibration: split(0), heldout: split(0.1) } }), base.ranks, ids))).toEqual([
+      "heldout: answerable items judged weak rose from 0.05 to 0.10 (tolerance 0.02)",
+    ]);
+    // A baseline from before Phase 7 has no per-split abstention: nothing to compare.
+    expect(gate(compare(base, report({}, { abstention: { heldout: split(0.5) } }), base.ranks, ids))).toEqual([]);
+  });
   it("fails when the baseline had negatives and the current run has none", () => {
     const withNeg: Baseline = { ...base, report: report({}, { negatives: { n: 2, abstentionRate: 1, falseAnswerRate: 0 } }) };
     expect(gate(compare(withNeg, report(), base.ranks, ids))).toEqual(["negative items disappeared"]);
@@ -74,6 +93,9 @@ describe("loadBaseline", () => {
     const dir = await mkdtemp(join(tmpdir(), "baseline-"));
     await saveBaseline(join(dir, "b.json"), base);
     expect(await loadBaseline(join(dir, "b.json"))).toEqual(base);
+    const hashed: Baseline = { ...base, goldenItems: [{ id: "q2", sha256: "b".repeat(64) }, { id: "q1", sha256: "a".repeat(64) }] };
+    await saveBaseline(join(dir, "h.json"), hashed);
+    expect((await loadBaseline(join(dir, "h.json")))!.goldenItems!.map((i) => i.id)).toEqual(["q1", "q2"]);
     expect(await loadBaseline(join(dir, "missing.json"))).toBeNull();
   });
   it("loads a baseline with per-stage latency, per-source metrics and approvals, and one recorded before them", async () => {

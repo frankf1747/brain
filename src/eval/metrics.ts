@@ -1,5 +1,5 @@
-import type { Approver, Expected, GoldenKind, GoldenSource } from "./golden.js";
-import type { Timings } from "../retrieve/contract.js";
+import type { Approver, Expected, GoldenKind, GoldenSource, Split } from "./golden.js";
+import type { Evidence, Timings } from "../retrieve/contract.js";
 
 export interface RankedDoc {
   documentId: string;
@@ -24,7 +24,10 @@ export interface QuestionResult {
   /** Relevant passages in the whole corpus (the nDCG denominator); 0 when the item has no quotes. */
   totalRelevant: number;
   topScore: number | null;
-  hasGraphPassage: boolean;
+  /** The search's own judgment of its passages (judgeEvidence); abstention is scored from it. */
+  evidence: Evidence["level"];
+  /** The golden item's split: calibration items may tune the answer threshold, held-out items only report it. */
+  split: Split;
   degraded: boolean;
   /** The search's own total (timings.totalMs), not wall-clock around the call. */
   totalMs: number;
@@ -49,8 +52,10 @@ export interface Report {
   n: number;
   overall: RankMetrics;
   byKind: Record<string, RankMetrics>;
-  /** abstentionRate and falseAnswerRate need not sum to 1 (a graph-only answer below threshold is neither). */
+  /** abstentionRate and falseAnswerRate need not sum to 1 (a negative with unknown evidence is neither). */
   negatives: { n: number; abstentionRate: number; falseAnswerRate: number };
+  /** Abstention per split (splitAbstention). Optional: added in Phase 7. */
+  abstention?: Partial<Record<Split, SplitAbstention>>;
   /** See paraphraseStats. */
   paraphrase: { n: number; consistency: number; meanRecallDelta: number };
   /** Share of all searches (originals and paraphrases) that ran degraded. */
@@ -62,6 +67,18 @@ export interface Report {
   bySource?: Record<string, RankMetrics>;
   /** Items (positive and negative) per approver. Optional: added in Phase 6. */
   approvals?: Record<Approver, number>;
+}
+
+/**
+ * One split's abstention: over its negatives, the share judged weak (abstained) and strong (answered falsely); over its
+ * positives, the share judged weak (falseAbstentionRate: the knowledge base holds the answer, the search said it may not).
+ */
+export interface SplitAbstention {
+  negatives: number;
+  abstentionRate: number;
+  falseAnswerRate: number;
+  positives: number;
+  falseAbstentionRate: number;
 }
 
 export interface Percentiles {
@@ -132,14 +149,27 @@ export function ndcgAt10(relevant: boolean[], totalRelevant: number): number {
   return dcg / idcg;
 }
 
-/** The search declined to answer: no hybrid score at or above the threshold and no graph passage. */
-export function abstained(r: QuestionResult, threshold: number): boolean {
-  return (r.topScore === null || r.topScore < threshold) && !r.hasGraphPassage;
+/** The search said the knowledge base may not hold the answer: its evidence was weak. */
+export function abstained(r: Pick<QuestionResult, "evidence">): boolean {
+  return r.evidence === "weak";
 }
 
-/** On a negative item, the search answered confidently: the top hybrid score reached the threshold. */
-export function falseAnswer(r: QuestionResult, threshold: number): boolean {
-  return r.topScore !== null && r.topScore >= threshold;
+/** On a negative item, the search presented its passages as an answer: its evidence was strong. */
+export function falseAnswer(r: Pick<QuestionResult, "evidence">): boolean {
+  return r.evidence === "strong";
+}
+
+function splitAbstention(results: QuestionResult[]): SplitAbstention {
+  const neg = results.filter((r) => r.negative);
+  const pos = results.filter((r) => !r.negative);
+  const share = (xs: QuestionResult[], pred: (r: QuestionResult) => boolean) => (xs.length ? xs.filter(pred).length / xs.length : 0);
+  return {
+    negatives: neg.length,
+    abstentionRate: share(neg, abstained),
+    falseAnswerRate: share(neg, falseAnswer),
+    positives: pos.length,
+    falseAbstentionRate: share(pos, abstained),
+  };
 }
 
 function mean(xs: number[]): number {
@@ -191,7 +221,7 @@ function paraphraseStats(positives: QuestionResult[]): Report["paraphrase"] {
   };
 }
 
-export function summarize(results: QuestionResult[], threshold: number): Report {
+export function summarize(results: QuestionResult[]): Report {
   const positives = results.filter((r) => !r.negative);
   const negatives = results.filter((r) => r.negative);
   const byKind: Record<string, RankMetrics> = {};
@@ -211,9 +241,12 @@ export function summarize(results: QuestionResult[], threshold: number): Report 
     byKind,
     negatives: {
       n: negatives.length,
-      abstentionRate: rate((r) => abstained(r, threshold)),
-      falseAnswerRate: rate((r) => falseAnswer(r, threshold)),
+      abstentionRate: rate(abstained),
+      falseAnswerRate: rate(falseAnswer),
     },
+    abstention: Object.fromEntries(
+      (["calibration", "heldout"] as const).filter((s) => results.some((r) => r.split === s)).map((s) => [s, splitAbstention(results.filter((r) => r.split === s))]),
+    ),
     paraphrase: paraphraseStats(positives),
     degradedFraction: searches.length ? searches.filter(Boolean).length / searches.length : 0,
     latencyMs: { p50: percentile(latencies, 50), p95: percentile(latencies, 95) },

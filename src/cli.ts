@@ -331,7 +331,7 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx, evalDatabaseHint } = await import("./eval/db.js");
-    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine, breakdownLines, noItemsMessage, acceptRefusal } = await import("./eval/run.js");
+    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine, breakdownLines, abstentionLines, noItemsMessage, acceptRefusal } = await import("./eval/run.js");
     const { GOLDEN_FILES } = await import("./eval/golden.js");
     const { existsSync } = await import("node:fs");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
@@ -347,7 +347,7 @@ evalCmd
       if (run.results.length === 0) console.error(noItemsMessage(opts.golden, corpus, existsSync(opts.golden)));
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const goldenIds = run.results.map((r) => r.id).sort();
-      const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
+      const comparison = base ? compare(base, run.report, run.ranks, goldenIds, run.golden) : null;
       const failures = gateFailures(comparison, { gate: !!opts.gate, accept: !!opts.accept, baselinePath: opts.baseline });
       if (opts.gate) failures.push(...attributionGate(run.attribution));
       const verifierBase = run.verifier ? await loadVerifierBaseline(opts.verifierBaseline) : null;
@@ -357,11 +357,11 @@ evalCmd
       } else {
         for (const r of run.results) {
           const rank = run.ranks[r.id];
-          const threshold = config.retrieval.fallbackThreshold;
-          // A negative below threshold that still got a graph passage is neither abstained nor a false answer.
-          const negTag = falseAnswer(r, threshold) ? "FALSE" : abstained(r, threshold) ? "abst." : "GRAPH";
+          // A negative with unknown evidence (no rerank ran) is neither abstained nor a false answer.
+          const negTag = falseAnswer(r) ? "FALSE" : abstained(r) ? "abst." : "UNKN.";
           const tag = r.negative ? negTag : rank === null ? "MISS" : `#${String(rank).padStart(2)}`;
-          console.log(`${tag.padEnd(5)} ${r.kind.padEnd(11)} ${r.degraded ? "DEGRADED " : ""}${r.id}  ${r.ranked.length ? "" : "(no passages) "}${r.totalMs}ms`);
+          const weak = !r.negative && abstained(r) ? "WEAK " : "";
+          console.log(`${tag.padEnd(5)} ${r.kind.padEnd(11)} ${r.degraded ? "DEGRADED " : ""}${weak}${r.id}  ${r.ranked.length ? "" : "(no passages) "}${r.totalMs}ms`);
         }
         const o = run.report.overall;
         console.log(`\noverall  n=${o.n}  recall@1=${o.recallAt1.toFixed(2)}  recall@5=${o.recallAt5.toFixed(2)}  recall@10=${o.recallAt10.toFixed(2)}  mrr=${o.mrr.toFixed(2)}  ndcg@10=${o.ndcgAt10 === null ? "n/a" : o.ndcgAt10.toFixed(2)}`);
@@ -369,6 +369,7 @@ evalCmd
         for (const line of breakdownLines(run.report)) console.log(line);
         const ng = run.report.negatives;
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
+        for (const line of abstentionLines(run.report)) console.log(line);
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
         console.log(`degraded=${(run.report.degradedFraction * 100).toFixed(0)}%  latency p50=${run.report.latencyMs.p50}ms p95=${run.report.latencyMs.p95}ms`);
         const stages = stageLatencyLine(run.report);
@@ -396,7 +397,7 @@ evalCmd
         process.exitCode = 1;
       } else if (opts.accept) {
         const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
-        await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
+        await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, goldenItems: run.golden, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);
       }
     } catch (e) {

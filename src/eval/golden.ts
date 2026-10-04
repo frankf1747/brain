@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const GOLDEN_KINDS = ["keyword", "semantic", "graph", "filter", "fallback", "attribution", "negative"] as const;
@@ -22,6 +23,13 @@ export type Corpus = (typeof CORPORA)[number];
  * items stay in eval/golden-real.jsonl, which is gitignored; eval/golden.jsonl (committed) holds fixtures items only.
  */
 export const GOLDEN_FILES: Record<Corpus, string> = { fixtures: "eval/golden.jsonl", real: "eval/golden-real.jsonl" };
+
+/**
+ * Which part of the set an item belongs to for abstention: calibration items may be used to choose the answer threshold,
+ * held-out items only to report it (Phase 7). An item without the field is calibration.
+ */
+export const SPLITS = ["calibration", "heldout"] as const;
+export type Split = (typeof SPLITS)[number];
 
 const REAL_SUFFIX = "-real.jsonl";
 
@@ -74,6 +82,8 @@ export const GoldenItemSchema = z.object({
   edited: z.boolean().optional(),
   /** Captured items only: the logged search the question came from. */
   retrieval_id: z.string().uuid().optional(),
+  /** "heldout" for items kept out of choosing the answer threshold; absent means calibration (splitOf). */
+  split: z.enum(SPLITS).optional(),
 }).strict();
 export type GoldenItem = z.infer<typeof GoldenItemSchema>;
 export type GoldenInput = z.input<typeof GoldenItemSchema>;
@@ -179,7 +189,21 @@ export function goldenLine(item: GoldenItem): string {
   ordered.approved_at = item.approved_at;
   if (item.edited !== undefined) ordered.edited = item.edited;
   if (item.retrieval_id !== undefined) ordered.retrieval_id = item.retrieval_id;
+  if (item.split !== undefined) ordered.split = item.split;
   return JSON.stringify(ordered);
+}
+
+/** The item's split; calibration when the field is absent. */
+export function splitOf(item: Pick<GoldenItem, "split">): Split {
+  return item.split ?? "calibration";
+}
+
+/**
+ * The sha256 of the item's canonical line (goldenLine), so an item edited in place no longer matches the baseline,
+ * while an optional field the item does not use leaves its hash as it was.
+ */
+export function goldenItemSha256(item: GoldenItem): string {
+  return createHash("sha256").update(goldenLine(item)).digest("hex");
 }
 
 /**

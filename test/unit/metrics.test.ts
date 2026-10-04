@@ -6,7 +6,7 @@ const exp = (...origins: string[]) => origins.map((origin) => ({ origin: `${orig
 
 function result(partial: Partial<QuestionResult>): QuestionResult {
   return {
-    id: "q", kind: "keyword", source: "fixture", approvedBy: "agent", negative: false, expected: [], ranked: [], totalRelevant: 0, topScore: 0.9, hasGraphPassage: false,
+    id: "q", kind: "keyword", source: "fixture", approvedBy: "agent", negative: false, expected: [], ranked: [], totalRelevant: 0, topScore: 0.9, evidence: "strong", split: "calibration",
     degraded: false, totalMs: 10, timings: { embedMs: 1, sqlMs: 2, rerankMs: 3, graphMs: 0, totalMs: 10 },
     paraphraseRanked: [], paraphraseDegraded: [], ...partial,
   };
@@ -52,16 +52,15 @@ describe("nDCG@10", () => {
 });
 
 describe("negatives", () => {
-  it("abstains when the top score is below the threshold and no graph passage was added", () => {
-    expect(abstained(result({ topScore: 0.1, hasGraphPassage: false }), 0.3)).toBe(true);
-    expect(abstained(result({ topScore: null, hasGraphPassage: false }), 0.3)).toBe(true);
-    expect(abstained(result({ topScore: 0.5, hasGraphPassage: false }), 0.3)).toBe(false);
-    expect(abstained(result({ topScore: 0.1, hasGraphPassage: true }), 0.3)).toBe(false);
+  it("abstains exactly when the search judged its evidence weak", () => {
+    expect(abstained(result({ evidence: "weak" }))).toBe(true);
+    expect(abstained(result({ evidence: "strong" }))).toBe(false);
+    expect(abstained(result({ evidence: "unknown" }))).toBe(false);
   });
-  it("is a false answer only when the top score reaches the threshold", () => {
-    expect(falseAnswer(result({ topScore: 0.3 }), 0.3)).toBe(true);
-    expect(falseAnswer(result({ topScore: 0.1, hasGraphPassage: true }), 0.3)).toBe(false);
-    expect(falseAnswer(result({ topScore: null }), 0.3)).toBe(false);
+  it("is a false answer exactly when the evidence was strong; unknown (no rerank) is neither", () => {
+    expect(falseAnswer(result({ evidence: "strong" }))).toBe(true);
+    expect(falseAnswer(result({ evidence: "weak" }))).toBe(false);
+    expect(falseAnswer(result({ evidence: "unknown" }))).toBe(false);
   });
 });
 
@@ -71,9 +70,9 @@ describe("summarize", () => {
       result({ id: "1", kind: "keyword", expected: exp("a"), ranked: ranked("a"), totalMs: 10 }),
       result({ id: "2", kind: "keyword", expected: exp("a"), ranked: ranked("b", "a"), totalMs: 30, degraded: true }),
       result({ id: "3", kind: "semantic", expected: exp("z"), ranked: ranked("b"), totalMs: 20 }),
-      result({ id: "4", kind: "negative", negative: true, topScore: 0.1, totalMs: 5 }),
-      result({ id: "5", kind: "negative", negative: true, topScore: 0.8, totalMs: 5 }),
-    ], 0.3);
+      result({ id: "4", kind: "negative", negative: true, evidence: "weak", totalMs: 5 }),
+      result({ id: "5", kind: "negative", negative: true, evidence: "strong", totalMs: 5 }),
+    ]);
     expect(r.n).toBe(5);
     expect(r.overall.recallAt10).toBeCloseTo(2 / 3);
     expect(r.overall.recallAt1).toBeCloseTo(1 / 3);
@@ -87,20 +86,37 @@ describe("summarize", () => {
     expect(r.latencyMs.p50).toBe(10);
     expect(r.latencyMs.p95).toBe(30);
   });
-  it("a graph-only negative is neither abstained nor a false answer, so the rates need not sum to 1", () => {
+  it("an unknown-evidence negative is neither abstained nor a false answer, so the rates need not sum to 1", () => {
     const r = summarize([
-      result({ id: "a", negative: true, kind: "negative", topScore: 0.1 }),
-      result({ id: "f", negative: true, kind: "negative", topScore: 0.8 }),
-      result({ id: "g", negative: true, kind: "negative", topScore: 0.1, hasGraphPassage: true }),
-    ], 0.3);
+      result({ id: "a", negative: true, kind: "negative", evidence: "weak" }),
+      result({ id: "f", negative: true, kind: "negative", evidence: "strong" }),
+      result({ id: "u", negative: true, kind: "negative", evidence: "unknown" }),
+    ]);
     expect(r.negatives.abstentionRate).toBeCloseTo(1 / 3);
     expect(r.negatives.falseAnswerRate).toBeCloseTo(1 / 3);
+  });
+  it("reports abstention per split: negatives abstained and answered, and positives wrongly abstained on", () => {
+    const r = summarize([
+      result({ id: "n1", negative: true, kind: "negative", evidence: "weak" }),
+      result({ id: "n2", negative: true, kind: "negative", evidence: "strong" }),
+      result({ id: "p1", expected: exp("a"), ranked: ranked("a"), evidence: "strong" }),
+      result({ id: "h1", negative: true, kind: "negative", evidence: "weak", split: "heldout" }),
+      result({ id: "h2", expected: exp("a"), ranked: ranked("a"), evidence: "weak", split: "heldout" }),
+      result({ id: "h3", expected: exp("a"), ranked: ranked("a"), evidence: "strong", split: "heldout" }),
+    ]);
+    expect(r.abstention).toEqual({
+      calibration: { negatives: 2, abstentionRate: 0.5, falseAnswerRate: 0.5, positives: 1, falseAbstentionRate: 0 },
+      heldout: { negatives: 1, abstentionRate: 1, falseAnswerRate: 0, positives: 2, falseAbstentionRate: 0.5 },
+    });
+    expect(summarize([result({ id: "p" })]).abstention).toEqual({
+      calibration: { negatives: 0, abstentionRate: 0, falseAnswerRate: 0, positives: 1, falseAbstentionRate: 0 },
+    });
   });
   it("uses totalRelevant for nDCG", () => {
     const quoted = [{ origin: "a.md", quote: "q" }];
     const r = summarize([
       result({ id: "1", expected: quoted, ranked: [{ documentId: "a", origin: "/c/a.md", containsQuote: true }], totalRelevant: 3 }),
-    ], 0.3);
+    ]);
     expect(r.overall.ndcgAt10).toBeLessThan(1);
   });
   it("reports p50 and p95 per search stage", () => {
@@ -109,7 +125,7 @@ describe("summarize", () => {
       result({ id: "1", timings: t(100, 10, 200, 1) }),
       result({ id: "2", timings: t(120, 30, 250, 2) }),
       result({ id: "3", timings: t(400, 20, 220, 0) }),
-    ], 0.3);
+    ]);
     expect(r.stageLatencyMs).toEqual({
       embed: { p50: 120, p95: 400 },
       sql: { p50: 20, p95: 30 },
@@ -123,7 +139,7 @@ describe("summarize", () => {
       result({ id: "2", source: "generated", approvedBy: "owner", expected: exp("a"), ranked: ranked("b", "a") }),
       result({ id: "3", source: "generated", approvedBy: "owner", expected: exp("z"), ranked: ranked("b") }),
       result({ id: "4", source: "captured", approvedBy: "owner", kind: "negative", negative: true, topScore: 0.1 }),
-    ], 0.3);
+    ]);
     expect(Object.keys(r.bySource!).sort()).toEqual(["fixture", "generated"]);
     expect(r.bySource!.fixture).toMatchObject({ n: 1, recallAt10: 1, mrr: 1 });
     expect(r.bySource!.generated).toMatchObject({ n: 2, recallAt10: 0.5, mrr: 0.25 });
@@ -132,7 +148,7 @@ describe("summarize", () => {
   it("counts paraphrase searches in the degraded fraction", () => {
     const r = summarize([
       result({ id: "1", expected: exp("a"), ranked: ranked("a"), paraphraseRanked: [ranked("a"), ranked("a"), ranked("a")], paraphraseDegraded: [true, false, false] }),
-    ], 0.3);
+    ]);
     expect(r.degradedFraction).toBeCloseTo(1 / 4);
   });
 });
@@ -141,25 +157,25 @@ describe("paraphrase consistency", () => {
   it("is the share of paraphrases whose top-10 finds the same set of expected entries", () => {
     const r = summarize([
       result({ id: "1", kind: "semantic", expected: exp("a"), ranked: ranked("a"), paraphraseRanked: [ranked("a"), ranked("b")] }),
-    ], 0.3);
+    ]);
     expect(r.paraphrase.n).toBe(2);
     expect(r.paraphrase.consistency).toBe(0.5);
   });
   it("same recall but a different set is inconsistent", () => {
     const r = summarize([
       result({ id: "1", expected: exp("a", "b"), ranked: ranked("a"), paraphraseRanked: [ranked("b")] }),
-    ], 0.3);
+    ]);
     expect(r.paraphrase.consistency).toBe(0);
     expect(r.paraphrase.meanRecallDelta).toBe(0);
   });
   it("both missing everything is consistent", () => {
-    const r = summarize([result({ id: "1", expected: exp("a"), ranked: ranked("x"), paraphraseRanked: [ranked("y")] })], 0.3);
+    const r = summarize([result({ id: "1", expected: exp("a"), ranked: ranked("x"), paraphraseRanked: [ranked("y")] })]);
     expect(r.paraphrase.consistency).toBe(1);
   });
   it("meanRecallDelta is positive when the paraphrase does better", () => {
     const r = summarize([
       result({ id: "1", expected: exp("a", "b"), ranked: ranked("a"), paraphraseRanked: [ranked("a", "b")] }),
-    ], 0.3);
+    ]);
     expect(r.paraphrase.meanRecallDelta).toBeCloseTo(0.5);
   });
 });
