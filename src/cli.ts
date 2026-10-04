@@ -403,6 +403,117 @@ evalCmd
   });
 
 evalCmd
+  .command("draft")
+  .description("Draft golden questions: one model call per document (2-3 questions with a verbatim quote and two paraphrases, plus one negative), automatic checks, then eval/drafts.jsonl and a review sheet for the owner")
+  .option("--corpus <corpus>", "fixtures (brain_eval) or real (brain_real_eval)", "fixtures")
+  .option("--since <date>", "only documents ingested on or after this date")
+  .option("--limit <n>", "at most this many documents (model calls)")
+  .option("--doc <document...>", "only these documents: file name or document id")
+  .option("--force", "also draft documents that already have drafts or golden items")
+  .option("--golden <path>", "golden set file (real items: golden-real.jsonl next to it)", "eval/golden.jsonl")
+  .option("--drafts <path>", "pending drafts file (real drafts: the gitignored drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .option("--review-dir <dir>", "where review sheets are written (real sheets: its gitignored real/ subdirectory)", "eval/review")
+  .action(async (opts) => {
+    const corpus = corpusOption(opts.corpus);
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) throw new Error(`--limit needs a positive whole number, got ${JSON.stringify(opts.limit)}`);
+    const { makeEvalCtx, assertEvalConnection, evalDatabaseHint } = await import("./eval/db.js");
+    const { draftDocuments, draftsFileFor } = await import("./eval/draft.js");
+    const ctx = makeEvalCtx(corpus);
+    try {
+      await assertEvalConnection(ctx.sql);
+      const r = await draftDocuments(ctx, {
+        corpus, goldenPath: opts.golden, draftsPath: opts.drafts, reviewDir: opts.reviewDir,
+        since: opts.since ? new Date(opts.since) : undefined, limit, force: !!opts.force, docs: opts.doc,
+      });
+      for (const d of r.skipped) console.log(`skip     ${d} (has drafts or golden items; --force drafts it again)`);
+      for (const d of r.drafted) console.log(`drafted  ${d}`);
+      for (const x of r.rejected) console.log(`dropped  ${x.document}: "${x.question}": ${x.reasons.join("; ")}`);
+      for (const f of r.failed) console.log(`failed   ${f.document}: ${f.error}`);
+      if (r.sheet) {
+        console.log(`\n${r.written.length} drafts written to ${draftsFileFor(opts.drafts, corpus)} and ${r.sheet}.`);
+        console.log(`The owner reviews the sheet (keep, edit or reject each item), then: npm run brain -- eval approve --sheet ${r.sheet}`);
+      } else console.log("\nNo new drafts.");
+      if (r.failed.length) process.exitCode = 1;
+    } catch (e) {
+      throw evalDatabaseHint(e, corpus);
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
+evalCmd
+  .command("approve")
+  .description("Apply the owner's decisions in a review sheet: keep and edit go into the golden set (approved_by owner), reject drops the draft, undecided items stay")
+  .requiredOption("--sheet <file>", "the review sheet, eval/review/<date>-<n>.md (real sheets: eval/review/real/<date>-<n>.md)")
+  .option("--golden <path>", "golden set file (approved real items go to golden-real.jsonl next to it)", "eval/golden.jsonl")
+  .option("--drafts <path>", "pending drafts file (a real sheet's drafts: drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .action(async (opts) => {
+    const { connect } = await import("./db.js");
+    const { evalDatabaseUrl, assertEvalDatabase, assertEvalConnection } = await import("./eval/db.js");
+    const { approveSheetFile } = await import("./eval/review.js");
+    const { loadGolden, approvalCounts, goldenFileFor } = await import("./eval/golden.js");
+    const { sheetCorpus } = await import("./eval/draft.js");
+    const opened: ReturnType<typeof connect>[] = [];
+    try {
+      const r = await approveSheetFile(opts.sheet, {
+        goldenPath: opts.golden,
+        draftsPath: opts.drafts,
+        sql: async (corpus) => {
+          const url = evalDatabaseUrl(corpus);
+          assertEvalDatabase(url);
+          const sql = connect(url);
+          opened.push(sql);
+          await assertEvalConnection(sql);
+          return sql;
+        },
+      });
+      const edited = r.approved.filter((a) => a.edited).length;
+      console.log(`approved ${r.approved.length} (${edited} edited), rejected ${r.rejected.length}, undecided ${r.undecided.length}, already applied ${r.alreadyApplied.length}`);
+      const goldenFile = goldenFileFor(opts.golden, sheetCorpus(opts.sheet));
+      const golden = await loadGolden(goldenFile);
+      const c = approvalCounts(golden);
+      console.log(`${goldenFile} now has ${golden.length} items: ${c.owner} approved by the owner, ${c.agent} written by an agent`);
+    } finally {
+      for (const s of opened) await s.end();
+    }
+  });
+
+evalCmd
+  .command("reject")
+  .description("Drop pending drafts by id (fixtures and real)")
+  .requiredOption("--id <draft id...>", "draft ids, d- and 10 hex digits")
+  .option("--drafts <path>", "pending drafts file (real drafts: drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .action(async (opts: { id: string[]; drafts: string }) => {
+    const { loadDrafts, saveDrafts, draftsFileFor } = await import("./eval/draft.js");
+    const ids = new Set(opts.id);
+    const files = (["fixtures", "real"] as const).map((c) => draftsFileFor(opts.drafts, c));
+    const loaded = await Promise.all(files.map((f) => loadDrafts(f)));
+    const drafts = loaded.flat();
+    const unknown = opts.id.filter((id) => !drafts.some((d) => d.draft_id === id));
+    // Each file keeps only its own corpus's drafts; a file is rewritten only when it loses one.
+    for (let i = 0; i < files.length; i++) {
+      if (loaded[i].some((d) => ids.has(d.draft_id))) await saveDrafts(files[i], loaded[i].filter((d) => !ids.has(d.draft_id)));
+    }
+    console.log(`rejected ${opts.id.length - unknown.length}; ${drafts.length - (opts.id.length - unknown.length)} drafts pending`);
+    for (const id of unknown) console.error(`no pending draft ${id}`);
+    if (unknown.length) process.exitCode = 1;
+  });
+
+evalCmd
+  .command("drafts")
+  .description("List pending drafts: id, corpus, kind, document, question, and the review sheet they are on")
+  .option("--drafts <path>", "pending drafts file (real drafts: drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .action(async (opts) => {
+    const { loadDrafts, draftsFileFor } = await import("./eval/draft.js");
+    const { documentLine } = await import("./eval/review.js");
+    const drafts = [...(await loadDrafts(draftsFileFor(opts.drafts, "fixtures"))), ...(await loadDrafts(draftsFileFor(opts.drafts, "real")))];
+    if (drafts.length === 0) return void console.log("No pending drafts.");
+    for (const d of drafts) console.log(`${d.draft_id}  ${d.corpus.padEnd(8)} ${d.kind.padEnd(11)} ${documentLine(d)}\n    ${d.question}\n    sheet ${d.sheet}`);
+    console.log(`${drafts.length} pending`);
+  });
+
+evalCmd
   .command("verifier")
   .description("Score the citation verifier on its labelled set: each item, the confusion matrices, precision and recall of supported on the regular and full views (no model or Voyage call)")
   .option("--file <path>", "verifier set", "eval/verifier.jsonl")
