@@ -514,6 +514,58 @@ evalCmd
   });
 
 evalCmd
+  .command("capture")
+  .description("List recent logged searches (query, mode, top passages with titles and scores, retrieval id) to label as golden items; reads the log only")
+  .option("--corpus <corpus>", "real: the knowledge base's log (DATABASE_URL, opened read-only); fixtures: brain_eval's log", "real")
+  .option("--since <date>", "only searches on or after this date")
+  .option("--client <client>", "only searches from this client: mcp-stdio, mcp-http, cli")
+  .option("--limit <n>", "at most this many searches", "20")
+  .action(async (opts) => {
+    const corpus = corpusOption(opts.corpus);
+    const { connectReadOnly } = await import("./db.js");
+    const { EVAL_DATABASE_URL } = await import("./eval/db.js");
+    const { capturedSearches, renderCaptured } = await import("./eval/capture.js");
+    const sql = connectReadOnly(corpus === "real" ? config.databaseUrl : EVAL_DATABASE_URL);
+    try {
+      const rows = await capturedSearches(sql, { since: opts.since ? new Date(opts.since) : undefined, client: opts.client, limit: Number(opts.limit) });
+      console.log(renderCaptured(rows, corpus));
+    } finally {
+      await sql.end();
+    }
+  });
+
+evalCmd
+  .command("label <retrievalId>")
+  .description("Write a golden item (source captured, approved_by owner) from a logged search; the expected document must be in the corpus's eval database")
+  .option("--expect <document>", "the document that answers it: document id (or, for fixtures, file name)")
+  .option("--quote <text>", "a verbatim span of that document that answers it")
+  .option("--negative", "nothing in the knowledge base answers it")
+  .option("--kind <kind>", "keyword, semantic, graph, filter, fallback or attribution", "semantic")
+  .option("--corpus <corpus>", "real (log: DATABASE_URL read-only; documents: brain_real_eval) or fixtures (both brain_eval)", "real")
+  .option("--golden <path>", "golden set file (real items go to the gitignored golden-real.jsonl next to it)", "eval/golden.jsonl")
+  .action(async (retrievalId: string, opts) => {
+    const corpus = corpusOption(opts.corpus);
+    const { connect, connectReadOnly } = await import("./db.js");
+    const { evalDatabaseUrl, assertEvalDatabase, assertEvalConnection, evalDatabaseHint } = await import("./eval/db.js");
+    const { labelCaptured } = await import("./eval/capture.js");
+    const { GOLDEN_KINDS, goldenFileFor } = await import("./eval/golden.js");
+    if (!(GOLDEN_KINDS as readonly string[]).includes(opts.kind)) throw new Error(`--kind must be one of ${GOLDEN_KINDS.join(", ")}, got ${JSON.stringify(opts.kind)}`);
+    const evalUrl = evalDatabaseUrl(corpus);
+    assertEvalDatabase(evalUrl);
+    const log = connectReadOnly(corpus === "real" ? config.databaseUrl : evalUrl);
+    const evalSql = connect(evalUrl);
+    try {
+      await assertEvalConnection(evalSql);
+      const item = await labelCaptured(log, evalSql, { retrievalId, expect: opts.expect, quote: opts.quote, negative: !!opts.negative, kind: opts.kind, corpus, goldenPath: opts.golden });
+      console.log(`golden item ${item.id} written to ${goldenFileFor(opts.golden, corpus)}: "${item.question}" (${item.kind}, ${corpus})`);
+    } catch (e) {
+      throw evalDatabaseHint(e, corpus);
+    } finally {
+      await Promise.all([log.end(), evalSql.end()]);
+    }
+  });
+
+evalCmd
   .command("verifier")
   .description("Score the citation verifier on its labelled set: each item, the confusion matrices, precision and recall of supported on the regular and full views (no model or Voyage call)")
   .option("--file <path>", "verifier set", "eval/verifier.jsonl")
