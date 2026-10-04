@@ -6,6 +6,7 @@ import { search } from "../../src/retrieve/search.js";
 import { explain, explainNotFound } from "../../src/retrieve/explain.js";
 import { toLoggedPassages } from "../../src/retrieve/contract.js";
 import { renderExplain } from "../../src/mcp/render.js";
+import { judgeEvidence } from "../../src/retrieve/evidence.js";
 
 const sql = testDb();
 afterAll(() => sql.end());
@@ -39,11 +40,15 @@ describe("explain", () => {
     expect(e.filters).toMatchObject({ sourceKinds: ["news", "note"], verifiedOnly: false });
     expect(e.results).toEqual(toLoggedPassages(res.passages));
     expect(e.topScore).toBeCloseTo(res.topScore as number, 5);
+    // The search judged its evidence from its own top score; the log keeps the judgment and the threshold it used.
+    expect(res.evidence).toEqual(judgeEvidence(res));
+    expect(e.evidence).toEqual(res.evidence);
     expect(Number.isNaN(Date.parse(e.createdAt))).toBe(false);
 
     const text = renderExplain(e);
     expect(text.split("\n")[0]).toContain(`retrieval ${res.retrievalId} · logged `);
     expect(text).toContain(`mode: ${res.mode} · k 5`);
+    expect(text).toContain(`evidence: ${res.evidence.level} (${res.evidence.basis}, answer threshold 0.56)`);
     expect(text).toContain(`candidates: vector ${res.candidates.vector} · keyword ${res.candidates.keyword} · fused ${res.candidates.fused}`);
     res.passages.forEach((p, i) => expect(text).toContain(`#${i + 1} [P${i + 1}] score `));
     const top = res.passages[0];

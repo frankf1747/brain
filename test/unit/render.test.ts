@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
+  renderSearch, evidenceNote, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
   renderExplain, explainLine, renderSources, verdictLine, verdictDetail, renderVerification, VERIFY_LIMITS, renderAnswerCheck,
   quotedTitle, legacyTopScoreText,
 } from "../../src/mcp/render.js";
@@ -98,6 +98,19 @@ describe("renderSearch", () => {
     const hybrid = renderSearch(searchResult()).split("\n");
     expect(hybrid[0]).toBe("retrieval r1 · mode: hybrid · 0 passages");
     expect(hybrid[1]).toBe("");
+  });
+
+  it("warns on weak evidence on the lines after the header, and says nothing more for strong or unknown evidence", () => {
+    const weak = renderSearch(searchResult({ topScore: 0.47, evidence: { level: "weak", basis: "rerank", threshold: 0.56 } })).split("\n");
+    expect(weak[1]).toBe(
+      "(evidence: weak — the top rerank score 0.47 is below 0.56: these passages may not hold the answer; if none of them states it, say the knowledge base does not have it)",
+    );
+    const none = renderSearch(searchResult({ topScore: null, evidence: { level: "weak", basis: "rerank", threshold: 0.56 } })).split("\n");
+    expect(none[1]).toBe(
+      "(evidence: weak — nothing was reranked: these passages may not hold the answer; if none of them states it, say the knowledge base does not have it)",
+    );
+    expect(evidenceNote({ level: "strong", basis: "literal", threshold: 0.56 }, null)).toBeNull();
+    expect(evidenceNote({ level: "unknown", basis: "no_rerank", threshold: 0.56 }, null)).toBeNull();
   });
 
   it("says so when nothing was found", () => {
@@ -224,7 +237,7 @@ describe("renderExplain", () => {
     v2: true, k: 10, mode: "hybrid", degraded: { embedding: false, rerank: false, capReached: false },
     candidates: { vector: 60, keyword: 12, fused: 64 }, timings: { embedMs: 120.3, sqlMs: 45.1, rerankMs: 210, graphMs: 3.2, totalMs: 380.9 },
     results: toLoggedPassages(fixture.passages), layers: ["hybrid", "summary", "graph", "fallback"], chunkIds: ["c1", "c2", "c3"], nodeIds: ["n1"],
-    topScore: 0.76, usedFallback: true, notes: [],
+    topScore: 0.76, evidence: { level: "strong", basis: "rerank", threshold: 0.56 }, usedFallback: true, notes: [],
   };
 
   it("replays a v2 row: who and when, filters, mode, flags, candidates, timings, and every passage's ranks and score", () => {
@@ -238,6 +251,7 @@ describe("renderExplain", () => {
         "candidates: vector 60 · keyword 12 · fused 64",
         "timings: embed 120.3 ms · sql 45.1 ms · rerank 210.0 ms · graph 3.2 ms · total 380.9 ms",
         "top rerank score: 0.76",
+        "evidence: strong (rerank, answer threshold 0.56)",
         "fallback scan: used",
         "",
         "Passages in rank order (P labels as brain_search showed them): 4",
@@ -259,6 +273,7 @@ describe("renderExplain", () => {
     expect(t).toContain("mode: keyword-only · k 10");
     expect(t).toContain("degraded: embedding yes · rerank yes · cap reached yes\n(Voyage daily cap reached; keyword-only results)");
     expect(t).toContain("top rerank score: none (no rerank ran, or it returned nothing)");
+    expect(renderExplain({ ...base, evidence: null })).toContain("evidence: not recorded (logged before migration 013)");
     expect(t).toContain("#1 [P1] score 0.0164 (rrf) · layers keyword · vector - · keyword 1 · rerank -");
   });
 
@@ -303,7 +318,7 @@ describe("titles and legacy scores", () => {
   it("prints notes about evidence v2 columns that could not be read under the filters line", () => {
     const e: Explanation = {
       retrievalId: "r1", query: "q", client: null, createdAt: "2026-10-02T09:15:00.000Z", filters: {}, v2: false, k: null, mode: null,
-      degraded: null, candidates: null, timings: null, results: null, layers: [], chunkIds: [], nodeIds: [], topScore: 0.0164, usedFallback: false,
+      degraded: null, candidates: null, timings: null, results: null, layers: [], chunkIds: [], nodeIds: [], topScore: 0.0164, evidence: null, usedFallback: false,
       notes: ["results could not be read with the current contract (0.newField: Invalid input); shown as not recorded"],
     };
     const lines = renderExplain(e).split("\n");

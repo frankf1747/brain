@@ -122,6 +122,17 @@ export const TimingsSchema = z.object({
   totalMs: z.number(),
 });
 
+/**
+ * Whether the passages are likely to hold an answer (judgeEvidence, Phase 7). level: strong, weak (the knowledge base
+ * may not hold the answer) or unknown (no rerank ran). basis: what decided it, the top rerank score against threshold,
+ * a literal match for a bare code lookup, or no_rerank. threshold: the answer threshold in force when it was judged.
+ */
+export const EvidenceSchema = z.object({
+  level: z.enum(["strong", "weak", "unknown"]),
+  basis: z.enum(["rerank", "literal", "no_rerank"]),
+  threshold: z.number(),
+});
+
 export const SearchResultSchema = z.object({
   /** brain.retrieval_log id; brain_explain(retrieval_id) replays this search. */
   retrievalId: z.string(),
@@ -132,6 +143,7 @@ export const SearchResultSchema = z.object({
   fallbackUsed: z.boolean(),
   /** The top rerank score; null when no rerank ran (degraded) or nothing was reranked. */
   topScore: z.number().nullable(),
+  evidence: EvidenceSchema,
   passages: z.array(PassageSchema),
   documents: z.array(DocHitSchema),
   entities: z.array(EntityHitSchema),
@@ -158,6 +170,7 @@ export type Neighbor = z.infer<typeof NeighborSchema>;
 export type EntityHit = z.infer<typeof EntityHitSchema>;
 export type FactRow = z.infer<typeof FactRowSchema>;
 export type Degraded = z.infer<typeof DegradedSchema>;
+export type Evidence = z.infer<typeof EvidenceSchema>;
 export type Candidates = z.infer<typeof CandidatesSchema>;
 export type Timings = z.infer<typeof TimingsSchema>;
 export type SearchResult = z.infer<typeof SearchResultSchema>;

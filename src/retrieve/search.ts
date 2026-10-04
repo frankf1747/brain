@@ -4,6 +4,7 @@ import type { Ctx } from "../ctx.js";
 import { toVector } from "../db.js";
 import { reciprocalRankFusion } from "./fuse.js";
 import { triggerTerms } from "./fallback.js";
+import { judgeEvidence } from "./evidence.js";
 import { detectEntities } from "./entities.js";
 import { isSpendCap } from "../llm/errors.js";
 import {
@@ -234,6 +235,7 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   }
 
   const mode = searchMode(degraded);
+  const evidence = judgeEvidence({ degraded, topScore, query, passages });
   // The v1 columns stay filled for compatibility; results, degraded, candidates, timings, k and mode are v2 (spec §6.2);
   // facts (migration 012) lets brain_verify resolve F labels as this search showed them.
   const layers = [
@@ -249,12 +251,12 @@ export async function search(ctx: Ctx, query: string, opts: SearchOptions = {}):
   timings.totalMs = tenth(elapsed(started));
   const [logged] = await sql<{ id: string }[]>`
     insert into brain.retrieval_log
-      (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client, results, degraded, candidates, timings, k, mode, facts)
+      (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client, results, degraded, candidates, timings, k, mode, facts, evidence)
     values (${query}, ${json(logFilters)}, ${layers}::text[],
             ${passages.map((p) => p.chunkId).filter((id): id is string => id !== null)}::uuid[],
             ${entities.map((e) => e.id)}::uuid[], ${topScore}, ${fallbackUsed}, ${opts.client ?? "cli"},
-            ${json(toLoggedPassages(passages))}, ${json(degraded)}, ${json(candidates)}, ${json(timings)}, ${k}, ${mode}, ${json(facts)})
+            ${json(toLoggedPassages(passages))}, ${json(degraded)}, ${json(candidates)}, ${json(timings)}, ${k}, ${mode}, ${json(facts)}, ${json(evidence)})
     returning id`;
 
-  return { retrievalId: logged.id, query, k, mode, degraded, fallbackUsed, topScore, passages, documents, entities, facts, candidates, timings };
+  return { retrievalId: logged.id, query, k, mode, degraded, fallbackUsed, topScore, evidence, passages, documents, entities, facts, candidates, timings };
 }

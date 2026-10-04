@@ -52,6 +52,7 @@ export function searchResult(over: Partial<SearchResult> = {}): SearchResult {
     degraded: { embedding: false, rerank: false, capReached: false },
     fallbackUsed: false,
     topScore: null,
+    evidence: { level: "strong", basis: "rerank", threshold: 0.56 },
     passages: [],
     documents: [],
     entities: [],

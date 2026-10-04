@@ -40,6 +40,7 @@ describe("brain MCP server", () => {
     const s = await connect();
     const instructions = s.client.getInstructions() ?? "";
     expect(instructions).toContain('author: "other"');
+    expect(instructions).toContain("`(evidence: weak — …)`");
     const tools = (await s.client.listTools()).tools;
     const ingestTool = tools.find((t) => t.name === "brain_ingest")!;
     expect(ingestTool.description).toContain('author: "other"');

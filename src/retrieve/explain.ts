@@ -2,8 +2,8 @@ import { z } from "zod";
 import type { Db } from "../db.js";
 import { UUID } from "./documents.js";
 import {
-  CandidatesSchema, DegradedSchema, LoggedPassageSchema, SearchModeSchema, TimingsSchema,
-  type Candidates, type Degraded, type LoggedPassage, type SearchMode, type Timings,
+  CandidatesSchema, DegradedSchema, EvidenceSchema, LoggedPassageSchema, SearchModeSchema, TimingsSchema,
+  type Candidates, type Degraded, type Evidence, type LoggedPassage, type SearchMode, type Timings,
 } from "./contract.js";
 
 /** A logged search, replayed from brain.retrieval_log alone (spec §6.4). */
@@ -28,6 +28,8 @@ export interface Explanation {
   chunkIds: string[];
   nodeIds: string[];
   topScore: number | null;
+  /** As the search judged it (migration 013); null for rows logged before it. */
+  evidence: Evidence | null;
   usedFallback: boolean;
   /** Evidence v2 fields that were logged but could not be read with today's contract (shown as not recorded). */
   notes: string[];
@@ -98,6 +100,7 @@ export async function explain(sql: Db, retrievalId: string): Promise<Explanation
     chunkIds: r.chunk_ids ?? [],
     nodeIds: r.node_ids ?? [],
     topScore: r.top_score ?? null,
+    evidence: v2Field(raw, "evidence", EvidenceSchema, notes),
     usedFallback: r.used_fallback ?? false,
     notes,
   };

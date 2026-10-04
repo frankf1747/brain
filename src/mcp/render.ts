@@ -1,4 +1,4 @@
-import { NOT_DEGRADED, degradedNote, factSource, searchMode, type FactRow, type LoggedPassage, type SearchResult } from "../retrieve/contract.js";
+import { NOT_DEGRADED, degradedNote, factSource, searchMode, type Evidence, type FactRow, type LoggedPassage, type SearchResult } from "../retrieve/contract.js";
 import type { Explanation } from "../retrieve/explain.js";
 import type { Orientation } from "../retrieve/orient.js";
 import type { NodeReport } from "../graph/inspect.js";
@@ -65,6 +65,16 @@ export function searchHeader(r: Pick<SearchResult, "retrievalId" | "mode" | "pas
 }
 
 /**
+ * Why the passages may not hold the answer, or null for strong evidence and for unknown evidence (no rerank ran, which
+ * the degraded note already says).
+ */
+export function evidenceNote(e: Evidence, topScore: number | null): string | null {
+  if (e.level !== "weak") return null;
+  const why = topScore === null ? "nothing was reranked" : `the top rerank score ${topScore.toFixed(2)} is below ${e.threshold.toFixed(2)}`;
+  return `${why}: these passages may not hold the answer; if none of them states it, say the knowledge base does not have it`;
+}
+
+/**
  * The brain_search text, generated from the evidence contract alone. brief (the CLI's `brain search`) prints each
  * passage as one line of at most 240 characters instead of its heading path and full text.
  */
@@ -72,6 +82,8 @@ export function renderSearch(r: SearchResult, opts: { brief?: boolean } = {}): s
   const out = [searchHeader(r)];
   const note = degradedNote(r.degraded);
   if (note) out.push(`(${note})`);
+  const weak = evidenceNote(r.evidence, r.topScore);
+  if (weak) out.push(`(evidence: weak — ${weak})`);
   if (r.fallbackUsed) out.push("(weak match: results include raw substring hits)");
   out.push("");
   if (r.passages.length === 0) out.push("No passages matched.");
@@ -237,6 +249,7 @@ export function renderExplain(e: Explanation): string {
     out.push(`timings: embed ${msText(t.embedMs)} · sql ${msText(t.sqlMs)} · rerank ${msText(t.rerankMs)} · graph ${msText(t.graphMs)} · total ${msText(t.totalMs)}`);
   }
   out.push(`top rerank score: ${e.topScore === null ? "none (no rerank ran, or it returned nothing)" : e.topScore.toFixed(2)}`);
+  out.push(`evidence: ${e.evidence ? `${e.evidence.level} (${e.evidence.basis}, answer threshold ${e.evidence.threshold.toFixed(2)})` : "not recorded (logged before migration 013)"}`);
   out.push(`fallback scan: ${e.usedFallback ? "used" : "not used"}`);
   out.push("", `Passages in rank order (P labels as brain_search showed them): ${e.results.length}`);
   if (e.results.length === 0) out.push("none");

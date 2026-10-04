@@ -39,6 +39,15 @@ describe("buildAskPrompt", () => {
     expect(buildAskPrompt("q", searchResult())).toContain("Passages:\n(none)");
   });
 
+  it("passes weak evidence on to the model, and tells it what weak evidence means", () => {
+    const weak = searchResult({ topScore: 0.47, evidence: { level: "weak", basis: "rerank", threshold: 0.56 }, passages: [passage({ score: 0.47 })] });
+    expect(buildAskPrompt("q", weak)).toContain(
+      "Search mode: hybrid\nEvidence: weak (the top rerank score 0.47 is below 0.56: these passages may not hold the answer; if none of them states it, say the knowledge base does not have it)",
+    );
+    expect(buildAskPrompt("q", searchResult())).not.toContain("Evidence:");
+    expect(ASK_SYSTEM).toContain("When the evidence is weak, answer only what a passage states outright; otherwise say the knowledge base does not hold the answer.");
+  });
+
   it("shows a ranked passage the graph also reached with its ranks and the entity", () => {
     const both = passage({ layers: ["vector", "keyword", "graph"], viaEntity: { id: "n1", name: "Acme Corp" } });
     expect(buildAskPrompt("q", searchResult({ passages: [both] }))).toContain("[P1] 0.76 rerank · vector#2 keyword#5 graph via Acme Corp · author: other · news: Doc");

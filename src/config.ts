@@ -73,7 +73,9 @@ export const config = {
   embeddingDimensions: 1024,
   chunking: { sectionTokens: 1500, passageTokens: 400, overlapRatio: 0.15 },
   resolution: { matchThreshold: 0.92, flagThreshold: 0.85, lexicalThreshold: 0.6 },
-  retrieval: { candidateK: 60, defaultK: 10, fallbackThreshold: 0.3 },
+  // fallbackThreshold triggers the literal substring scan. answerThreshold is the top rerank score below which a search
+  // reports weak evidence (the knowledge base may not hold the answer); chosen on the calibration split in Phase 7.
+  retrieval: { candidateK: 60, defaultK: 10, fallbackThreshold: 0.3, answerThreshold: 0.56 },
   graph: { maxEntities: 5, maxNeighbors: 20, maxPassagesPerEntity: 5, maxFacts: 10 },
   /**
    * Author of a document saved without one, by source kind; any other kind is "unknown".
