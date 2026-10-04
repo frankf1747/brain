@@ -79,6 +79,9 @@ export type GoldenItem = z.infer<typeof GoldenItemSchema>;
 export type GoldenInput = z.input<typeof GoldenItemSchema>;
 export type Expected = z.infer<typeof ExpectedSchema>;
 
+/** The ids real items may have: draftId's d- and 10 hex digits, or labelCaptured's c- and the retrieval id's first 8. */
+export const REAL_ID = /^(d-[0-9a-f]{10}|c-[0-9a-f]{8})$/;
+
 /** The rules a schema cannot express. Empty means the item is valid. */
 export function goldenItemProblems(item: GoldenItem): string[] {
   const out: string[] = [];
@@ -91,6 +94,9 @@ export function goldenItemProblems(item: GoldenItem): string[] {
   // brain_eval is rebuilt from eval/corpus, so its document ids change; fixture items name documents by file name.
   if (item.corpus === "fixtures" && item.expected.some((e) => !e.origin)) out.push("a fixtures item names each expected document by origin");
   if (item.kind === "filter" && !item.filters?.sourceKinds?.length) out.push("a filter item needs filters.sourceKinds");
+  // eval/baseline-real.json is committed and lists item ids, so a real item's id carries no text: only the ids that
+  // eval draft (draftId) and eval label (c- + retrieval id prefix) generate.
+  if (item.corpus === "real" && !REAL_ID.test(item.id)) out.push("a real item's id must be opaque: d- and 10 hex digits (drafted) or c- and 8 (captured)");
   return out;
 }
 

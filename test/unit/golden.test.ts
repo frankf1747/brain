@@ -68,7 +68,20 @@ describe("parseGolden", () => {
   it("names fixture documents by origin, since brain_eval's document ids change when it is rebuilt", () => {
     const docId = "0b9c6a38-1111-4222-8333-444455556666";
     expect(() => parseGolden(line({ expected: [{ document_id: docId }] }))).toThrow(/a fixtures item names each expected document by origin/);
-    expect(parseGolden(line({ corpus: "real", expected: [{ document_id: docId }] }))[0].corpus).toBe("real");
+    expect(parseGolden(line({ id: "d-0123456789", corpus: "real", expected: [{ document_id: docId }] }))[0].corpus).toBe("real");
+  });
+  it("gives real items only opaque ids, so the committed baseline-real.json carries no text from the owner's documents", () => {
+    const docId = "0b9c6a38-1111-4222-8333-444455556666";
+    const real = (id: string) => line({ id, corpus: "real", expected: [{ document_id: docId }] });
+    expect(parseGolden(real("d-0123456789"))[0].id).toBe("d-0123456789");
+    expect(parseGolden(real("c-6f1c2a0e"))[0].id).toBe("c-6f1c2a0e");
+    for (const id of ["q01", "where-do-i-live", "d-01234", "c-6F1C2A0E", "d-0123456789-acme", "x-0123456789"]) {
+      expect(() => parseGolden(real(id))).toThrow(
+        `golden line 1 (${id}): a real item's id must be opaque: d- and 10 hex digits (drafted) or c- and 8 (captured)`,
+      );
+    }
+    // Fixture ids stay free text: the fixture corpus is fictional and committed.
+    expect(parseGolden(line({ id: "q-acme-salary" }))[0].id).toBe("q-acme-salary");
   });
   it("requires source kinds on a filter item", () => {
     expect(() => parseGolden(line({ kind: "filter" }))).toThrow(/a filter item needs filters.sourceKinds/);
@@ -124,17 +137,17 @@ describe("forCorpus and approvalCounts", () => {
     const items: GoldenItem[] = parseGolden([
       ok,
       line({ id: "g1", source: "generated", approved_by: "owner", edited: false }),
-      line({ id: "r1", corpus: "real", source: "captured", approved_by: "owner", retrieval_id: "6f1c2a0e-1111-4222-8333-444455556666", expected: [{ document_id: "0b9c6a38-1111-4222-8333-444455556666" }] }),
+      line({ id: "d-0000000001", corpus: "real", source: "captured", approved_by: "owner", retrieval_id: "6f1c2a0e-1111-4222-8333-444455556666", expected: [{ document_id: "0b9c6a38-1111-4222-8333-444455556666" }] }),
     ].join("\n"));
     expect(forCorpus(items, "fixtures").map((i) => i.id)).toEqual(["q01", "g1"]);
-    expect(forCorpus(items, "real").map((i) => i.id)).toEqual(["r1"]);
+    expect(forCorpus(items, "real").map((i) => i.id)).toEqual(["d-0000000001"]);
     expect(approvalCounts(items)).toEqual({ owner: 2, agent: 1 });
   });
 });
 
 describe("real-corpus items live in their own gitignored file", () => {
   const docId = "0b9c6a38-1111-4222-8333-444455556666";
-  const real = line({ id: "r1", corpus: "real", expected: [{ document_id: docId }] });
+  const real = line({ id: "d-0000000001", corpus: "real", expected: [{ document_id: docId }] });
   let dir: string;
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "golden-real-"));
@@ -151,7 +164,7 @@ describe("real-corpus items live in their own gitignored file", () => {
 
   it("rejects a real item in the fixtures file, which is committed to a public repository", async () => {
     expect(() => parseGolden(`${ok}\n${real}`, "fixtures")).toThrow(
-      /golden line 2 \(r1\): a corpus "real" item quotes the owner's private documents; it belongs in golden-real\.jsonl \(gitignored\), not in the fixtures file/,
+      /golden line 2 \(d-0000000001\): a corpus "real" item quotes the owner's private documents; it belongs in golden-real\.jsonl \(gitignored\), not in the fixtures file/,
     );
     const path = join(dir, "golden.jsonl");
     await writeFile(path, `${ok}\n${real}\n`);
@@ -173,16 +186,16 @@ describe("real-corpus items live in their own gitignored file", () => {
     await appendGolden(path, [fixture, realItem]);
     expect(await readFile(path, "utf8")).toBe(`${goldenLine(fixture)}\n`);
     expect(await readFile(join(dir, "golden-real.jsonl"), "utf8")).toBe(`${goldenLine(realItem)}\n`);
-    expect((await loadGolden(join(dir, "golden-real.jsonl"))).map((i) => i.id)).toEqual(["r1"]);
+    expect((await loadGolden(join(dir, "golden-real.jsonl"))).map((i) => i.id)).toEqual(["d-0000000001"]);
     // Given the real file's path, items still go by corpus.
     const [second] = parseGolden(ok.replace("q01", "q02"));
     await appendGolden(join(dir, "golden-real.jsonl"), [second]);
     expect((await loadGolden(path)).map((i) => i.id)).toEqual(["q01", "q02"]);
     // A duplicate real id stops the fixtures write too.
     const [third] = parseGolden(ok.replace("q01", "q03"));
-    await expect(appendGolden(path, [third, realItem])).rejects.toThrow(/duplicate id r1/);
+    await expect(appendGolden(path, [third, realItem])).rejects.toThrow(/duplicate id d-0000000001/);
     expect((await loadGolden(path)).map((i) => i.id)).toEqual(["q01", "q02"]);
-    expect((await loadGoldenAll(path)).map((i) => i.id)).toEqual(["q01", "q02", "r1"]);
+    expect((await loadGoldenAll(path)).map((i) => i.id)).toEqual(["q01", "q02", "d-0000000001"]);
   });
 
   it("a missing real file is an empty set", async () => {

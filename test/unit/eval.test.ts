@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning, evalVoyageLine, stageLatencyLine, breakdownLines,
-  goldenForRun, noItemsMessage,
+  goldenForRun, noItemsMessage, acceptRefusal,
 } from "../../src/eval/run.js";
 import { summarize } from "../../src/eval/metrics.js";
 import type { GoldenItem } from "../../src/eval/golden.js";
@@ -147,14 +147,14 @@ describe("source and approver", () => {
 
 describe("goldenForRun: each corpus reads its own file", () => {
   const fixtureLine = JSON.stringify({ ...item, expected: [{ origin: "note--fairness-in-ml.md" }] });
-  const realLine = JSON.stringify({ ...item, id: "r1", corpus: "real", expected: [{ document_id: "0b9c6a38-1111-4222-8333-444455556666" }] });
+  const realLine = JSON.stringify({ ...item, id: "d-0000000001", corpus: "real", expected: [{ document_id: "0b9c6a38-1111-4222-8333-444455556666" }] });
 
   it("reads fixtures items from golden.jsonl and real items from golden-real.jsonl", async () => {
     const dir = await mkdtemp(join(tmpdir(), "run-golden-"));
     await writeFile(join(dir, "golden.jsonl"), `${fixtureLine}\n`);
     await writeFile(join(dir, "golden-real.jsonl"), `${realLine}\n`);
     expect((await goldenForRun(join(dir, "golden.jsonl"), "fixtures")).map((i) => i.id)).toEqual(["q05"]);
-    expect((await goldenForRun(join(dir, "golden-real.jsonl"), "real")).map((i) => i.id)).toEqual(["r1"]);
+    expect((await goldenForRun(join(dir, "golden-real.jsonl"), "real")).map((i) => i.id)).toEqual(["d-0000000001"]);
   });
   it("treats a missing real file as no items, but a missing fixtures file as an error", async () => {
     const dir = await mkdtemp(join(tmpdir(), "run-golden-"));
@@ -177,6 +177,16 @@ describe("goldenForRun: each corpus reads its own file", () => {
       "eval: eval/golden-real.jsonl does not exist, so there are no real items to run (real-corpus items stay on the owner's machine: the file is gitignored)",
     );
     expect(noItemsMessage("/x/golden.jsonl", "fixtures", true)).toBe("eval: no fixtures items in /x/golden.jsonl");
+  });
+});
+
+describe("acceptRefusal", () => {
+  it("refuses to record a baseline from a run with no items, so --corpus real --accept cannot write an empty baseline", () => {
+    expect(acceptRefusal("real", 0, "eval/baseline-real.json")).toBe(
+      "eval: refusing --accept: the run had no real items, so eval/baseline-real.json would record an empty baseline",
+    );
+    expect(acceptRefusal("fixtures", 0, "eval/baseline.json")).toMatch(/no fixtures items/);
+    expect(acceptRefusal("real", 3, "eval/baseline-real.json")).toBeNull();
   });
 });
 

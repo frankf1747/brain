@@ -15,6 +15,11 @@ describe("splitFrontMatter", () => {
     expect(() => splitFrontMatter("---\nauthor: other\n# Title\n\nBody.\n")).toThrow("front matter: the opening --- has no closing --- line");
     expect(() => splitFrontMatter("---\r\nauthor: other\r\nText")).toThrow(/no closing/);
   });
+  it("accepts trailing spaces or tabs after the opening fence, as the no-closing-fence check does", () => {
+    expect(splitFrontMatter("--- \nauthor: other\n---\nText")).toEqual({ author: "other", body: "Text" });
+    expect(splitFrontMatter("---\t\r\nauthor: owner\r\n---\r\nText")).toEqual({ author: "owner", body: "Text" });
+    expect(() => splitFrontMatter("---  \nauthor: other\nText")).toThrow(/no closing/);
+  });
   it("accepts an empty block", () => {
     expect(splitFrontMatter("---\n---\nText")).toEqual({ author: undefined, body: "Text" });
   });

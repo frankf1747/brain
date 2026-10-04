@@ -331,7 +331,7 @@ evalCmd
   .option("--json")
   .action(async (opts) => {
     const { makeEvalCtx, evalDatabaseHint } = await import("./eval/db.js");
-    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine, breakdownLines, noItemsMessage } = await import("./eval/run.js");
+    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine, breakdownLines, noItemsMessage, acceptRefusal } = await import("./eval/run.js");
     const { GOLDEN_FILES } = await import("./eval/golden.js");
     const { existsSync } = await import("node:fs");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
@@ -390,7 +390,11 @@ evalCmd
         }
       }
       if (failures.length) process.exitCode = 1;
-      if (opts.accept) {
+      const refusal = opts.accept ? acceptRefusal(corpus, run.results.length, opts.baseline) : null;
+      if (refusal) {
+        console.error(refusal);
+        process.exitCode = 1;
+      } else if (opts.accept) {
         const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
         await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);

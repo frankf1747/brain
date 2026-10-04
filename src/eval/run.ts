@@ -26,7 +26,7 @@ export function kindFromFilename(name: string): string {
  * author would silently attribute the document to the wrong writer.
  */
 export function splitFrontMatter(text: string): { author: Author | undefined; body: string } {
-  const m = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/.exec(text);
+  const m = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/.exec(text);
   if (!m) {
     if (/^---[ \t]*\r?\n/.test(text)) throw new Error("front matter: the opening --- has no closing --- line");
     return { author: undefined, body: text };
@@ -233,6 +233,15 @@ export async function goldenForRun(goldenPath: string, corpus: Corpus): Promise<
     throw new Error(`${goldenPath} holds ${holds} items (only files named *-real.jsonl hold real items); --corpus ${corpus} reads ${GOLDEN_FILES[corpus]} by default`);
   }
   return corpus === "real" ? loadGolden(goldenPath) : parseGolden(await readFile(goldenPath, "utf8"), "fixtures");
+}
+
+/**
+ * Why `--accept` must not record this run, or null when it may: a run with no items would write an empty baseline
+ * (for --corpus real on a machine without eval/golden-real.jsonl, over the committed eval/baseline-real.json).
+ */
+export function acceptRefusal(corpus: Corpus, items: number, baselinePath: string): string | null {
+  if (items > 0) return null;
+  return `eval: refusing --accept: the run had no ${corpus} items, so ${baselinePath} would record an empty baseline`;
 }
 
 /** Why a run has no items: the corpus's file is missing (expected for real items on a fresh clone) or holds none. */
