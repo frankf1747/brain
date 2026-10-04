@@ -40,6 +40,31 @@ function model(fail: string[] = []) {
   });
 }
 
+
+/** A document whose two level-1 passages split it mid-sentence, as the chunker can at a passage boundary. */
+async function insertSplitDocument(db: typeof sql, origin: string, title: string): Promise<string> {
+  const first = "# Boiler service\n\nThe technician replaced the pressure valve on the boiler and";
+  const second = "said the heat exchanger should last another five winters. The invoice came to $640.";
+  const [doc] = await db<{ id: string }[]>`
+    insert into brain.documents (content_hash, source_kind, title, origin, raw_content)
+    values (${"split-" + origin}, 'note', ${title}, ${origin}, ${first + " " + second}) returning id`;
+  const [section] = await db<{ id: string }[]>`
+    insert into brain.chunks (document_id, level, ordinal, heading_path, content, token_count, char_start, char_end)
+    values (${doc.id}, 0, 0, '{}'::text[], ${first + " " + second}, 40, 0, ${first.length + 1 + second.length}) returning id`;
+  let ordinal = 0;
+  let start = 0;
+  for (const content of [first, second]) {
+    await db`
+      insert into brain.chunks (document_id, parent_id, level, ordinal, heading_path, content, token_count, char_start, char_end)
+      values (${doc.id}, ${section.id}, 1, ${ordinal++}, '{}'::text[], ${content}, 20, ${start}, ${start + content.length})`;
+    start += content.length + 1;
+  }
+  return doc.id;
+}
+/** Quotes that straddle the passage boundary above, and one that sits inside the second passage. */
+const STRADDLING = "replaced the pressure valve on the boiler and said the heat exchanger should last";
+const INSIDE = "the heat exchanger should last another five winters";
+
 let dir: string;
 let paths: { goldenPath: string; draftsPath: string; reviewDir: string };
 const now = new Date("2026-10-03T12:00:00Z");
@@ -197,5 +222,57 @@ describe("real-corpus drafts (the repository is public)", () => {
     );
     expect(await readFile(paths.draftsPath, "utf8")).toBe(draftsBefore);
     expect(await loadGolden(paths.goldenPath)).toHaveLength(1);
+  });
+});
+
+describe("a quote must sit inside one passage, as eval run matches quotes per passage", () => {
+  const boilerModel = (quote: string) =>
+    new FakeLlm(({ user }) => {
+      if (!user.includes("title: Boiler service")) throw new Error("only the boiler note");
+      return {
+        questions: [{ kind: "semantic", question: "How long will the boiler keep working?", quote, paraphrases: ["boiler lifespan", "How many more winters for the boiler?"] }],
+        negative: { question: "Which company did the boiler technician work for?" },
+      } satisfies DraftOutput;
+    });
+
+  it("draftDocuments drops a draft whose quote straddles two level-1 passages", async () => {
+    await insertSplitDocument(sql, "eval/corpus/note--boiler-service.md", "Boiler service");
+    const r = await draftDocuments({ ...fakeCtx(sql), llm: boilerModel(STRADDLING) }, { corpus: "fixtures", ...paths, now, docs: ["note--boiler-service.md"] });
+    expect(r.rejected).toEqual([
+      { document: "note--boiler-service.md", question: "How long will the boiler keep working?", reasons: ["quote spans a passage boundary; pick a quote inside one passage"] },
+    ]);
+    expect(r.written.map((d) => d.kind)).toEqual(["negative"]);
+  });
+
+  it("approveSheetFile refuses an edit that moves the quote across a passage boundary", async () => {
+    await insertSplitDocument(sql, "eval/corpus/note--boiler-service.md", "Boiler service");
+    const r = await draftDocuments({ ...fakeCtx(sql), llm: boilerModel(INSIDE) }, { corpus: "fixtures", ...paths, now, docs: ["note--boiler-service.md"] });
+    const q = r.written.find((d) => d.kind === "semantic")!;
+    const text = (await readFile(r.sheet!, "utf8"))
+      .replace(new RegExp(`(## ${q.draft_id}\\n\\n[^\\n]*\\n)decision:`), "$1decision: edit")
+      .replace(`quote: ${INSIDE}`, `quote: ${STRADDLING}`);
+    await writeFile(r.sheet!, text);
+    await expect(approveSheetFile(r.sheet!, { ...paths, sql: () => sql })).rejects.toThrow(
+      `${q.draft_id} (line 14): quote spans a passage boundary; pick a quote inside one passage`,
+    );
+    expect(await loadGolden(paths.goldenPath)).toHaveLength(1);
+  });
+});
+
+describe("approveSheetFile after a failed drafts write", () => {
+  it("drops pending drafts that are already golden and reports them as already applied", async () => {
+    const r = await draftDocuments({ ...fakeCtx(sql), llm: model() }, { corpus: "fixtures", ...paths, now });
+    const keyword = r.written.find((d) => d.kind === "keyword")!;
+    const text = (await readFile(r.sheet!, "utf8")).replace(new RegExp(`(## ${keyword.draft_id}\\n\\n[^\\n]*\\n)decision:`), "$1decision: keep");
+    await writeFile(r.sheet!, text);
+    const draftsBefore = await readFile(paths.draftsPath, "utf8");
+    await approveSheetFile(r.sheet!, { ...paths, sql: () => sql, today: "2026-10-04" });
+    // Simulate the crash: the golden item was appended, but drafts.jsonl was never rewritten.
+    await writeFile(paths.draftsPath, draftsBefore);
+    const again = await approveSheetFile(r.sheet!, { ...paths, sql: () => sql, today: "2026-10-04" });
+    expect(again.approved).toEqual([]);
+    expect(again.alreadyApplied).toEqual([keyword.draft_id]);
+    expect((await loadDrafts(paths.draftsPath)).map((d) => d.draft_id)).not.toContain(keyword.draft_id);
+    expect((await loadGolden(paths.goldenPath)).filter((g) => g.id === keyword.draft_id)).toHaveLength(1);
   });
 });

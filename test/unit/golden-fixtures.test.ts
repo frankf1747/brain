@@ -39,7 +39,7 @@ describe("eval/golden.jsonl against eval/corpus", () => {
   });
   it("keeps real-corpus items, drafts and review sheets out of git, since the repository is public", async () => {
     const ignored = (await readFile(".gitignore", "utf8")).split("\n").map((l) => l.trim());
-    expect(ignored).toEqual(expect.arrayContaining(["eval/golden-real.jsonl", "eval/drafts-real.jsonl", "eval/review/real/", "eval/**/*-real.jsonl"]));
+    expect(ignored).toEqual(expect.arrayContaining(["eval/golden-real.jsonl", "eval/drafts-real.jsonl", "eval/review/real/", "eval/**/*-real.jsonl", "eval/**/real/"]));
   });
   it("git ignores every private path and none of the committed eval files", () => {
     const ignored = (path: string) => spawnSync("git", ["check-ignore", "-q", "--no-index", path]).status === 0;
@@ -47,6 +47,8 @@ describe("eval/golden.jsonl against eval/corpus", () => {
       "eval/golden-real.jsonl", "eval/drafts-real.jsonl", "eval/review/real/2026-10-03-1.md", "eval/review/real/x/y.md",
       // Any renamed real-corpus file (eval/**/*-real.jsonl), e.g. from --golden or --drafts.
       "eval/golden-v2-real.jsonl", "eval/drafts-x-real.jsonl", "eval/tmp/sub/golden-real.jsonl",
+      // Any real/ directory under eval/, e.g. from --review-dir.
+      "eval/review-x/real/a.md", "eval/foo/real/b.md",
     ]) {
       expect([p, ignored(p)]).toEqual([p, true]);
     }

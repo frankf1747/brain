@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   DraftOutputSchema, DUPLICATE_STEM_JACCARD, MAX_DRAFT_CHARS, normalizeQuestion, draftId, docKey, stemJaccard, duplicateOf, quoteInDocument,
   questionContainsQuote, toGoldenItem, draftProblems, draftUserMessage, nextSheetPath, loadDrafts, saveDrafts, draftsFileFor, reviewDirFor, sheetCorpus,
+  quoteInPassage, QUOTE_SPANS_PASSAGES,
   type Draft, type CorpusDocument,
 } from "../../src/eval/draft.js";
 import { validateGoldenItem } from "../../src/eval/golden.js";
@@ -170,5 +171,36 @@ describe("real-corpus drafts and sheets stay in the gitignored paths", () => {
     await writeFile(join(dir, "drafts-real.jsonl"), JSON.stringify(draft()) + "\n");
     await expect(loadDrafts(join(dir, "drafts-real.jsonl"))).rejects.toThrow("drafts line 1: d-0123456789 is a fixtures draft; it belongs in drafts.jsonl");
     await expect(saveDrafts(join(dir, "drafts.jsonl"), [draft({ corpus: "real" })])).rejects.toThrow(/belong in drafts-real\.jsonl/);
+  });
+});
+
+describe("real-corpus paths must stay where git ignores them", () => {
+  it("refuses a real drafts file or review directory inside the repository but outside eval/", () => {
+    expect(() => draftsFileFor("data/drafts.jsonl", "real")).toThrow(
+      "the real corpus's drafts file data/drafts-real.jsonl is inside the repository but outside eval/, where git would not ignore it; keep it under eval/ or outside the repository",
+    );
+    expect(() => reviewDirFor("docs/review", "real")).toThrow(/the real corpus's review directory docs\/review\/real is inside the repository but outside eval\//);
+    expect(() => reviewDirFor("./review", "real")).toThrow(/outside eval\//);
+    // Fixtures paths are not private; eval/ subpaths and paths outside the repository (temporary directories) are fine.
+    expect(draftsFileFor("data/drafts.jsonl", "fixtures")).toBe("data/drafts.jsonl");
+    expect(draftsFileFor("eval/x/drafts.jsonl", "real")).toBe("eval/x/drafts-real.jsonl");
+    expect(reviewDirFor("eval/review-x", "real")).toBe(join("eval/review-x", "real"));
+    expect(reviewDirFor(join(tmpdir(), "r"), "real")).toBe(join(tmpdir(), "r", "real"));
+  });
+});
+
+describe("quote inside one passage", () => {
+  const passages = ["## Compensation and visa\n\nBase salary range $115,000", "to $140,000. Acme sponsors H-1B for this role.\nHybrid, three days"];
+  it("finds a quote only when one level-1 passage holds all of it, whitespace normalised as the eval does", () => {
+    expect(quoteInPassage("Acme sponsors   H-1B for this role.", passages)).toBe(true);
+    expect(quoteInPassage("Base salary range $115,000 to $140,000.", passages)).toBe(false);
+  });
+  it("draftProblems names a quote that crosses a passage boundary, since eval run matches quotes per passage", () => {
+    const ok = { documentText: TEXT, others: [], stems };
+    expect(draftProblems(draft(), { ...ok, passages })).toEqual([QUOTE_SPANS_PASSAGES]);
+    expect(QUOTE_SPANS_PASSAGES).toBe("quote spans a passage boundary; pick a quote inside one passage");
+    expect(draftProblems(draft({ quote: "Acme sponsors H-1B for this role." , question: "Does Acme sponsor visas?" }), { ...ok, passages })).toEqual([]);
+    // Without passages (not looked up) only the whole-document check runs.
+    expect(draftProblems(draft(), ok)).toEqual([]);
   });
 });

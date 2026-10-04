@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile, appendFile, mkdir, readdir } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Ctx } from "../ctx.js";
 import type { Db } from "../db.js";
@@ -149,6 +149,26 @@ export interface CheckContext {
   /** Golden items and other drafts the question must not duplicate (the draft itself excluded). */
   others: { id: string; question: string }[];
   stems: StemMap;
+  /**
+   * The document's level-1 passages (the unit search returns and eval run matches quotes against), or undefined when
+   * they were not looked up; then only the whole-document quote check runs.
+   */
+  passages?: string[];
+}
+
+/** The reason given for a quote found in the document but in no single passage. */
+export const QUOTE_SPANS_PASSAGES = "quote spans a passage boundary; pick a quote inside one passage";
+
+/** Whether one passage holds the whole quote, both whitespace-normalised as eval run's quote matching does. */
+export function quoteInPassage(quote: string, passages: string[]): boolean {
+  const q = squash(quote);
+  return q.length > 0 && passages.some((p) => normalizeWhitespace(p).includes(q));
+}
+
+/** A document's level-1 passages, in order. Read-only. */
+export async function levelOnePassages(sql: Db, documentId: string): Promise<string[]> {
+  const rows = await sql<{ content: string }[]>`select content from brain.chunks where document_id = ${documentId} and level = 1 order by ordinal`;
+  return rows.map((r) => r.content);
 }
 
 /**
@@ -165,6 +185,7 @@ export function draftProblems(d: Draft, c: CheckContext): string[] {
     if (!d.quote) out.push("a question needs a quote");
     else {
       if (c.documentText !== null && !quoteInDocument(d.quote, c.documentText)) out.push("the quote is not in the document verbatim");
+      else if (c.documentText !== null && c.passages !== undefined && !quoteInPassage(d.quote, c.passages)) out.push(QUOTE_SPANS_PASSAGES);
       if (questionContainsQuote(d.question, d.quote)) out.push("the question contains its own answer quote");
     }
     if (d.paraphrases.length !== 2) out.push("a question needs exactly two paraphrases");
@@ -182,12 +203,30 @@ export function draftProblems(d: Draft, c: CheckContext): string[] {
  * real base, whose drafts quote the owner's private documents. Either name of the pair may be given.
  */
 export function draftsFileFor(draftsPath: string, corpus: Corpus): string {
-  return goldenFileFor(draftsPath, corpus);
+  const file = goldenFileFor(draftsPath, corpus);
+  if (corpus === "real") assertIgnoredLocation(file, "drafts file");
+  return file;
 }
 
 /** Where a corpus's review sheets go: eval/review/ for fixtures, eval/review/real/ (gitignored) for the real base. */
 export function reviewDirFor(reviewDir: string, corpus: Corpus): string {
-  return corpus === "real" ? join(reviewDir, "real") : reviewDir;
+  if (corpus !== "real") return reviewDir;
+  const dir = join(reviewDir, "real");
+  assertIgnoredLocation(dir, "review directory");
+  return dir;
+}
+
+/**
+ * Real drafts and sheets quote the owner's private documents. .gitignore covers eval/<any>/*-real.jsonl and eval/<any>/real/,
+ * so a real path must lie under eval/ or outside the repository (the working directory, where the CLI runs), such as a
+ * temporary directory; anywhere else in the repository git would offer to commit it.
+ */
+function assertIgnoredLocation(path: string, what: string): void {
+  const rel = relative(process.cwd(), resolve(path));
+  const outside = rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel);
+  if (!outside && !rel.startsWith("eval" + sep)) {
+    throw new Error(`the real corpus's ${what} ${path} is inside the repository but outside eval/, where git would not ignore it; keep it under eval/ or outside the repository`);
+  }
 }
 
 /** The corpus a review sheet belongs to, from where it is: a sheet in a directory named real is a real sheet. */
@@ -409,8 +448,9 @@ export async function draftDocuments(ctx: Ctx, opts: DraftRunOptions): Promise<D
       sheet,
     }));
     const stems = await stemAll(ctx.sql, [...candidates.map((c) => c.question), ...others.map((o) => o.question)]);
+    const passages = await levelOnePassages(ctx.sql, doc.id);
     for (const c of candidates) {
-      const reasons = draftProblems(c, { documentText: doc.raw_content, others, stems });
+      const reasons = draftProblems(c, { documentText: doc.raw_content, others, stems, passages });
       if (reasons.length) {
         result.rejected.push({ document: name, question: c.question, reasons });
         continue;

@@ -4,7 +4,7 @@ import { UUID } from "../retrieve/documents.js";
 import { LoggedPassageSchema } from "../retrieve/contract.js";
 import { stemAll } from "../verify/terms.js";
 import { appendGolden, loadGoldenAll, validateGoldenItem, type Corpus, type GoldenItem, type GoldenKind } from "./golden.js";
-import { duplicateOf, quoteInDocument } from "./draft.js";
+import { duplicateOf, quoteInDocument, quoteInPassage, levelOnePassages, QUOTE_SPANS_PASSAGES } from "./draft.js";
 
 /**
  * Golden items from real questions (spec §8.3). `brain eval capture` lists recent searches from a retrieval log;
@@ -137,6 +137,8 @@ export async function labelCaptured(logSql: Db, evalSql: Db, opts: LabelOptions)
     if (docs.length > 1) throw new Error(`${want} matches ${docs.length} documents in the eval database; pass a document id`);
     const doc = docs[0];
     if (opts.quote !== undefined && !quoteInDocument(opts.quote, doc.raw_content)) throw new Error(`the quote is not in document ${doc.id} verbatim (whitespace may differ, nothing else)`);
+    // eval run matches quotes per level-1 passage, so a quote across a passage boundary would never count as found.
+    if (opts.quote !== undefined && !quoteInPassage(opts.quote, await levelOnePassages(evalSql, doc.id))) throw new Error(`document ${doc.id}: ${QUOTE_SPANS_PASSAGES}`);
     const name = opts.corpus === "fixtures" && doc.origin ? { origin: basename(doc.origin) } : { document_id: doc.id };
     expected.push({ ...name, ...(opts.quote !== undefined ? { quote: opts.quote } : {}) });
   }

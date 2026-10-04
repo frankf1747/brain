@@ -132,6 +132,15 @@ describe("applySheet", () => {
     expect(() => applySheet(parseSheet(kind), ctx())).toThrow(/kind must be one of keyword, semantic, graph, filter, attribution; got "fallback"/);
     expect(() => applySheet(parseSheet(decide(renderSheet([keyword], info), "keep")), ctx({ drafts: [] }))).toThrow(/d-0123456789 \(line 14\): no pending draft has this id/);
   });
+  it("recovers when an earlier approve wrote the golden item but not the drafts file: the stale draft counts as already applied and is dropped", () => {
+    const text = decide(renderSheet(drafts, info), "keep", "", "reject");
+    const first = applySheet(parseSheet(text), ctx());
+    const golden = parseGolden(first.approved.map((a) => JSON.stringify(a)).join("\n"));
+    // drafts.jsonl was never rewritten: it still lists all three drafts, one of which is already golden.
+    const again = applySheet(parseSheet(text), ctx({ drafts, golden }));
+    expect(again).toMatchObject({ approved: [], rejected: ["d-2222222222"], alreadyApplied: ["d-0123456789"], undecided: ["d-1111111111"] });
+    expect(again.remaining.map((d) => d.draft_id)).toEqual(["d-1111111111"]);
+  });
   it("records edited false for an edit that changed nothing", () => {
     const r = applySheet(parseSheet(decide(renderSheet([keyword], info), "edit")), ctx({ drafts: [keyword] }));
     expect(r.approved[0].edited).toBe(false);

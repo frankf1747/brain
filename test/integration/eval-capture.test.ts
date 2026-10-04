@@ -139,3 +139,29 @@ describe("brain eval capture and label (CLI)", () => {
     expect(r.stderr).toMatch(/Refusing to run the eval against ".*": the database name must end in _eval/);
   });
 });
+
+describe("labelCaptured and passage boundaries", () => {
+  it("refuses a quote that straddles two level-1 passages, as eval run would never match it", async () => {
+    const first = "# Boiler service\n\nThe technician replaced the pressure valve on the boiler and";
+    const second = "said the heat exchanger should last another five winters.";
+    const [doc] = await sql<{ id: string }[]>`
+      insert into brain.documents (content_hash, source_kind, title, origin, raw_content)
+      values ('split-boiler', 'note', 'Boiler service', 'eval/corpus/note--boiler-service.md', ${first + " " + second}) returning id`;
+    const [section] = await sql<{ id: string }[]>`
+      insert into brain.chunks (document_id, level, ordinal, heading_path, content, token_count, char_start, char_end)
+      values (${doc.id}, 0, 0, '{}'::text[], ${first + " " + second}, 30, 0, 100) returning id`;
+    let ordinal = 0;
+    for (const content of [first, second]) {
+      await sql`
+        insert into brain.chunks (document_id, parent_id, level, ordinal, heading_path, content, token_count, char_start, char_end)
+        values (${doc.id}, ${section.id}, 1, ${ordinal++}, '{}'::text[], ${content}, 15, 0, 50)`;
+    }
+    const [row] = await sql<{ id: string }[]>`insert into brain.retrieval_log (query, client) values ('how long will the boiler last', 'mcp-stdio') returning id`;
+    await expect(labelCaptured(log, sql, { retrievalId: row.id, expect: doc.id, quote: "on the boiler and said the heat exchanger", corpus: "real", goldenPath })).rejects.toThrow(
+      "quote spans a passage boundary; pick a quote inside one passage",
+    );
+    expect(await loadGoldenAll(goldenPath)).toEqual([]);
+    const ok = await labelCaptured(log, sql, { retrievalId: row.id, expect: doc.id, quote: "the heat exchanger should last another five winters", corpus: "real", goldenPath });
+    expect(ok.expected).toEqual([{ document_id: doc.id, quote: "the heat exchanger should last another five winters" }]);
+  });
+});

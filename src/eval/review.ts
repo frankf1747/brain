@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import type { Db } from "../db.js";
 import { stemAll, type StemMap } from "../verify/terms.js";
 import { appendGolden, loadGoldenAll, type Corpus, type GoldenItem, type GoldenKind } from "./golden.js";
-import { DRAFT_KINDS, draftProblems, loadDrafts, saveDrafts, toGoldenItem, draftsFileFor, sheetCorpus, type Draft } from "./draft.js";
+import { DRAFT_KINDS, draftProblems, loadDrafts, saveDrafts, toGoldenItem, draftsFileFor, sheetCorpus, levelOnePassages, type Draft } from "./draft.js";
 
 /**
  * The review sheet: a Markdown file the owner edits in a plain text editor or Obsidian to keep, edit or reject each
@@ -145,6 +145,8 @@ export interface ApplyContext {
   golden: GoldenItem[];
   /** Full text of a draft's document in its eval database, or null when it is not there. */
   documentText: (d: Draft) => string | null;
+  /** The level-1 passages of a draft's document, for the one-passage quote check; omitted, only the whole text is checked. */
+  passages?: (d: Draft) => string[] | undefined;
   stems: StemMap;
   /** YYYY-MM-DD. */
   today: string;
@@ -185,14 +187,17 @@ function changedFields(d: Draft, s: SheetItem): string[] {
  */
 export function applySheet(items: SheetItem[], c: ApplyContext): ApplyResult {
   const errors: string[] = [];
-  const byId = new Map(c.drafts.map((d) => [d.draft_id, d]));
   const goldenIds = new Set(c.golden.map((g) => g.id));
+  // A pending draft whose id is already golden was applied by an earlier run that stopped before rewriting the drafts
+  // file (appendGolden, then saveDrafts); it is already applied, and dropped from the drafts that remain.
+  const pending = c.drafts.filter((d) => !goldenIds.has(d.draft_id));
+  const byId = new Map(pending.map((d) => [d.draft_id, d]));
   const result: ApplyResult = { approved: [], rejected: [], undecided: [], alreadyApplied: [], remaining: [] };
   const others = [...c.golden.map((g) => ({ id: g.id, question: g.question }))];
   for (const s of items) {
     const d = byId.get(s.draftId);
     if (!d) {
-      if (s.decision !== null && (goldenIds.has(s.draftId) || s.decision === "reject")) result.alreadyApplied.push(s.draftId);
+      if (goldenIds.has(s.draftId) || (s.decision === "reject")) result.alreadyApplied.push(s.draftId);
       else if (s.decision === null) result.undecided.push(s.draftId);
       else errors.push(`${s.draftId} (line ${s.line}): no pending draft has this id`);
       continue;
@@ -221,7 +226,7 @@ export function applySheet(items: SheetItem[], c: ApplyContext): ApplyResult {
     }
     const next = edited(d, s);
     // Against the golden set and the items approved above; pending drafts were compared with each other when drafted.
-    const problems = draftProblems(next, { documentText: c.documentText(d), others, stems: c.stems });
+    const problems = draftProblems(next, { documentText: c.documentText(d), others, stems: c.stems, passages: c.passages?.(d) });
     if (problems.length) {
       errors.push(`${s.draftId} (line ${s.line}): ${problems.join("; ")}`);
       continue;
@@ -236,7 +241,7 @@ export function applySheet(items: SheetItem[], c: ApplyContext): ApplyResult {
   }
   if (errors.length) throw new Error(`nothing applied; fix the sheet and run approve again:\n${errors.map((e) => `  ${e}`).join("\n")}`);
   const gone = new Set([...result.approved.map((a) => a.id), ...result.rejected]);
-  result.remaining = c.drafts.filter((d) => !gone.has(d.draft_id));
+  result.remaining = pending.filter((d) => !gone.has(d.draft_id));
   return result;
 }
 
@@ -277,10 +282,12 @@ export async function approveSheetFile(sheetPath: string, opts: ApproveOptions):
   const draftsPath = draftsFileFor(opts.draftsPath, corpus);
   const drafts = pending[corpus];
   const golden = await loadGoldenAll(opts.goldenPath);
-  const byId = new Map(drafts.map((d) => [d.draft_id, d]));
+  const goldenIds = new Set(golden.map((g) => g.id));
+  const byId = new Map(drafts.filter((d) => !goldenIds.has(d.draft_id)).map((d) => [d.draft_id, d]));
   const toCheck = items.filter((s) => s.decision === "keep" || s.decision === "edit").map((s) => byId.get(s.draftId)).filter((d): d is Draft => !!d);
   const corpora = [...new Set(toCheck.map((d) => d.corpus))];
   const texts = new Map<string, string>();
+  const passages = new Map<string, string[]>();
   let stems: StemMap = new Map();
   if (corpora.length === 1) {
     const sql = await opts.sql(corpora[0]);
@@ -291,6 +298,9 @@ export async function approveSheetFile(sheetPath: string, opts: ApproveOptions):
     for (const r of rows) {
       texts.set(r.id, r.raw_content);
       if (r.origin) texts.set(`origin:${r.origin}`, r.raw_content);
+      const ps = await levelOnePassages(sql, r.id);
+      passages.set(r.id, ps);
+      if (r.origin) passages.set(`origin:${r.origin}`, ps);
     }
     stems = await stemAll(sql, questionsToStem(items, drafts, golden));
   }
@@ -298,6 +308,7 @@ export async function approveSheetFile(sheetPath: string, opts: ApproveOptions):
     drafts,
     golden,
     documentText: (d) => texts.get(d.document.id) ?? (d.document.origin ? texts.get(`origin:${d.document.origin}`) : undefined) ?? null,
+    passages: (d) => passages.get(d.document.id) ?? (d.document.origin ? passages.get(`origin:${d.document.origin}`) : undefined),
     stems,
     today: opts.today ?? new Date().toISOString().slice(0, 10),
   });

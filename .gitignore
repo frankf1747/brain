@@ -10,3 +10,5 @@ eval/drafts-real.jsonl
 eval/review/real/
 # Any renamed real-corpus file (--golden or --drafts pointing elsewhere): <name>-real.jsonl anywhere under eval/.
 eval/**/*-real.jsonl
+# Any real/ directory under eval/ (a --review-dir pointing elsewhere puts real sheets in <dir>/real/).
+eval/**/real/
