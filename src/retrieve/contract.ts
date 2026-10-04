@@ -140,6 +140,14 @@ export const SearchResultSchema = z.object({
   timings: TimingsSchema,
 });
 
+/**
+ * brain_search's structuredContent: the result with each passage's text left out, since the text content already
+ * carries it. Measured on a synthetic worst case (k=30 plus 25 graph passages of 1,600 characters,
+ * test/unit/search-output-size.test.ts), sending the full result made the text plus structuredContent about 235 KB;
+ * without passage text it is about 146 KB, of which the text is about 106 KB.
+ */
+export const SearchOutputSchema = SearchResultSchema.extend({ passages: z.array(LoggedPassageSchema) });
+
 export type Layer = z.infer<typeof LayerSchema>;
 export type ScoreKind = z.infer<typeof ScoreKindSchema>;
 export type SearchMode = z.infer<typeof SearchModeSchema>;
@@ -153,6 +161,7 @@ export type Degraded = z.infer<typeof DegradedSchema>;
 export type Candidates = z.infer<typeof CandidatesSchema>;
 export type Timings = z.infer<typeof TimingsSchema>;
 export type SearchResult = z.infer<typeof SearchResultSchema>;
+export type SearchOutput = z.infer<typeof SearchOutputSchema>;
 
 export const NOT_DEGRADED: Degraded = { embedding: false, rerank: false, capReached: false };
 
@@ -186,6 +195,11 @@ export function isHybrid(p: Pick<Passage, "layers">): boolean {
 /** What retrieval_log.results stores: each passage without its text, in rank order (index 0 is P1). */
 export function toLoggedPassages(passages: Passage[]): LoggedPassage[] {
   return passages.map(({ content: _content, ...rest }) => rest);
+}
+
+/** What brain_search returns as structuredContent: the result without passage text (SearchOutputSchema). */
+export function toSearchOutput(r: SearchResult): SearchOutput {
+  return { ...r, passages: toLoggedPassages(r.passages) };
 }
 
 export type FactSource =
