@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" aria-labelledby="title desc">
+  <title id="title">How a brain search runs and how it is audited</title>
+  <desc id="desc">A query goes through five layers: hybrid passages (vector and keyword candidates fused with reciprocal rank fusion, then reranked), document summaries, graph expansion from named entities, facts about the owner, and a literal scan when the best hit is weak. Their output becomes one evidence contract, which is rendered for the client and logged to brain.retrieval_log. brain_explain replays the log; brain_verify checks an answer's claims against the cited passages and facts and logs to brain.verification_log.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .box { fill: #f6f7f9; stroke: #5b6472; stroke-width: 1.2; }
+    .key { fill: #eaf1fb; stroke: #2f5d9a; stroke-width: 1.4; }
+    .log { fill: #fbf3e6; stroke: #9a6a1f; stroke-width: 1.2; }
+    .t { font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1d2430; }
+    .s { font: 12px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #4a5361; }
+    .h { font: 600 12px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #5b6472; letter-spacing: 0.06em; }
+    .a { stroke: #5b6472; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+    .d { stroke: #9a6a1f; stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; marker-end: url(#arrow-log); }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #14181f; }
+      .box { fill: #1e242d; stroke: #8b95a5; }
+      .key { fill: #19283d; stroke: #7aa7e0; }
+      .log { fill: #2b2216; stroke: #d0a25a; }
+      .t { fill: #e8ecf2; }
+      .s, .h { fill: #b3bcc9; }
+      .a { stroke: #8b95a5; }
+      .d { stroke: #d0a25a; }
+      #arrow path { fill: #8b95a5; }
+      #arrow-log path { fill: #d0a25a; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+    </marker>
+    <marker id="arrow-log" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9a6a1f"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="560"/>
+
+  <!-- Query -->
+  <rect class="key" x="24" y="250" width="120" height="64" rx="8"/>
+  <text class="t" x="84" y="278" text-anchor="middle">Query</text>
+  <text class="s" x="84" y="297" text-anchor="middle">plain words</text>
+
+  <!-- Layers column -->
+  <text class="h" x="180" y="36">FIVE LAYERS</text>
+
+  <rect class="box" x="180" y="48" width="132" height="44" rx="6"/>
+  <text class="t" x="246" y="68" text-anchor="middle">Vector</text>
+  <text class="s" x="246" y="84" text-anchor="middle">HNSW index</text>
+
+  <rect class="box" x="180" y="104" width="132" height="44" rx="6"/>
+  <text class="t" x="246" y="124" text-anchor="middle">Keyword</text>
+  <text class="s" x="246" y="140" text-anchor="middle">GIN, OR of stems</text>
+
+  <rect class="box" x="340" y="76" width="118" height="44" rx="6"/>
+  <text class="t" x="399" y="96" text-anchor="middle">RRF fusion</text>
+  <text class="s" x="399" y="112" text-anchor="middle">k = 60</text>
+
+  <rect class="box" x="486" y="76" width="118" height="44" rx="6"/>
+  <text class="t" x="545" y="96" text-anchor="middle">Rerank</text>
+  <text class="s" x="545" y="112" text-anchor="middle">Voyage, 0 to 1</text>
+  <text class="s" x="180" y="168">1. Hybrid passages: 60 candidates per branch, fused, reranked</text>
+
+  <rect class="box" x="180" y="186" width="424" height="44" rx="6"/>
+  <text class="t" x="392" y="206" text-anchor="middle">2. Document summaries</text>
+  <text class="s" x="392" y="222" text-anchor="middle">vector and keyword over each document's summary, fused</text>
+
+  <rect class="box" x="180" y="244" width="424" height="44" rx="6"/>
+  <text class="t" x="392" y="264" text-anchor="middle">3. Graph expansion</text>
+  <text class="s" x="392" y="280" text-anchor="middle">entities named in the query: neighbours, up to 5 passages each</text>
+
+  <rect class="box" x="180" y="302" width="424" height="44" rx="6"/>
+  <text class="t" x="392" y="322" text-anchor="middle">4. Facts about the owner</text>
+  <text class="s" x="392" y="338" text-anchor="middle">sharing a query term or linked to a named entity, at most 10</text>
+
+  <rect class="box" x="180" y="360" width="424" height="44" rx="6"/>
+  <text class="t" x="392" y="380" text-anchor="middle">5. Literal scan (fallback)</text>
+  <text class="s" x="392" y="396" text-anchor="middle">exact codes and figures, when the best score is under 0.3 or degraded</text>
+
+  <path class="a" d="M144,270 C162,270 162,70 178,70"/>
+  <path class="a" d="M144,276 C164,276 164,126 178,126"/>
+  <path class="a" d="M144,282 L178,208"/>
+  <path class="a" d="M144,282 L178,266"/>
+  <path class="a" d="M144,286 L178,324"/>
+  <path class="a" d="M144,292 C162,292 162,382 178,382"/>
+  <path class="a" d="M312,70 L338,94"/>
+  <path class="a" d="M312,126 L338,104"/>
+  <path class="a" d="M458,98 L484,98"/>
+
+  <!-- Evidence contract -->
+  <rect class="key" x="648" y="176" width="288" height="138" rx="8"/>
+  <text class="t" x="792" y="202" text-anchor="middle">Evidence contract</text>
+  <text class="s" x="664" y="226">retrieval id, mode, degraded flags</text>
+  <text class="s" x="664" y="246">per passage: score and kind, layers,</text>
+  <text class="s" x="664" y="264">vector, keyword and rerank ranks, author</text>
+  <text class="s" x="664" y="284">facts with source and verification</text>
+  <text class="s" x="664" y="302">candidates and stage timings</text>
+  <path class="a" d="M604,98 C628,98 628,200 646,206"/>
+  <path class="a" d="M604,208 L646,226"/>
+  <path class="a" d="M604,266 L646,250"/>
+  <path class="a" d="M604,324 L646,282"/>
+  <path class="a" d="M604,382 C628,382 628,300 646,300"/>
+
+  <!-- Outputs -->
+  <rect class="box" x="648" y="48" width="288" height="72" rx="8"/>
+  <text class="t" x="792" y="74" text-anchor="middle">brain_search result</text>
+  <text class="s" x="792" y="94" text-anchor="middle">[P1] lines with provenance, [F1] facts;</text>
+  <text class="s" x="792" y="110" text-anchor="middle">structuredContent without passage text</text>
+  <path class="a" d="M792,176 L792,122"/>
+
+  <rect class="log" x="648" y="360" width="288" height="56" rx="8"/>
+  <text class="t" x="792" y="384" text-anchor="middle">brain.retrieval_log</text>
+  <text class="s" x="792" y="402" text-anchor="middle">every search, passages without text</text>
+  <path class="d" d="M792,314 L792,358"/>
+
+  <rect class="box" x="648" y="448" width="288" height="56" rx="8"/>
+  <text class="t" x="792" y="472" text-anchor="middle">brain_explain</text>
+  <text class="s" x="792" y="490" text-anchor="middle">replays a search from the log, no new search</text>
+  <path class="a" d="M792,416 L792,446"/>
+
+  <!-- Answer path -->
+  <rect class="box" x="980" y="48" width="196" height="72" rx="8"/>
+  <text class="t" x="1078" y="74" text-anchor="middle">Client's answer</text>
+  <text class="s" x="1078" y="94" text-anchor="middle">claims citing [P#] and [F#]</text>
+  <text class="s" x="1078" y="110" text-anchor="middle">plus the retrieval id</text>
+  <path class="a" d="M936,84 L978,84"/>
+
+  <rect class="box" x="980" y="176" width="196" height="72" rx="8"/>
+  <text class="t" x="1078" y="202" text-anchor="middle">brain_verify</text>
+  <text class="s" x="1078" y="222" text-anchor="middle">each claim against the passages</text>
+  <text class="s" x="1078" y="238" text-anchor="middle">and facts it cites, no model</text>
+  <path class="a" d="M1078,120 L1078,174"/>
+  <path class="a" d="M936,380 C964,380 964,230 978,226"/>
+  <text class="s" x="948" y="300" transform="rotate(-90 948 300)" text-anchor="middle">resolves P and F labels</text>
+
+  <rect class="log" x="980" y="292" width="196" height="56" rx="8"/>
+  <text class="t" x="1078" y="316" text-anchor="middle">brain.verification_log</text>
+  <text class="s" x="1078" y="334" text-anchor="middle">every verdict with its evidence</text>
+  <path class="d" d="M1078,248 L1078,290"/>
+
+  <rect class="box" x="980" y="392" width="196" height="72" rx="8"/>
+  <text class="t" x="1078" y="418" text-anchor="middle">Verdicts</text>
+  <text class="s" x="1078" y="438" text-anchor="middle">supported, partial, unsupported,</text>
+  <text class="s" x="1078" y="454" text-anchor="middle">uncited, bad citation</text>
+  <path class="a" d="M1150,248 C1190,300 1190,360 1150,390"/>
+
+  <text class="s" x="24" y="524">No model call to rank or to verify: ranking is Postgres and Voyage (under a daily token cap), verification is Postgres stemming plus rules.</text>
+  <text class="s" x="24" y="544">Solid arrows: data flow. Dashed: written to an audit table.</text>
+</svg>

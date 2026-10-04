@@ -118,3 +118,13 @@ baseline    retrieval   authorship   spend cap   evidence    verifier    eval pr
 ```
 
 Phases 2 and 3 do not depend on each other and could be swapped; Phase 4 depends on 3 (the `capReached` flag) and Phase 5 on 4 (labels resolved through the v2 log). Phase 6 depends on 2, 3 and 5 for its metrics.
+
+---
+
+## After Phase 6: next work
+
+Measured on the Phase 6 baseline (`eval/baseline.json`, 104 fixture items, recorded 2026-10-04):
+
+1. **Calibrate abstention.** On the 17 negative items the abstention rate is 0.06 and the false-answer rate 0.94: the top passage almost always reranks at 0.3 or more even when nothing answers the question. The 0.3 threshold was recorded, not tuned, so as not to fit it to the test set. Split the negatives and positives into a calibration part and a held-out part; either choose the threshold on the calibration part, or add a calibrated no-answer signal (for example from the gap between the top rerank scores, or the share of query terms the top passage matches); then report abstention and false answers on the held-out part only. Grow the negatives first: 17 cannot be split into two useful halves.
+2. **Graph questions.** Graph items have MRR 0.80 (n=11, recall@1 0.58, recall@5 0.97): the right document is reached but usually not ranked first. Look at how graph passages are placed relative to ranked ones before changing any weight.
+3. **Re-run the gate.** `npm run eval:gate` was not re-run after `eval run --accept`: one full run uses about 2.0 million Voyage tokens, so a second run the same day would pass the raised 4,000,000 daily eval cap. Run it once the day's eval budget allows and confirm it passes against the accepted baseline.
