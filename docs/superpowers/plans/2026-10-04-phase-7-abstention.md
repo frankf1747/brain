@@ -20,7 +20,7 @@ Source: the main-question rows of the 2026-10-04 baseline run in `brain_eval.ret
 - `strong` for a bare literal lookup (the query is only trigger terms such as `X-90`, `$115k`, `REQ-4471`) when every term appears literally in a returned passage: a relevance score means little for a bare code, a literal match means a lot;
 - `weak` otherwise.
 
-**Threshold:** 0.56, the midpoint (rounded to two decimals) between the lowest calibration positive (0.574) and the highest calibration negative below it (0.551). On the calibration set this abstains on 10 of 17 negatives and on 0 of 87 positives. The threshold is fixed here and is not changed after the held-out run.
+**Threshold:** 0.56, the midpoint (rounded to two decimals) between the lowest calibration positive (0.574) and the highest calibration negative below it (0.551). On the calibration set this abstains on 11 of 17 negatives and on 0 of 87 positives. (An earlier draft of this sentence said 10 of 17, the count at 0.55; the negative at 0.551 is below 0.56. Corrected after the run, which also measured 11 of 17; the threshold was not changed.) The threshold is fixed here and is not changed after the held-out run.
 
 **Held-out set:** 48 fixture items (24 negative, 24 positive) written by an agent that was given the corpus and the golden schema but not the scoring rule, the scores, or this plan, marked `split: "heldout"`. Abstention, false-answer and false-abstention rates are reported for each split; the held-out numbers are the ones the README states. Once reported, the held-out items must not be used to tune the threshold; a future change to the rule needs a new held-out set.
 

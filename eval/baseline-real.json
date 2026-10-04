@@ -1,6 +1,6 @@
 {
-  "recordedAt": "2026-10-04T05:22:34.870Z",
-  "commit": "3b7f3dc",
+  "recordedAt": "2026-10-04T15:34:16.216Z",
+  "commit": "9b10fb9",
   "goldenIds": [
     "d-1069c67445",
     "d-2d463773af",
@@ -10,6 +10,40 @@
     "d-6ab00f3ca1",
     "d-8de1a0617f",
     "d-d89417494b"
+  ],
+  "goldenItems": [
+    {
+      "id": "d-1069c67445",
+      "sha256": "244a6da25dd711cb76cff38f52a483b37acce007e57129eccadda853cac1d1e5"
+    },
+    {
+      "id": "d-2d463773af",
+      "sha256": "c7a808939331ca40b26bbb8d212aa65fc5a8e3b5d268a297cefb22a66f4371e2"
+    },
+    {
+      "id": "d-2e753da9dd",
+      "sha256": "0290ecd9d05cdf6bf10bc143786a75e4876b68ef491a9b2ad7ddc5c4fa2c9bb3"
+    },
+    {
+      "id": "d-47b62f7e17",
+      "sha256": "e778ddf672de017684015ee2ecb1dffa3624d77232858880f5369fe1e3c797d3"
+    },
+    {
+      "id": "d-5e929a98cd",
+      "sha256": "d5ecfbbc1faafc5898a6697d0454acf983a8e1c42b90b1bc4cffb24cbbdf8ad2"
+    },
+    {
+      "id": "d-6ab00f3ca1",
+      "sha256": "b018e4068db18f96487d617e6bf1f25dcb5ed2db1fdf8a4c8ac77825ed4cf6cc"
+    },
+    {
+      "id": "d-8de1a0617f",
+      "sha256": "d36a12acd7cb3ba8f1f50e54cd035ed8c5721ae96ed2d9c6b92b8febffb8a424"
+    },
+    {
+      "id": "d-d89417494b",
+      "sha256": "d8654b5fafd2530eaedd842b1923655210a4312910a16315ee24b9b25e8acc2f"
+    }
   ],
   "report": {
     "n": 8,
@@ -49,8 +83,17 @@
     },
     "negatives": {
       "n": 2,
-      "abstentionRate": 0,
-      "falseAnswerRate": 1
+      "abstentionRate": 1,
+      "falseAnswerRate": 0
+    },
+    "abstention": {
+      "calibration": {
+        "negatives": 2,
+        "abstentionRate": 1,
+        "falseAnswerRate": 0,
+        "positives": 6,
+        "falseAbstentionRate": 0
+      }
     },
     "paraphrase": {
       "n": 12,
@@ -59,25 +102,25 @@
     },
     "degradedFraction": 0,
     "latencyMs": {
-      "p50": 335.8,
-      "p95": 525
+      "p50": 318.5,
+      "p95": 475.3
     },
     "stageLatencyMs": {
       "embed": {
-        "p50": 143.8,
-        "p95": 296.2
+        "p50": 128.5,
+        "p95": 266.9
       },
       "sql": {
-        "p50": 24.3,
-        "p95": 67.1
+        "p50": 14.1,
+        "p95": 83.2
       },
       "rerank": {
-        "p50": 150.7,
-        "p95": 167.8
+        "p50": 131,
+        "p95": 220.4
       },
       "graph": {
-        "p50": 7.3,
-        "p95": 33.9
+        "p50": 9.5,
+        "p95": 34.7
       }
     },
     "bySource": {
