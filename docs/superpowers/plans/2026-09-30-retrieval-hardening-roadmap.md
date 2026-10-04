@@ -123,6 +123,8 @@ Phases 2 and 3 do not depend on each other and could be swapped; Phase 4 depends
 
 ## After Phase 6: next work
 
+Items 1–4 are done in Phase 7 (`2026-10-04-phase-7-abstention.md`); item 5 waits for the next corpus re-ingest.
+
 Measured on the Phase 6 baseline (`eval/baseline.json`, 104 fixture items, recorded 2026-10-04):
 
 1. **Calibrate abstention.** On the 17 negative items the abstention rate is 0.06 and the false-answer rate 0.94: the top passage almost always reranks at 0.3 or more even when nothing answers the question. The 0.3 threshold was recorded, not tuned, so as not to fit it to the test set. Split the negatives and positives into a calibration part and a held-out part; either choose the threshold on the calibration part, or add a calibrated no-answer signal (for example from the gap between the top rerank scores, or the share of query terms the top passage matches); then report abstention and false answers on the held-out part only. Grow the negatives first: 17 cannot be split into two useful halves.
