@@ -307,6 +307,17 @@ evalCmd
   });
 
 evalCmd
+  .command("sync")
+  .description("Copy the real knowledge base (DATABASE_URL) into brain_real_eval (EVAL_REAL_DATABASE_URL), replacing its documents, chunks with embeddings, graph and facts; no model or Voyage call, nothing written to the source")
+  .action(async () => {
+    const { EVAL_REAL_DATABASE_URL } = await import("./eval/db.js");
+    const { syncPlan, runSync } = await import("./eval/sync.js");
+    const plan = syncPlan(config.databaseUrl, EVAL_REAL_DATABASE_URL);
+    console.log(`eval sync: ${plan.sourceDb} -> ${plan.targetDb} (port ${plan.port}); the target's content is replaced, the source is only read`);
+    process.exitCode = await runSync(plan);
+  });
+
+evalCmd
   .command("run")
   .description("Run the golden set's items for one corpus and report metrics; --compare shows deltas against the baseline")
   .option("--corpus <corpus>", "fixtures (brain_eval) or real (brain_real_eval, after eval sync)", "fixtures")

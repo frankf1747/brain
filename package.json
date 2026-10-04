@@ -12,6 +12,7 @@
     "test:unit": "vitest run test/unit",
     "test:int": "bash scripts/prepare-test-db.sh && vitest run test/integration",
     "eval:prepare": "bash scripts/prepare-eval-db.sh",
+    "eval:prepare-real": "EVAL_DB=brain_real_eval bash scripts/prepare-eval-db.sh",
     "eval:run": "tsx src/cli.ts eval run --compare",
     "eval:gate": "tsx src/cli.ts eval run --compare --gate",
     "db:start": "supabase start",
