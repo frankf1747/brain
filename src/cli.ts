@@ -283,7 +283,14 @@ program
     });
   });
 
-const evalCmd = program.command("eval").description("Retrieval eval against the brain_eval database (never the real one)");
+const evalCmd = program.command("eval").description("Retrieval eval against brain_eval (the fixture corpus) or brain_real_eval (a copy of the real base); never the real database itself");
+
+/** --corpus fixtures (brain_eval, eval/corpus) or real (brain_real_eval, filled by `eval sync`). */
+function corpusOption(value: string | undefined): "fixtures" | "real" {
+  const v = value ?? "fixtures";
+  if (v !== "fixtures" && v !== "real") throw new Error(`--corpus must be fixtures or real, got ${JSON.stringify(value)}`);
+  return v;
+}
 
 evalCmd
   .command("ingest [dir]")
@@ -300,10 +307,22 @@ evalCmd
   });
 
 evalCmd
+  .command("sync")
+  .description("Copy the real knowledge base (DATABASE_URL) into brain_real_eval (EVAL_REAL_DATABASE_URL), replacing its documents, chunks with embeddings, graph and facts; no model or Voyage call, nothing written to the source")
+  .action(async () => {
+    const { EVAL_REAL_DATABASE_URL } = await import("./eval/db.js");
+    const { syncPlan, runSync } = await import("./eval/sync.js");
+    const plan = syncPlan(config.databaseUrl, EVAL_REAL_DATABASE_URL);
+    console.log(`eval sync: ${plan.sourceDb} -> ${plan.targetDb} (port ${plan.port}); the target's content is replaced, the source is only read`);
+    process.exitCode = await runSync(plan);
+  });
+
+evalCmd
   .command("run")
-  .description("Run the golden set and report metrics; --compare shows deltas against eval/baseline.json")
-  .option("--golden <path>", "golden set file", "eval/golden.jsonl")
-  .option("--baseline <path>", "baseline file", "eval/baseline.json")
+  .description("Run the golden set's items for one corpus and report metrics; --compare shows deltas against the baseline")
+  .option("--corpus <corpus>", "fixtures (brain_eval) or real (brain_real_eval, after eval sync)", "fixtures")
+  .option("--golden <path>", "golden set file (default eval/golden.jsonl, or the gitignored eval/golden-real.jsonl with --corpus real)")
+  .option("--baseline <path>", "baseline file (default eval/baseline.json, or eval/baseline-real.json with --corpus real)")
   .option("--verifier <path>", "citation verifier set", "eval/verifier.jsonl")
   .option("--verifier-baseline <path>", "citation verifier baseline", "eval/verifier-baseline.json")
   .option("--compare", "compare against the baseline")
@@ -311,15 +330,21 @@ evalCmd
   .option("--accept", "overwrite the baseline with this run")
   .option("--json")
   .action(async (opts) => {
-    const { makeEvalCtx } = await import("./eval/db.js");
-    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine } = await import("./eval/run.js");
+    const { makeEvalCtx, evalDatabaseHint } = await import("./eval/db.js");
+    const { runEval, attributionGate, evalVoyageLine, stageLatencyLine, breakdownLines, noItemsMessage, acceptRefusal } = await import("./eval/run.js");
+    const { GOLDEN_FILES } = await import("./eval/golden.js");
+    const { existsSync } = await import("node:fs");
     const { compare, gateFailures, loadBaseline, saveBaseline } = await import("./eval/baseline.js");
     const { abstained, falseAnswer } = await import("./eval/metrics.js");
     const { verifierGate, verifierLine, loadVerifierBaseline } = await import("./eval/verifier.js");
     const { execSync } = await import("node:child_process");
-    const ctx = makeEvalCtx();
+    const corpus = corpusOption(opts.corpus);
+    opts.golden ??= GOLDEN_FILES[corpus];
+    opts.baseline ??= corpus === "real" ? "eval/baseline-real.json" : "eval/baseline.json";
+    const ctx = makeEvalCtx(corpus);
     try {
-      const run = await runEval(ctx, opts.golden, opts.verifier);
+      const run = await runEval(ctx, opts.golden, opts.verifier, corpus);
+      if (run.results.length === 0) console.error(noItemsMessage(opts.golden, corpus, existsSync(opts.golden)));
       const base = opts.compare || opts.gate ? await loadBaseline(opts.baseline) : null;
       const goldenIds = run.results.map((r) => r.id).sort();
       const comparison = base ? compare(base, run.report, run.ranks, goldenIds) : null;
@@ -341,6 +366,7 @@ evalCmd
         const o = run.report.overall;
         console.log(`\noverall  n=${o.n}  recall@1=${o.recallAt1.toFixed(2)}  recall@5=${o.recallAt5.toFixed(2)}  recall@10=${o.recallAt10.toFixed(2)}  mrr=${o.mrr.toFixed(2)}  ndcg@10=${o.ndcgAt10 === null ? "n/a" : o.ndcgAt10.toFixed(2)}`);
         for (const [kind, m] of Object.entries(run.report.byKind)) console.log(`${kind.padEnd(11)} n=${m.n}  recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}`);
+        for (const line of breakdownLines(run.report)) console.log(line);
         const ng = run.report.negatives;
         if (ng.n) console.log(`negatives   n=${ng.n}  abstention=${ng.abstentionRate.toFixed(2)}  false-answer=${ng.falseAnswerRate.toFixed(2)}`);
         if (run.report.paraphrase.n) console.log(`paraphrase  n=${run.report.paraphrase.n}  consistency=${run.report.paraphrase.consistency.toFixed(2)}  mean-recall@10-delta=${run.report.paraphrase.meanRecallDelta >= 0 ? "+" : ""}${run.report.paraphrase.meanRecallDelta.toFixed(3)}`);
@@ -364,13 +390,182 @@ evalCmd
         }
       }
       if (failures.length) process.exitCode = 1;
-      if (opts.accept) {
+      const refusal = opts.accept ? acceptRefusal(corpus, run.results.length, opts.baseline) : null;
+      if (refusal) {
+        console.error(refusal);
+        process.exitCode = 1;
+      } else if (opts.accept) {
         const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
         await saveBaseline(opts.baseline, { recordedAt: new Date().toISOString(), commit, goldenIds, report: run.report, ranks: run.ranks });
         console.log(`baseline written to ${opts.baseline} at ${commit}`);
       }
+    } catch (e) {
+      throw evalDatabaseHint(e, corpus);
     } finally {
       await ctx.sql.end();
+    }
+  });
+
+evalCmd
+  .command("draft")
+  .description("Draft golden questions: one model call per document (2-3 questions with a verbatim quote and two paraphrases, plus one negative), automatic checks, then eval/drafts.jsonl and a review sheet for the owner")
+  .option("--corpus <corpus>", "fixtures (brain_eval) or real (brain_real_eval)", "fixtures")
+  .option("--since <date>", "only documents ingested on or after this date")
+  .option("--limit <n>", "at most this many documents (model calls)")
+  .option("--doc <document...>", "only these documents: file name or document id")
+  .option("--force", "also draft documents that already have drafts or golden items")
+  .option("--golden <path>", "golden set file (real items: golden-real.jsonl next to it)", "eval/golden.jsonl")
+  .option("--drafts <path>", "pending drafts file (real drafts: the gitignored drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .option("--review-dir <dir>", "where review sheets are written (real sheets: its gitignored real/ subdirectory)", "eval/review")
+  .action(async (opts) => {
+    const corpus = corpusOption(opts.corpus);
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) throw new Error(`--limit needs a positive whole number, got ${JSON.stringify(opts.limit)}`);
+    const { makeEvalCtx, assertEvalConnection, evalDatabaseHint } = await import("./eval/db.js");
+    const { draftDocuments, draftsFileFor } = await import("./eval/draft.js");
+    const ctx = makeEvalCtx(corpus);
+    try {
+      await assertEvalConnection(ctx.sql);
+      const r = await draftDocuments(ctx, {
+        corpus, goldenPath: opts.golden, draftsPath: opts.drafts, reviewDir: opts.reviewDir,
+        since: opts.since ? new Date(opts.since) : undefined, limit, force: !!opts.force, docs: opts.doc,
+      });
+      for (const d of r.skipped) console.log(`skip     ${d} (has drafts or golden items; --force drafts it again)`);
+      for (const d of r.drafted) console.log(`drafted  ${d}`);
+      for (const x of r.rejected) console.log(`dropped  ${x.document}: "${x.question}": ${x.reasons.join("; ")}`);
+      for (const f of r.failed) console.log(`failed   ${f.document}: ${f.error}`);
+      if (r.sheet) {
+        console.log(`\n${r.written.length} drafts written to ${draftsFileFor(opts.drafts, corpus)} and ${r.sheet}.`);
+        console.log(`The owner reviews the sheet (keep, edit or reject each item), then: npm run brain -- eval approve --sheet ${r.sheet}`);
+      } else console.log("\nNo new drafts.");
+      if (r.failed.length) process.exitCode = 1;
+    } catch (e) {
+      throw evalDatabaseHint(e, corpus);
+    } finally {
+      await ctx.sql.end();
+    }
+  });
+
+evalCmd
+  .command("approve")
+  .description("Apply the owner's decisions in a review sheet: keep and edit go into the golden set (approved_by owner), reject drops the draft, undecided items stay")
+  .requiredOption("--sheet <file>", "the review sheet, eval/review/<date>-<n>.md (real sheets: eval/review/real/<date>-<n>.md)")
+  .option("--golden <path>", "golden set file (approved real items go to golden-real.jsonl next to it)", "eval/golden.jsonl")
+  .option("--drafts <path>", "pending drafts file (a real sheet's drafts: drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .action(async (opts) => {
+    const { connect } = await import("./db.js");
+    const { evalDatabaseUrl, assertEvalDatabase, assertEvalConnection } = await import("./eval/db.js");
+    const { approveSheetFile } = await import("./eval/review.js");
+    const { loadGolden, approvalCounts, goldenFileFor } = await import("./eval/golden.js");
+    const { sheetCorpus } = await import("./eval/draft.js");
+    const opened: ReturnType<typeof connect>[] = [];
+    try {
+      const r = await approveSheetFile(opts.sheet, {
+        goldenPath: opts.golden,
+        draftsPath: opts.drafts,
+        sql: async (corpus) => {
+          const url = evalDatabaseUrl(corpus);
+          assertEvalDatabase(url);
+          const sql = connect(url);
+          opened.push(sql);
+          await assertEvalConnection(sql);
+          return sql;
+        },
+      });
+      const edited = r.approved.filter((a) => a.edited).length;
+      console.log(`approved ${r.approved.length} (${edited} edited), rejected ${r.rejected.length}, undecided ${r.undecided.length}, already applied ${r.alreadyApplied.length}`);
+      const goldenFile = goldenFileFor(opts.golden, sheetCorpus(opts.sheet));
+      const golden = await loadGolden(goldenFile);
+      const c = approvalCounts(golden);
+      console.log(`${goldenFile} now has ${golden.length} items: ${c.owner} approved by the owner, ${c.agent} written by an agent`);
+    } finally {
+      for (const s of opened) await s.end();
+    }
+  });
+
+evalCmd
+  .command("reject")
+  .description("Drop pending drafts by id (fixtures and real)")
+  .requiredOption("--id <draft id...>", "draft ids, d- and 10 hex digits")
+  .option("--drafts <path>", "pending drafts file (real drafts: drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .action(async (opts: { id: string[]; drafts: string }) => {
+    const { loadDrafts, saveDrafts, draftsFileFor } = await import("./eval/draft.js");
+    const ids = new Set(opts.id);
+    const files = (["fixtures", "real"] as const).map((c) => draftsFileFor(opts.drafts, c));
+    const loaded = await Promise.all(files.map((f) => loadDrafts(f)));
+    const drafts = loaded.flat();
+    const unknown = opts.id.filter((id) => !drafts.some((d) => d.draft_id === id));
+    // Each file keeps only its own corpus's drafts; a file is rewritten only when it loses one.
+    for (let i = 0; i < files.length; i++) {
+      if (loaded[i].some((d) => ids.has(d.draft_id))) await saveDrafts(files[i], loaded[i].filter((d) => !ids.has(d.draft_id)));
+    }
+    console.log(`rejected ${opts.id.length - unknown.length}; ${drafts.length - (opts.id.length - unknown.length)} drafts pending`);
+    for (const id of unknown) console.error(`no pending draft ${id}`);
+    if (unknown.length) process.exitCode = 1;
+  });
+
+evalCmd
+  .command("drafts")
+  .description("List pending drafts: id, corpus, kind, document, question, and the review sheet they are on")
+  .option("--drafts <path>", "pending drafts file (real drafts: drafts-real.jsonl next to it)", "eval/drafts.jsonl")
+  .action(async (opts) => {
+    const { loadDrafts, draftsFileFor } = await import("./eval/draft.js");
+    const { documentLine } = await import("./eval/review.js");
+    const drafts = [...(await loadDrafts(draftsFileFor(opts.drafts, "fixtures"))), ...(await loadDrafts(draftsFileFor(opts.drafts, "real")))];
+    if (drafts.length === 0) return void console.log("No pending drafts.");
+    for (const d of drafts) console.log(`${d.draft_id}  ${d.corpus.padEnd(8)} ${d.kind.padEnd(11)} ${documentLine(d)}\n    ${d.question}\n    sheet ${d.sheet}`);
+    console.log(`${drafts.length} pending`);
+  });
+
+evalCmd
+  .command("capture")
+  .description("List recent logged searches (query, mode, top passages with titles and scores, retrieval id) to label as golden items; reads the log only")
+  .option("--corpus <corpus>", "real: the knowledge base's log (DATABASE_URL, opened read-only); fixtures: brain_eval's log", "real")
+  .option("--since <date>", "only searches on or after this date")
+  .option("--client <client>", "only searches from this client: mcp-stdio, mcp-http, cli")
+  .option("--limit <n>", "at most this many searches", "20")
+  .action(async (opts) => {
+    const corpus = corpusOption(opts.corpus);
+    const { connectReadOnly } = await import("./db.js");
+    const { EVAL_DATABASE_URL } = await import("./eval/db.js");
+    const { capturedSearches, renderCaptured } = await import("./eval/capture.js");
+    const sql = connectReadOnly(corpus === "real" ? config.databaseUrl : EVAL_DATABASE_URL);
+    try {
+      const rows = await capturedSearches(sql, { since: opts.since ? new Date(opts.since) : undefined, client: opts.client, limit: Number(opts.limit) });
+      console.log(renderCaptured(rows, corpus));
+    } finally {
+      await sql.end();
+    }
+  });
+
+evalCmd
+  .command("label <retrievalId>")
+  .description("Write a golden item (source captured, approved_by owner) from a logged search; the expected document must be in the corpus's eval database")
+  .option("--expect <document>", "the document that answers it: document id (or, for fixtures, file name)")
+  .option("--quote <text>", "a verbatim span of that document that answers it")
+  .option("--negative", "nothing in the knowledge base answers it")
+  .option("--kind <kind>", "keyword, semantic, graph, filter, fallback or attribution", "semantic")
+  .option("--corpus <corpus>", "real (log: DATABASE_URL read-only; documents: brain_real_eval) or fixtures (both brain_eval)", "real")
+  .option("--golden <path>", "golden set file (real items go to the gitignored golden-real.jsonl next to it)", "eval/golden.jsonl")
+  .action(async (retrievalId: string, opts) => {
+    const corpus = corpusOption(opts.corpus);
+    const { connect, connectReadOnly } = await import("./db.js");
+    const { evalDatabaseUrl, assertEvalDatabase, assertEvalConnection, evalDatabaseHint } = await import("./eval/db.js");
+    const { labelCaptured } = await import("./eval/capture.js");
+    const { GOLDEN_KINDS, goldenFileFor } = await import("./eval/golden.js");
+    if (!(GOLDEN_KINDS as readonly string[]).includes(opts.kind)) throw new Error(`--kind must be one of ${GOLDEN_KINDS.join(", ")}, got ${JSON.stringify(opts.kind)}`);
+    const evalUrl = evalDatabaseUrl(corpus);
+    assertEvalDatabase(evalUrl);
+    const log = connectReadOnly(corpus === "real" ? config.databaseUrl : evalUrl);
+    const evalSql = connect(evalUrl);
+    try {
+      await assertEvalConnection(evalSql);
+      const item = await labelCaptured(log, evalSql, { retrievalId, expect: opts.expect, quote: opts.quote, negative: !!opts.negative, kind: opts.kind, corpus, goldenPath: opts.golden });
+      console.log(`golden item ${item.id} written to ${goldenFileFor(opts.golden, corpus)}: "${item.question}" (${item.kind}, ${corpus})`);
+    } catch (e) {
+      throw evalDatabaseHint(e, corpus);
+    } finally {
+      await Promise.all([log.end(), evalSql.end()]);
     }
   });
 

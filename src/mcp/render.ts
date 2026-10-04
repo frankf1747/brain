@@ -29,11 +29,19 @@ export function foundBy(p: Pick<LoggedPassage, "layers" | "vectorRank" | "keywor
 }
 
 /**
+ * A title in double quotes for a provenance line. Double quotes inside it (straight or curly) become single quotes, so a
+ * title such as `"I thought…" — a post` reads `"'I thought…' — a post"` instead of `""I thought…" — a post"`.
+ */
+export function quotedTitle(title: string | null): string {
+  return title ? `"${title.replace(/["\u201c\u201d]/g, "'")}"` : "(untitled)";
+}
+
+/**
  * One passage's provenance line: label, score and score kind, how it was found, source kind, author, title, date,
  * and the ids to read it with (a fallback passage has no chunk, so its character window instead).
  */
 export function passageLine(p: LoggedPassage, index: number): string {
-  const title = p.title ? `"${p.title}"` : "(untitled)";
+  const title = quotedTitle(p.title);
   const date = p.occurredAt ? p.occurredAt.slice(0, 10) : "undated";
   const where = p.chunkId ? `(doc ${p.documentId}, chunk ${p.chunkId})` : `(doc ${p.documentId}, chars ${p.charStart}–${p.charEnd})`;
   return `[P${index + 1}] ${scoreText(p)} · ${foundBy(p)} · ${p.sourceKind} · author: ${p.author} · ${title} · ${date} ${where}`;
@@ -185,9 +193,18 @@ export function explainLine(p: LoggedPassage, index: number): string {
   const rank = (r: number | null) => (r === null ? "-" : String(r));
   const score = p.score === null ? "-" : p.score.toFixed(p.scoreKind === "rrf" ? 4 : 2);
   const via = p.viaEntity ? ` via ${p.viaEntity.name}` : p.fallbackTerm !== null ? ` "${p.fallbackTerm}"` : "";
-  const title = p.title ? `"${p.title}"` : "(untitled)";
+  const title = quotedTitle(p.title);
   const where = p.chunkId ? `(doc ${p.documentId}, chunk ${p.chunkId})` : `(doc ${p.documentId}, chars ${p.charStart}–${p.charEnd})`;
   return `#${index + 1} [P${index + 1}] score ${score} (${p.scoreKind}) · layers ${p.layers.join("+")}${via} · vector ${rank(p.vectorRank)} · keyword ${rank(p.keywordRank)} · rerank ${rank(p.rerankRank)} · ${title} · author: ${p.author} · ${p.sourceKind} ${where}`;
+}
+
+/**
+ * A top score logged before evidence v2: an RRF value (about 0.008 to 0.033) when the search was degraded, else a rerank
+ * score. Below 0.05 it gets four decimals, so 0.0164 is not shown as 0.02.
+ */
+export function legacyTopScoreText(score: number | null): string {
+  if (score === null) return "none";
+  return score.toFixed(score < 0.05 ? 4 : 2);
 }
 
 /** brain_explain and `brain explain`: a logged search replayed from brain.retrieval_log, with no new search. */
@@ -196,12 +213,13 @@ export function renderExplain(e: Explanation): string {
     `retrieval ${e.retrievalId} · logged ${e.createdAt} · client ${e.client ?? "unknown"}`,
     `query: "${e.query}"`,
     `filters: ${filtersText(e.filters)}`,
+    ...e.notes.map((n) => `note: ${n}`),
   ];
   if (!e.v2 || e.results === null) {
     out.push(
       "logged before evidence v2: only the chunk ids, the top score, the layers and the fallback flag were recorded.",
       `layers: ${e.layers.join(", ") || "none"}`,
-      `top score: ${e.topScore === null ? "none" : e.topScore.toFixed(2)} (before evidence v2 this is an RRF value when the search was degraded)`,
+      `top score: ${legacyTopScoreText(e.topScore)} (before evidence v2 this is an RRF value when the search was degraded)`,
       `fallback scan: ${e.usedFallback ? "used" : "not used"}`,
       `chunks in rank order (fallback passages were not recorded): ${e.chunkIds.join(", ") || "none"}`,
       `entities: ${e.nodeIds.join(", ") || "none"}`,

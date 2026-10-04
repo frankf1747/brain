@@ -6,7 +6,7 @@ import { AUTHORS, keptAuthorNote } from "../ingest/author.js";
 import { suppressedDocuments } from "../ingest/set-author.js";
 import { runPipeline, stageCounts } from "../ingest/pipeline.js";
 import { search } from "../retrieve/search.js";
-import { SearchResultSchema } from "../retrieve/contract.js";
+import { SearchOutputSchema, toSearchOutput } from "../retrieve/contract.js";
 import { orient } from "../retrieve/orient.js";
 import { getDocument } from "../retrieve/documents.js";
 import { explain, explainNotFound } from "../retrieve/explain.js";
@@ -102,7 +102,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
       description:
         "Hybrid keyword and semantic search over everything the owner has saved. Expands entities named in the query (neighbours and up to 5 passages that mention each), and returns up to 10 of the owner's facts that share a term with the query or point at a named entity; use brain_get_facts or brain_orient for the full fact list. " +
         "The first line is `retrieval <id> · mode: hybrid | keyword-only | fused-order · <n> passages`. Each passage line reads `[P1] <score> <score kind> · <how found> · <source kind> · author: <owner|other|unknown> · \"<title>\" · <date> (doc <id>, chunk <id>)`: score kind rerank is 0 to 1 (higher is stronger), rrf means reranking was skipped, and - marks a passage found through a named entity (graph via <entity>) or a literal match (fallback \"<term>\"); how found lists vector#<rank> and keyword#<rank>, plus graph via <entity> when the graph also reached a ranked passage. Each fact says verified or unverified and where it came from: read from a document (from <kind> <doc id>), stated by owner, confirmed by owner (verified, no stored source passage), or extracted from a passage no longer stored. " +
-        "Pass the retrieval id to brain_explain to see how the passages were ranked. The same result is returned as structuredContent. " +
+        "Pass the retrieval id to brain_explain to see how the passages were ranked. The same result is returned as structuredContent, without each passage's text (read it here, or with brain_get_document). " +
         "After answering, pass the retrieval id and your answer's claims to brain_verify, which checks each claim against the passages and facts it cites.",
       inputSchema: {
         query: z.string().min(1),
@@ -112,12 +112,12 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
         until: isoDate.optional().describe("ISO date upper bound, e.g. 2026-09-30"),
         verified_only: z.boolean().optional().describe("Only return facts and neighbour nodes marked verified. Passages are never filtered: documents have no verification state."),
       },
-      outputSchema: SearchResultSchema,
+      outputSchema: SearchOutputSchema,
     },
     async (a) => {
       try {
         const r = await search(ctx, a.query, { k: a.k, sourceKinds: a.source_kinds, since: dateOrUndefined(a.since), until: dateOrUndefined(a.until), verifiedOnly: a.verified_only, client: opts.client });
-        return { content: [{ type: "text", text: renderSearch(r) }], structuredContent: r };
+        return { content: [{ type: "text", text: renderSearch(r) }], structuredContent: toSearchOutput(r) };
       } catch (e) { return fail(e); }
     },
   );

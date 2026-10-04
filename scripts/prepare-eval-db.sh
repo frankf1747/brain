@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Create the brain_eval database from the migrations if it does not exist, so the eval never touches
-# the real knowledge base (the `postgres` database of the same local server). Pass --reset to drop
-# and recreate it; the ingested corpus costs model and embedding calls, so by default it is kept.
+# Create an eval database from the migrations if it does not exist, so the eval never touches the real knowledge base
+# (the `postgres` database of the same local server). EVAL_DB names it: brain_eval (default) holds the fixture corpus,
+# brain_real_eval the copy of the real base that `brain eval sync` fills; the name must end in _eval. Pass --reset to
+# drop and recreate it; the ingested corpus costs model and embedding calls, so by default it is kept.
 set -euo pipefail
 
 ADMIN_URL="${EVAL_ADMIN_URL:-postgresql://postgres:postgres@127.0.0.1:55322/postgres}"
-EVAL_DB="brain_eval"
+EVAL_DB="${EVAL_DB:-brain_eval}"
+if [[ ! "$EVAL_DB" =~ ^[a-z_][a-z0-9_]*_eval$ ]]; then
+  echo "EVAL_DB must be a lower-case name ending in _eval, got \"${EVAL_DB}\"" >&2
+  exit 1
+fi
 EVAL_URL="${ADMIN_URL%/*}/${EVAL_DB}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 

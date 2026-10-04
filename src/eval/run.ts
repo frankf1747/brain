@@ -7,7 +7,7 @@ import { readInput } from "../ingest/readers.js";
 import { ingestAll, logSkip } from "../ingest/batch.js";
 import { search, type SearchOptions, type SearchResult } from "../retrieve/search.js";
 import { isDegraded, isHybrid } from "../retrieve/contract.js";
-import { parseGolden, type Expected, type GoldenItem } from "./golden.js";
+import { parseGolden, loadGolden, goldenFileCorpus, GOLDEN_FILES, type Corpus, type Expected, type GoldenItem } from "./golden.js";
 import { summarize, mrr, matchesExpected, type QuestionResult, type RankedDoc, type Report } from "./metrics.js";
 import { assertEvalConnection, EVAL_CLIENT } from "./db.js";
 import { voyageSpendSince, type VoyageSpend } from "../llm/usage.js";
@@ -22,12 +22,17 @@ export function kindFromFilename(name: string): string {
 /**
  * Optional front matter at the top of a fixture: `---`, `key: value` lines, `---`. Only `author` is read
  * (owner, other or unknown, optionally quoted); other keys are ignored. Returns the text without the block.
+ * A file that opens a fence and never closes it throws: storing the block as body text with the kind's default
+ * author would silently attribute the document to the wrong writer.
  */
 export function splitFrontMatter(text: string): { author: Author | undefined; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
-  if (!m) return { author: undefined, body: text };
+  const m = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!m) {
+    if (/^---[ \t]*\r?\n/.test(text)) throw new Error("front matter: the opening --- has no closing --- line");
+    return { author: undefined, body: text };
+  }
   let author: Author | undefined;
-  for (const line of m[1].split(/\r?\n/)) {
+  for (const line of (m[1] ?? "").split(/\r?\n/)) {
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$/.exec(line);
     if (!kv) {
       if (line.trim()) throw new Error(`front matter: cannot read line "${line}"`);
@@ -82,6 +87,22 @@ export function stageLatencyLine(report: Report): string | null {
   if (!s) return null;
   const part = (name: string, p: { p50: number; p95: number }) => `${name} p50=${p.p50}ms p95=${p.p95}ms`;
   return `stages  ${part("embed", s.embed)}  ${part("sql", s.sql)}  ${part("rerank", s.rerank)}  ${part("graph", s.graph)}`;
+}
+
+/**
+ * The eval output lines for the per-source breakdown (rank metrics over positive items of each golden source, in the
+ * order fixture, generated, captured) and the approval counts (every item, negative ones included).
+ */
+export function breakdownLines(report: Report): string[] {
+  const out: string[] = [];
+  const order = ["fixture", "generated", "captured"];
+  const sources = Object.keys(report.bySource ?? {}).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  for (const source of sources) {
+    const m = report.bySource![source];
+    out.push(`source ${source.padEnd(10)} n=${m.n}  recall@10=${m.recallAt10.toFixed(2)}  mrr=${m.mrr.toFixed(2)}`);
+  }
+  if (report.approvals) out.push(`approved  owner=${report.approvals.owner}  agent=${report.approvals.agent}`);
+  return out;
 }
 
 /** 1-based rank of the first expected document among distinct ranked documents, or null. */
@@ -139,6 +160,8 @@ export function toQuestionResult(
   return {
     id: item.id,
     kind: item.kind,
+    source: item.source,
+    approvedBy: item.approved_by,
     negative: item.negative,
     expected: item.expected,
     ranked,
@@ -199,14 +222,45 @@ export interface EvalRun {
 }
 
 /**
- * Runs every golden item (and its paraphrases) against the context's database, which must be the eval database, then
- * scores the citation verifier on verifierPath with that database's stems.
+ * The items one corpus's run reads. Real items quote the owner's private documents and live in the gitignored
+ * eval/golden-real.jsonl, fixtures items in the committed eval/golden.jsonl, so the file's name must match the corpus
+ * (goldenFileCorpus) and every item in it must belong to that corpus. A missing real file is no items (a fresh clone
+ * has none); a missing fixtures file is an error.
  */
-export async function runEval(ctx: Ctx, goldenPath: string, verifierPath = "eval/verifier.jsonl"): Promise<EvalRun> {
+export async function goldenForRun(goldenPath: string, corpus: Corpus): Promise<GoldenItem[]> {
+  const holds = goldenFileCorpus(goldenPath);
+  if (holds !== corpus) {
+    throw new Error(`${goldenPath} holds ${holds} items (only files named *-real.jsonl hold real items); --corpus ${corpus} reads ${GOLDEN_FILES[corpus]} by default`);
+  }
+  return corpus === "real" ? loadGolden(goldenPath) : parseGolden(await readFile(goldenPath, "utf8"), "fixtures");
+}
+
+/**
+ * Why `--accept` must not record this run, or null when it may: a run with no items would write an empty baseline
+ * (for --corpus real on a machine without eval/golden-real.jsonl, over the committed eval/baseline-real.json).
+ */
+export function acceptRefusal(corpus: Corpus, items: number, baselinePath: string): string | null {
+  if (items > 0) return null;
+  return `eval: refusing --accept: the run had no ${corpus} items, so ${baselinePath} would record an empty baseline`;
+}
+
+/** Why a run has no items: the corpus's file is missing (expected for real items on a fresh clone) or holds none. */
+export function noItemsMessage(goldenPath: string, corpus: Corpus, exists: boolean): string {
+  if (exists) return `eval: no ${corpus} items in ${goldenPath}`;
+  const why = corpus === "real" ? " (real-corpus items stay on the owner's machine: the file is gitignored)" : "";
+  return `eval: ${goldenPath} does not exist, so there are no ${corpus} items to run${why}`;
+}
+
+/**
+ * Runs every golden item of one corpus (and its paraphrases) against the context's database, which must be that
+ * corpus's eval database (brain_eval for fixtures, brain_real_eval for real), then scores the citation verifier on
+ * verifierPath with that database's stems.
+ */
+export async function runEval(ctx: Ctx, goldenPath: string, verifierPath = "eval/verifier.jsonl", corpus: Corpus = "fixtures"): Promise<EvalRun> {
   await assertEvalConnection(ctx.sql);
   // The database's clock, so the window matches the ledger's created_at exactly.
   const [{ startedAt }] = await ctx.sql<{ startedAt: Date }[]>`select clock_timestamp() as "startedAt"`;
-  const golden = parseGolden(await readFile(goldenPath, "utf8"));
+  const golden = await goldenForRun(goldenPath, corpus);
   const results: QuestionResult[] = [];
   for (const g of golden) {
     const opts: SearchOptions = { sourceKinds: g.filters?.sourceKinds, client: "eval", includeFacts: false, k: 10 };

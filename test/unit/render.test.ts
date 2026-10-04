@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   renderSearch, renderOrient, renderNode, renderDocument, renderFacts, renderStatus, passageLine, factLine, scoreText, foundBy, searchHeader,
   renderExplain, explainLine, renderSources, verdictLine, verdictDetail, renderVerification, VERIFY_LIMITS, renderAnswerCheck,
+  quotedTitle, legacyTopScoreText,
 } from "../../src/mcp/render.js";
 import type { ClaimResult } from "../../src/verify/verify.js";
 import { toLoggedPassages } from "../../src/retrieve/contract.js";
@@ -223,7 +224,7 @@ describe("renderExplain", () => {
     v2: true, k: 10, mode: "hybrid", degraded: { embedding: false, rerank: false, capReached: false },
     candidates: { vector: 60, keyword: 12, fused: 64 }, timings: { embedMs: 120.3, sqlMs: 45.1, rerankMs: 210, graphMs: 3.2, totalMs: 380.9 },
     results: toLoggedPassages(fixture.passages), layers: ["hybrid", "summary", "graph", "fallback"], chunkIds: ["c1", "c2", "c3"], nodeIds: ["n1"],
-    topScore: 0.76, usedFallback: true,
+    topScore: 0.76, usedFallback: true, notes: [],
   };
 
   it("replays a v2 row: who and when, filters, mode, flags, candidates, timings, and every passage's ranks and score", () => {
@@ -272,11 +273,42 @@ describe("renderExplain", () => {
       "filters: none",
       "logged before evidence v2: only the chunk ids, the top score, the layers and the fallback flag were recorded.",
       "layers: hybrid, summary, degraded",
-      "top score: 0.03 (before evidence v2 this is an RRF value when the search was degraded)",
+      "top score: 0.0310 (before evidence v2 this is an RRF value when the search was degraded)",
       "fallback scan: not used",
       "chunks in rank order (fallback passages were not recorded): c1, c2",
       "entities: none",
     ]);
+  });
+});
+
+describe("titles and legacy scores", () => {
+  it("turns double quotes inside a title into single quotes, so the line has one pair", () => {
+    expect(quotedTitle('"I thought it was fine" — a post')).toBe(`"'I thought it was fine' — a post"`);
+    expect(quotedTitle("\u201cCurly\u201d title")).toBe(`"'Curly' title"`);
+    expect(quotedTitle("Plain")).toBe('"Plain"');
+    expect(quotedTitle(null)).toBe("(untitled)");
+    const p = passage({ title: '"Quoted" title' });
+    expect(passageLine(toLoggedPassages([p])[0], 0)).toContain(` · "'Quoted' title" · `);
+    expect(explainLine(toLoggedPassages([p])[0], 0)).toContain(` · "'Quoted' title" · `);
+  });
+
+  it("shows a pre-v2 top score below 0.05 with four decimals, so an RRF value is not rounded to 0.02", () => {
+    expect(legacyTopScoreText(0.0164)).toBe("0.0164");
+    expect(legacyTopScoreText(0.0499)).toBe("0.0499");
+    expect(legacyTopScoreText(0.05)).toBe("0.05");
+    expect(legacyTopScoreText(0.731)).toBe("0.73");
+    expect(legacyTopScoreText(null)).toBe("none");
+  });
+
+  it("prints notes about evidence v2 columns that could not be read under the filters line", () => {
+    const e: Explanation = {
+      retrievalId: "r1", query: "q", client: null, createdAt: "2026-10-02T09:15:00.000Z", filters: {}, v2: false, k: null, mode: null,
+      degraded: null, candidates: null, timings: null, results: null, layers: [], chunkIds: [], nodeIds: [], topScore: 0.0164, usedFallback: false,
+      notes: ["results could not be read with the current contract (0.newField: Invalid input); shown as not recorded"],
+    };
+    const lines = renderExplain(e).split("\n");
+    expect(lines[3]).toBe("note: results could not be read with the current contract (0.newField: Invalid input); shown as not recorded");
+    expect(lines).toContain("top score: 0.0164 (before evidence v2 this is an RRF value when the search was degraded)");
   });
 });
 

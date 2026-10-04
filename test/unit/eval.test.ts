@@ -1,12 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning, evalVoyageLine, stageLatencyLine } from "../../src/eval/run.js";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  kindFromFilename, toQuestionResult, firstExpectedRank, normalizeWhitespace, missingQuoteWarning, evalVoyageLine, stageLatencyLine, breakdownLines,
+  goldenForRun, noItemsMessage, acceptRefusal,
+} from "../../src/eval/run.js";
 import { summarize } from "../../src/eval/metrics.js";
 import type { GoldenItem } from "../../src/eval/golden.js";
 import type { Layer, SearchResult } from "../../src/retrieve/contract.js";
 import { passage, searchResult as baseResult } from "./search-fixture.js";
 
 const item: GoldenItem = {
-  id: "q05", question: "Why?", kind: "semantic", negative: false, source: "fixture", approved_at: "2026-09-30",
+  id: "q05", question: "Why?", kind: "semantic", negative: false, source: "fixture", corpus: "fixtures", approved_by: "agent", approved_at: "2026-09-30",
   expected: [{ origin: "note--fairness-in-ml.md", quote: "cannot satisfy all three" }],
 };
 
@@ -113,6 +119,74 @@ describe("stageLatencyLine", () => {
     expect(stageLatencyLine(report)).toBe("stages  embed p50=1ms p95=1ms  sql p50=2ms p95=2ms  rerank p50=3ms p95=3ms  graph p50=0.5ms p95=0.5ms");
     const { stageLatencyMs: _drop, ...old } = report;
     expect(stageLatencyLine(old)).toBeNull();
+  });
+});
+
+describe("source and approver", () => {
+  it("carries the item's source and approver into the result", () => {
+    const res = searchResult([{ documentId: "d1", layers: ["vector"], content: "x", score: 0.9 }]);
+    const q = toQuestionResult({ ...item, source: "generated", approved_by: "owner", edited: false }, res, new Map(), [], 0, []);
+    expect(q).toMatchObject({ source: "generated", approvedBy: "owner" });
+  });
+  it("prints one line per source in the order fixture, generated, captured, then the approval counts", () => {
+    const res = searchResult([{ documentId: "d2", layers: ["vector"], content: "x", score: 0.9 }]);
+    const origins = new Map([["d2", "/c/note--fairness-in-ml.md"]]);
+    const report = summarize([
+      toQuestionResult({ ...item, id: "g", source: "generated", approved_by: "owner" }, res, origins, [], 0, []),
+      toQuestionResult(item, res, origins, [], 0, []),
+    ], 0.3);
+    expect(breakdownLines(report)).toEqual([
+      "source fixture    n=1  recall@10=1.00  mrr=1.00",
+      "source generated  n=1  recall@10=1.00  mrr=1.00",
+      "approved  owner=1  agent=1",
+    ]);
+    const { bySource: _b, approvals: _a, ...older } = report;
+    expect(breakdownLines(older)).toEqual([]);
+  });
+});
+
+describe("goldenForRun: each corpus reads its own file", () => {
+  const fixtureLine = JSON.stringify({ ...item, expected: [{ origin: "note--fairness-in-ml.md" }] });
+  const realLine = JSON.stringify({ ...item, id: "d-0000000001", corpus: "real", expected: [{ document_id: "0b9c6a38-1111-4222-8333-444455556666" }] });
+
+  it("reads fixtures items from golden.jsonl and real items from golden-real.jsonl", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-golden-"));
+    await writeFile(join(dir, "golden.jsonl"), `${fixtureLine}\n`);
+    await writeFile(join(dir, "golden-real.jsonl"), `${realLine}\n`);
+    expect((await goldenForRun(join(dir, "golden.jsonl"), "fixtures")).map((i) => i.id)).toEqual(["q05"]);
+    expect((await goldenForRun(join(dir, "golden-real.jsonl"), "real")).map((i) => i.id)).toEqual(["d-0000000001"]);
+  });
+  it("treats a missing real file as no items, but a missing fixtures file as an error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-golden-"));
+    expect(await goldenForRun(join(dir, "golden-real.jsonl"), "real")).toEqual([]);
+    await expect(goldenForRun(join(dir, "golden.jsonl"), "fixtures")).rejects.toThrow(/ENOENT/);
+  });
+  it("refuses a file whose name says it holds the other corpus", async () => {
+    await expect(goldenForRun("eval/golden.jsonl", "real")).rejects.toThrow(
+      "eval/golden.jsonl holds fixtures items (only files named *-real.jsonl hold real items); --corpus real reads eval/golden-real.jsonl by default",
+    );
+    await expect(goldenForRun("eval/golden-real.jsonl", "fixtures")).rejects.toThrow(/holds real items/);
+  });
+  it("rejects a real item found in the fixtures file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-golden-"));
+    await writeFile(join(dir, "golden.jsonl"), `${fixtureLine}\n${realLine}\n`);
+    await expect(goldenForRun(join(dir, "golden.jsonl"), "fixtures")).rejects.toThrow(/belongs in golden-real\.jsonl/);
+  });
+  it("says why there are no items", () => {
+    expect(noItemsMessage("eval/golden-real.jsonl", "real", false)).toBe(
+      "eval: eval/golden-real.jsonl does not exist, so there are no real items to run (real-corpus items stay on the owner's machine: the file is gitignored)",
+    );
+    expect(noItemsMessage("/x/golden.jsonl", "fixtures", true)).toBe("eval: no fixtures items in /x/golden.jsonl");
+  });
+});
+
+describe("acceptRefusal", () => {
+  it("refuses to record a baseline from a run with no items, so --corpus real --accept cannot write an empty baseline", () => {
+    expect(acceptRefusal("real", 0, "eval/baseline-real.json")).toBe(
+      "eval: refusing --accept: the run had no real items, so eval/baseline-real.json would record an empty baseline",
+    );
+    expect(acceptRefusal("fixtures", 0, "eval/baseline.json")).toMatch(/no fixtures items/);
+    expect(acceptRefusal("real", 3, "eval/baseline-real.json")).toBeNull();
   });
 });
 

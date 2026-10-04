@@ -1,4 +1,4 @@
-import type { Expected, GoldenKind } from "./golden.js";
+import type { Approver, Expected, GoldenKind, GoldenSource } from "./golden.js";
 import type { Timings } from "../retrieve/contract.js";
 
 export interface RankedDoc {
@@ -15,6 +15,9 @@ export interface RankedDoc {
 export interface QuestionResult {
   id: string;
   kind: GoldenKind;
+  /** The golden item's source (fixture, generated, captured) and who approved it, for the per-source breakdown. */
+  source: GoldenSource;
+  approvedBy: Approver;
   negative: boolean;
   expected: Expected[];
   ranked: RankedDoc[];
@@ -55,6 +58,10 @@ export interface Report {
   latencyMs: Percentiles;
   /** p50/p95 of each search stage over the main questions. Optional: baselines recorded before Phase 4 have none. */
   stageLatencyMs?: StageLatency;
+  /** Rank metrics per golden source (fixture, generated, captured) over positive items. Optional: added in Phase 6. */
+  bySource?: Record<string, RankMetrics>;
+  /** Items (positive and negative) per approver. Optional: added in Phase 6. */
+  approvals?: Record<Approver, number>;
 }
 
 export interface Percentiles {
@@ -189,6 +196,8 @@ export function summarize(results: QuestionResult[], threshold: number): Report 
   const negatives = results.filter((r) => r.negative);
   const byKind: Record<string, RankMetrics> = {};
   for (const kind of new Set(positives.map((r) => r.kind))) byKind[kind] = rankMetrics(positives.filter((r) => r.kind === kind));
+  const bySource: Record<string, RankMetrics> = {};
+  for (const source of new Set(positives.map((r) => r.source))) bySource[source] = rankMetrics(positives.filter((r) => r.source === source));
   const latencies = results.map((r) => r.totalMs);
   const stage = (pick: (t: Timings) => number): Percentiles => {
     const xs = results.map((r) => pick(r.timings));
@@ -209,5 +218,7 @@ export function summarize(results: QuestionResult[], threshold: number): Report 
     degradedFraction: searches.length ? searches.filter(Boolean).length / searches.length : 0,
     latencyMs: { p50: percentile(latencies, 50), p95: percentile(latencies, 95) },
     stageLatencyMs: { embed: stage((t) => t.embedMs), sql: stage((t) => t.sqlMs), rerank: stage((t) => t.rerankMs), graph: stage((t) => t.graphMs) },
+    bySource,
+    approvals: { owner: results.filter((r) => r.approvedBy === "owner").length, agent: results.filter((r) => r.approvedBy === "agent").length },
   };
 }

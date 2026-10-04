@@ -49,8 +49,15 @@ npm run brain -- node "<name or id>"
 npm run brain -- facts [--all]
 npm run brain -- set-author <document-id> <owner|other|unknown>
 npm run brain -- eval ingest [dir]
-npm run brain -- eval run [--golden eval/golden.jsonl] [--baseline eval/baseline.json] [--verifier eval/verifier.jsonl] [--verifier-baseline eval/verifier-baseline.json] [--compare] [--gate] [--accept] [--json]
+npm run brain -- eval sync
+npm run brain -- eval run [--corpus fixtures|real] [--golden eval/golden.jsonl] [--baseline eval/baseline.json] [--verifier eval/verifier.jsonl] [--verifier-baseline eval/verifier-baseline.json] [--compare] [--gate] [--accept] [--json]
 npm run brain -- eval verifier [--file eval/verifier.jsonl] [--baseline eval/verifier-baseline.json] [--gate] [--accept] [--json]
+npm run brain -- eval draft [--corpus fixtures|real] [--since 2026-09-01] [--limit 10] [--doc <file name or id>...] [--force]
+npm run brain -- eval drafts
+npm run brain -- eval approve --sheet eval/review/<date>-<n>.md
+npm run brain -- eval reject --id <draft id>...
+npm run brain -- eval capture [--corpus real|fixtures] [--since 2026-09-01] [--client mcp-stdio] [--limit 20]
+npm run brain -- eval label <retrieval-id> (--expect <document> [--quote "<verbatim span>"] [--kind semantic] | --negative) [--corpus real|fixtures]
 npm run brain -- backfill [--limit 500] [--poll 30]
 ```
 
@@ -58,7 +65,7 @@ npm run brain -- backfill [--limit 500] [--poll 30]
 
 - `npm run test:unit` needs nothing.
 - `npm run test:int` needs `npm run db:start`. It recreates a separate `brain_test` database from the migrations and runs there with fakes for Claude and Voyage, so your real knowledge base is never touched. The test helper refuses any database whose name does not end in `_test`.
-- The retrieval eval runs only against `brain_eval` and checks the live connection before any write (`npm run eval:prepare` creates it from the migrations; `--reset` recreates it). `npm run brain -- eval ingest` loads `eval/corpus`; `npm run eval:run` scores `eval/golden.jsonl` and compares with `eval/baseline.json`; `npm run eval:gate` exits 1 on a regression (recall@10 or MRR down more than 0.02, abstention down, any degraded search, a changed golden set, no baseline, or the citation verifier failing its gate on `eval/verifier.jsonl`: regular precision of `supported` below 0.9, full precision more than 0.02 below `eval/verifier-baseline.json`, a changed verifier set, or no verifier baseline; see "Checking an answer against its sources"). Each run also prints `voyage tokens=… requests=… refused=…`: the Voyage tokens that run used, from `brain_eval`'s own ledger and cap (not part of the baseline). After a deliberate change, `npm run brain -- eval run --accept` records the new baseline. `eval:prepare` only creates `brain_eval`; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. Metrics: set recall@1/5/10 over the top-k passages, MRR over distinct documents, nDCG@10 against all quote-bearing passages, paraphrase consistency, abstention and false-answer rate on negatives, degraded fraction, nearest-rank latency from each search's own `timings.totalMs`, and p50/p95 per stage (embed, sql, rerank, graph; recorded in baselines from Phase 4 on). Baseline on 2026-09-30 (commit `2b3426d`, before any retrieval change): recall@1 0.79, recall@10 1.00, MRR 1.00, p50 236 ms, 0% degraded, 14 questions over 6 documents. The set is small and has no negatives yet, so treat it as a regression check until Phase 6 of `docs/superpowers/specs/2026-09-30-retrieval-hardening-design.md` grows it.
+- The retrieval eval runs only against databases whose names end in `_eval`: `brain_eval` holds the fixture corpus (`npm run eval:prepare`, then `npm run brain -- eval ingest`) and `brain_real_eval` a copy of the real base (`npm run eval:prepare-real`, then `npm run brain -- eval sync`). Each run checks the live connection before any write. `npm run eval:run` scores the golden set against the baseline and `npm run eval:gate` is the regression gate. The fixture items (`eval/golden.jsonl`) are committed; the real-base items live in `eval/golden-real.jsonl`, which is gitignored and stays on the owner's machine, because the repository is public and those items quote the owner's own documents. `eval:prepare` only creates a database; to bring an existing one up to date after a new migration, apply that migration file to it with `psql .../brain_eval -v ON_ERROR_STOP=1 -f <file>`. The metrics, the gate, how golden questions are written and approved, the current numbers and how to reproduce them are in "How retrieval works and how to audit it" below.
 
 ## Layout
 
@@ -99,17 +106,29 @@ psql postgresql://postgres:postgres@127.0.0.1:55322/postgres -c "select created_
 
 ### Reading a search result
 
-Every search (`brain_search`, `brain search`, `brain ask`) returns one structure, the evidence contract in `src/retrieve/contract.ts`, and logs it to `brain.retrieval_log`. The text is generated from that structure, so what the model reads, what you read and what is logged say the same thing. `brain_search` also returns it as `structuredContent`; `brain search --json` prints it.
+Every search (`brain_search`, `brain search`, `brain ask`) returns one structure, the evidence contract in `src/retrieve/contract.ts`, and logs it to `brain.retrieval_log`. The text is generated from that structure, so what the model reads, what you read and what is logged say the same thing. `brain_search` also returns it as `structuredContent`, without each passage's text, which the text content already carries (`brain search --json` prints the full structure, text included). Measured on the largest possible result (k=30 plus 25 graph passages at the 1,600-character passage cap, `test/unit/search-output-size.test.ts`), repeating the text in `structuredContent` would bring one call to about 235 KB; without it the call is about 146 KB, of which the text is about 106 KB, which is more than some clients show from one tool call (Claude Code's default limit is 25,000 tokens). At the default k=10 the largest result stays under 100 KB (about 99 KB).
 
 ```
-retrieval 6f1c2a0e-… · mode: hybrid · 7 passages
+retrieval 6f1c2a0e-… · mode: hybrid · 3 passages
 
 [P1] 0.76 rerank · vector#2 keyword#5 · note · author: other · "Databricks costs" · 2026-09-29 (doc 31f1…, chunk 5ec6…)
-[P6] - · graph via Acme Corp · note · author: owner · "Acme notes" · undated (doc 8b0d…, chunk 77a1…)
-[P7] - · fallback "X-90" · news · author: other · "Zorblax news" · 2026-08-02 (doc 4c3e…, chars 0–260)
+  What a runaway Databricks bill taught me
+Three months later the invoice had nearly quadrupled, from about $41,000 a month to $157,000…
+
+[P2] - · graph via Acme Corp · note · author: owner · "Acme notes" · undated (doc 8b0d…, chunk 77a1…)
+Priya confirmed Acme sponsors H-1B and has done it for two analysts on her team…
+
+[P3] - · fallback "X-90" · news · author: other · "Zorblax news" · 2026-08-02 (doc 4c3e…, chars 0–260)
+…the X-90 replaces the older model in all Texas plants…
+
+Documents by summary: Databricks costs [note] (doc 31f1…); Acme notes [note] (doc 8b0d…)
+Entity organization: Acme Corp (node 2d1e…, matched "acme corp") — Priya Natarajan (person), Austin, TX (place)
+Facts about the owner:
 [F1] visa_status: F-1 OPT (unverified · from note 9a2e…)
 [F2] lives_in: Denver (unverified · stated by owner)
 ```
+
+Each passage is its provenance line, then its heading path (indented, when it has one) and its full text; `brain search` on the command line prints the text as one line of at most 240 characters instead. After the passages come the documents whose summaries matched, the entities named in the query with their neighbours, and the facts about the owner.
 
 - `retrieval <id>`: the log row. `npm run brain -- explain <id>` or `brain_explain` replays the search from the log without searching again: query, filters, client, time, mode, which parts fell back, candidate counts per branch, stage timings, and each passage's rank, score and branch ranks.
 - `mode`: `hybrid` means vector and keyword candidates, reranked. `keyword-only` means the query embedding failed or the Voyage cap refused it, so there were only keyword candidates and nothing was reranked. `fused-order` means the rerank failed or was refused, so the candidates are in reciprocal-rank-fusion order. A degraded search says why on the next line.
@@ -221,6 +240,111 @@ claude mcp add --transport http brain-remote https://brain-mcp.fly.dev/mcp --hea
 ```
 
 Claude Desktop and ChatGPT take the same URL and header in their connector settings. Alternative with no hosting: run `npm run mcp:http` on the Mac and expose the port through Tailscale or a Cloudflare Tunnel.
+
+## How retrieval works and how to audit it
+
+This section is for a reader who wants to check the method rather than use the tool. Every claim below points at the code or table that implements it.
+
+![A query runs through five layers into one evidence contract, which is shown to the client, logged, replayed by brain_explain and used by brain_verify](docs/retrieval.svg)
+
+No model ranks results or checks answers. Ranking is Postgres plus Voyage (embeddings and a reranker, under a daily token cap); answer checking is Postgres stemming plus fixed rules. Claude is called when a document is ingested (summary and entity extraction), when `brain ask` writes its answer, and when the owner asks for draft eval questions.
+
+### The five layers
+
+`search()` in `src/retrieve/search.ts` runs, for one query:
+
+1. **Hybrid passages.** A vector branch (HNSW over Voyage embeddings of each passage) and a keyword branch (a GIN index over the stems of each passage's text, heading path and title, matching any query stem and ranked by how many distinct stems match) each return up to 60 candidates. They are fused with reciprocal rank fusion (k = 60) and reranked by Voyage; the top k (default 10, at most 30) are returned with the rerank score, 0 to 1. If the query embedding fails or is refused, the search is keyword-only; if the rerank fails or is refused, the passages keep their fused order. The result says which (`mode`).
+2. **Document summaries.** The same two branches over each document's summary, fused, listed after the passages.
+3. **Graph expansion.** Entities named in the query (any case, names up to six words, at most 5) are matched to graph nodes; each adds up to 20 neighbours and up to 5 passages that mention it. A graph passage has no score; a ranked passage the graph also reached keeps its score and gains the entity.
+4. **Facts about the owner.** Current facts that share a stem with the query or point at a named entity, at most 10, entity-linked first.
+5. **Literal scan.** When the query holds an exact-string term (a code such as `X-90`, a figure such as `$115k`, a version) and the best rerank score is below 0.3 or the search was degraded, documents containing the term are scanned and a window around the match is returned.
+
+The parameters are in `src/config.ts` (`retrieval`, `graph`) and `src/retrieve/fuse.ts`. `test/integration/search-plan.test.ts` fails if a query plan stops using the HNSW or GIN index.
+
+### The evidence contract and brain_explain
+
+Every search returns one structure (`SearchResult` in `src/retrieve/contract.ts`): the retrieval id, the mode and which parts degraded, candidate counts per branch, stage timings, and for every passage its score and score kind, the layers that found it, its vector, keyword and rerank ranks, its document's author, source kind, date and ids. The text an MCP client reads is generated from this structure (see "Reading a search result"); `brain_search`'s `structuredContent` is the same structure without passage text. The structure, minus passage text, is written to `brain.retrieval_log` for every search, so `brain_explain <retrieval id>` (or `npm run brain -- explain <id>`) replays how a past search ranked its passages without searching again.
+
+### brain_verify and its limits
+
+After answering, a client passes the retrieval id and its claims, each with the `[P#]`/`[F#]` labels it cites, to `brain_verify`. Each claim gets `supported`, `partial`, `unsupported`, `uncited` or `bad_citation` from word overlap (Postgres stems), numbers, dates and codes, negation and polarity words, checked only against the passages and facts it cites; every verification is written to `brain.verification_log`. It checks vocabulary, not logic: reversed relations, swapped entities, antonyms and numbers attached to the wrong thing can pass, and a correct paraphrase in other words can fail. "Checking an answer against its sources" defines every rule and lists every limit. Measured on `eval/verifier.jsonl` (104 claims written and labelled by an agent, 27 of them known limits labelled with their true verdict): on the 77 claims the method is designed for, precision of `supported` is 1.00 and recall 0.98; on all 104, precision is 0.67 and recall 0.85 (2026-10-03).
+
+### Authorship and facts
+
+Every document records who wrote it (`owner`, `other`, `unknown`). Only documents the owner wrote produce facts about the owner or relationships from the owner; for others, those statements are kept in the stored extraction but not written, and counted. Single-valued facts (`lives_in`, `visa_status`, `current_employer` and five more, `singleValuedPredicates` in `src/config.ts`) keep one current value: a newer owner document supersedes the older value, and every supersession is logged in `brain.fact_events`. The eval measures leaks directly: the number of facts about the owner, and edges from the owner, whose evidence lies in a document the owner did not write. It must be 0.
+
+### The spend cap
+
+Every Voyage request is recorded in `brain.provider_usage` and refused before it is sent when the day's tokens plus its estimate would pass `BRAIN_VOYAGE_DAILY_TOKEN_CAP` (5,000,000 by default; there is no setting that turns it off). Each eval database counts against its own `BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP` (1,000,000 by default). A refused query embedding or rerank makes the search degraded, which the result says and the eval gate rejects. Details are under "Voyage spending cap".
+
+### The eval program
+
+**Two corpora, two databases.** `brain_eval` holds `eval/corpus`: 25 fictional documents (job posts, owner notes, recruiter emails, a meeting transcript, paper abstracts, news, a course note, a cover letter, a project retro, a saved article by someone else), written for this eval with shared people and companies so graph questions have something to traverse, and with planted traps: a near-duplicate job post with a different salary and visa policy, near-duplicate requisition codes (`REQ-4471`, `REQ-4417`), product codes one digit apart (`ZX-9000`, `ZX-9100`), two retrieval papers with different numbers, an interview date that a later email moves, and an owner note that says where the owner lives, superseded by a later one. `test/unit/corpus-fixtures.test.ts` pins every planted sentence. `brain_real_eval` is a copy of the real knowledge base made by `npm run brain -- eval sync` (documents, chunks with their embeddings, graph, facts; no model or Voyage call; the source is only read, through a read-only snapshot). `eval run --corpus real` runs the real-base items against `brain_real_eval`.
+
+**Public and private items.** This repository is public, so the two corpora are kept apart. Fixture items, which quote only the fictional corpus, are committed in `eval/golden.jsonl`, with their baseline in `eval/baseline.json`. Real-base items quote the owner's own documents, so they live in `eval/golden-real.jsonl`, and their drafts and review sheets in `eval/drafts-real.jsonl` and `eval/review/real/`. All of these are gitignored (`.gitignore` also catches any `*-real.jsonl` and any `real/` directory under `eval/`) and stay on the owner's machine. Real golden ids are opaque (`d-` and 10 hex digits, or `c-` and 8), so `eval/baseline-real.json`, which is committed, holds metrics and ids but no question or quote text.
+
+**The golden set.** `eval/golden.jsonl` holds 104 items on the fixture corpus: 78 approved by the owner and 26 written by an agent (the original fixture items and the ones that pin the corpus traps); 17 are negative and 16 attribution items. `eval/golden-real.jsonl` holds 8 more on the real base, all approved by the owner. The owner approved the two fixture review sheets as an agent recommended: an agent proposed `keep`, `edit` or `reject` for every draft, with a reason, and the owner accepted those recommendations as they stood. Of the 99 drafts on the two sheets, 62 were kept as drafted, 16 kept with edits and 21 rejected. The recommendation and reason for each item are in `eval/review/*.notes.md`, next to the sheets. Each item has a question, its kind (keyword, semantic, graph, filter, fallback, attribution, negative), the expected documents with an optional verbatim answer quote, optional paraphrases, its source (`fixture`, `generated`, `captured`) and who approved it. Items come from three places:
+
+- `fixture`: written with the corpus, labelled `approved_by: "agent"`.
+- `generated`: `npm run brain -- eval draft` makes one Claude call per document for 2 to 3 questions across kinds, each with a verbatim answer quote and two paraphrases, plus one question nothing in the corpus answers. Every draft is checked automatically: the document must be in the eval database; the quote must appear verbatim in the document (whitespace aside) and inside one passage, since the eval matches quotes per passage; the question must not contain its quote; it must not duplicate a golden item or another draft (same normalised text, or Postgres stem sets with Jaccard overlap of at least 0.8); the item must be valid under the golden schema. Passing drafts go to `eval/drafts.jsonl` and a review sheet, `eval/review/<date>-<n>.md`, where the owner marks each `keep`, `edit` (changing question, quote, kind or paraphrases in place) or `reject`. `npm run brain -- eval approve --sheet <file>` checks every kept and edited item again and only then adds them with `approved_by: "owner"`, the date, and whether they were edited. Agents never approve.
+- `captured`: `npm run brain -- eval capture` lists recent real searches from the knowledge base's log (opened read-only); `npm run brain -- eval label <retrieval id> --expect <document id> [--quote "…"]` turns one into an item approved by the owner, after checking the document is in `brain_real_eval` (run `eval sync` first; it keeps document ids).
+
+**Metrics** (`src/eval/metrics.ts`, `src/eval/run.ts`; no model call):
+
+| Metric | Definition | Over |
+|---|---|---|
+| Recall@k, k = 1, 5, 10 | Share of an item's expected documents found among the documents of its top k passages, averaged | positive items |
+| MRR | Mean of 1 / rank of the first expected document, ranks counted over distinct documents; 0 on a miss | positive items |
+| nDCG@10 | Binary relevance per passage: a stored passage of an expected document that contains the quote (whitespace aside); the ideal ranking puts every such passage in the corpus first, up to 10 | items with quotes |
+| Paraphrase consistency | Share of paraphrases whose top 10 finds the same set of expected documents as the original question | positive items with paraphrases |
+| Abstention rate | Share of negative items whose top rerank score is below 0.3 and that got no graph-only passage | negative items |
+| False-answer rate | Share of negative items whose top rerank score is 0.3 or more | negative items |
+| Degraded fraction | Share of searches (questions and paraphrases) that ran without the embedding or the rerank | all searches |
+| Latency | Nearest-rank p50 and p95 of each search's own total time, and per stage (embed, SQL, rerank, graph) | all items |
+| Attribution leaks | Facts about, and edges from, the owner whose evidence is in a document the owner did not write | whole database |
+| Voyage | Tokens, requests and refused calls of the run, from the eval database's ledger | the run |
+| Verifier | Precision and recall of `supported`, and accuracy, on `eval/verifier.jsonl`, regular and full views | verifier set |
+
+Every run prints these overall, per kind, per source (`fixture`, `generated`, `captured`) and the count of items per approver.
+
+**The gate.** `npm run eval:gate` exits 1 when recall@10 or MRR falls more than 0.02 below `eval/baseline.json` (or `eval/baseline-real.json` for `--corpus real`), the abstention rate falls, negative items disappear, any search ran degraded, the golden set changed since the baseline, there is no baseline, any attribution leak exists, or the verifier fails its gate (regular precision of `supported` below 0.9, full precision more than 0.02 below `eval/verifier-baseline.json`, a changed verifier set, or no verifier baseline).
+
+**Current numbers.** Baseline recorded on 2026-10-04 (UTC) over the fixture corpus (104 items, 87 positive and 17 negative). `eval/baseline.json` records commit `3b7f3dc`, the code the run used; the golden set and the baselines were committed right after it, with no change under `src/`.
+
+| | n | Recall@1 | Recall@5 | Recall@10 | MRR | nDCG@10 |
+|---|---|---|---|---|---|---|
+| All positive items | 87 | 0.89 | 0.98 | 1.00 | 0.94 | 0.97 |
+| keyword | 27 | 0.96 | 1.00 | 1.00 | 0.98 | 0.98 |
+| semantic | 26 | 0.92 | 0.96 | 1.00 | 0.95 | 0.97 |
+| graph | 11 | 0.58 | 0.97 | 1.00 | 0.80 | 0.89 |
+| filter | 4 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| fallback | 3 | 0.67 | 0.89 | 0.89 | 0.83 | - |
+| attribution | 16 | 0.94 | 1.00 | 1.00 | 0.97 | 0.98 |
+| source `fixture` (agent) | 24 | 0.72 | 0.93 | 0.99 | 0.86 | 0.90 |
+| source `generated` (owner) | 63 | 0.95 | 1.00 | 1.00 | 0.97 | 0.98 |
+
+Paraphrase consistency 1.00 over 126 paraphrase searches. Degraded 0%. Latency p50 363 ms, p95 525 ms; per stage p50: embed 139 ms, SQL 28 ms, rerank 178 ms, graph 11 ms. Attribution leaks 0. Recall@10 for all positive items is 0.996, shown rounded. `npm run eval:gate` was not re-run after `eval run --accept`, because a second full run would pass the day's 4,000,000-token eval cap; the baseline is that same run, on unchanged code.
+
+**The main open gap: the system rarely abstains.** On the 17 negative questions, which nothing in the corpus answers, the abstention rate is 0.06 and the false-answer rate 0.94: in 16 of 17, the top passage scored at least 0.3 on the reranker. So a top score above the 0.3 threshold does not show that the knowledge base holds the answer, and a client should not read it that way. This was recorded, not tuned: picking a threshold to fit these 17 questions would fit the test set. The next step, calibrating abstention on a held-out split, is in `docs/superpowers/plans/2026-09-30-retrieval-hardening-roadmap.md` ("After Phase 6: next work").
+
+**Graph scores are partly an artefact.** Graph items have the lowest scores (recall@1 0.58, MRR 0.80), but the figures are not yet clean evidence of a retrieval weakness, for two reasons. First, the owner-approved graph items ("What do I know about X?") were drafted one document at a time, so each lists only the document it was drafted from as expected, even when the person appears in several. A search that ranks another document about that person first is counted as a miss at rank 1: d-738fd2a676 (Jordan Ellis) expects only the Fund III news article and ranks it 3rd, and d-16387bfc40 (Taylor Brooks) ranks its one expected document 2nd. Second, recall@1 is capped for items with several expected documents, because the top passage belongs to one document: q07 has 3 expected documents, so its recall@1 is at most 0.33, and q08 and q09 have 2 each, so at most 0.5. Adding the other answering documents to these items is listed in the roadmap's next work.
+
+**On the real base** (8 private items, 6 positive and 2 negative, in the gitignored `eval/golden-real.jsonl`; baseline `eval/baseline-real.json`): recall@1 1.00 and MRR 1.00; abstention 0.00 and false-answer rate 1.00 on the 2 negatives. Eight items are too few to be more than a smoke test.
+
+**Cost.** One full fixture run used about 2.0 million Voyage tokens in 460 requests, mostly reranking: every question and paraphrase reranks every candidate passage. That is more than the eval's default daily cap of 1,000,000, so the cap was raised for the day to record the baseline (to 4,000,000).
+
+**Reproduce.**
+
+```bash
+npm run db:start
+npm run eval:prepare                                  # creates brain_eval from the migrations
+OBSIDIAN_AUTO=0 npm run brain -- eval ingest          # 25 documents: a summary and an extraction call each, plus Voyage embeddings
+BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP=4000000 npm run eval:gate   # every metric above, compared with eval/baseline.json
+npm run brain -- eval verifier                        # the verifier alone, item by item, no Voyage call
+npm run eval:prepare-real && npm run brain -- eval sync && npm run brain -- eval run --corpus real --compare   # needs your own eval/golden-real.jsonl
+```
+
+A rebuilt `brain_eval` re-runs summarisation and entity extraction, which are model output and can differ between runs, so graph-dependent ranks can move slightly; the baseline is tied to the database it was recorded on. Without a raised `BRAIN_EVAL_VOYAGE_DAILY_TOKEN_CAP`, the default 1,000,000 a day refuses calls partway through a run, which then says it ran degraded, and the gate fails.
 
 ## Obsidian
 
