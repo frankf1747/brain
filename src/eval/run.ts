@@ -22,12 +22,17 @@ export function kindFromFilename(name: string): string {
 /**
  * Optional front matter at the top of a fixture: `---`, `key: value` lines, `---`. Only `author` is read
  * (owner, other or unknown, optionally quoted); other keys are ignored. Returns the text without the block.
+ * A file that opens a fence and never closes it throws: storing the block as body text with the kind's default
+ * author would silently attribute the document to the wrong writer.
  */
 export function splitFrontMatter(text: string): { author: Author | undefined; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
-  if (!m) return { author: undefined, body: text };
+  const m = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!m) {
+    if (/^---[ \t]*\r?\n/.test(text)) throw new Error("front matter: the opening --- has no closing --- line");
+    return { author: undefined, body: text };
+  }
   let author: Author | undefined;
-  for (const line of m[1].split(/\r?\n/)) {
+  for (const line of (m[1] ?? "").split(/\r?\n/)) {
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$/.exec(line);
     if (!kv) {
       if (line.trim()) throw new Error(`front matter: cannot read line "${line}"`);

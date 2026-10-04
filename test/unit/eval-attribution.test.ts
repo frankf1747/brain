@@ -11,6 +11,13 @@ describe("splitFrontMatter", () => {
   it("accepts quoted values, CRLF line ends and other keys", () => {
     expect(splitFrontMatter('---\r\ntags: x\r\nauthor: "Owner"\r\n---\r\nText')).toEqual({ author: "owner", body: "Text" });
   });
+  it("throws when the opening fence has no closing fence, instead of storing the block as body text", () => {
+    expect(() => splitFrontMatter("---\nauthor: other\n# Title\n\nBody.\n")).toThrow("front matter: the opening --- has no closing --- line");
+    expect(() => splitFrontMatter("---\r\nauthor: other\r\nText")).toThrow(/no closing/);
+  });
+  it("accepts an empty block", () => {
+    expect(splitFrontMatter("---\n---\nText")).toEqual({ author: undefined, body: "Text" });
+  });
   it("rejects an author outside owner, other and unknown", () => {
     expect(() => splitFrontMatter("---\nauthor: me\n---\nx")).toThrow(/author must be one of/);
   });

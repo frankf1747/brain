@@ -68,6 +68,22 @@ describe("explain", () => {
     expect(e.topScore).toBeCloseTo(0.031, 5);
     const text = renderExplain(e);
     expect(text).toContain("logged before evidence v2");
-    expect(text).toContain("top score: 0.03");
+    expect(text).toContain("top score: 0.0310");
+    expect(e.notes).toEqual([]);
+  });
+
+  it("explains a row whose logged passages no longer fit the contract from its v1 columns, with a note", async () => {
+    const [row] = await sql<{ id: string }[]>`
+      insert into brain.retrieval_log (query, filters, layers, chunk_ids, node_ids, top_score, used_fallback, client, results, k, mode)
+      values ('future row', '{}'::jsonb, '{hybrid,summary}', '{}'::uuid[], '{}'::uuid[], 0.5, false, 'mcp-stdio',
+              '[{"chunkId": "c1"}]'::jsonb, 10, 'hybrid')
+      returning id`;
+    const e = (await explain(sql, row.id))!;
+    expect(e).toMatchObject({ v2: false, results: null, k: 10, mode: "hybrid", layers: ["hybrid", "summary"] });
+    expect(e.notes).toHaveLength(1);
+    expect(e.notes[0]).toMatch(/^results could not be read with the current contract \(0\.\w+: .*\); shown as not recorded$/);
+    const text = renderExplain(e);
+    expect(text).toContain(`note: ${e.notes[0]}`);
+    expect(text).toContain("logged before evidence v2");
   });
 });
