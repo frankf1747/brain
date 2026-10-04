@@ -6,7 +6,7 @@ import type { Layer, SearchResult } from "../../src/retrieve/contract.js";
 import { passage, searchResult as baseResult } from "./search-fixture.js";
 
 const item: GoldenItem = {
-  id: "q05", question: "Why?", kind: "semantic", negative: false, source: "fixture", approved_at: "2026-09-30",
+  id: "q05", question: "Why?", kind: "semantic", negative: false, source: "fixture", corpus: "fixtures", approved_by: "agent", approved_at: "2026-09-30",
   expected: [{ origin: "note--fairness-in-ml.md", quote: "cannot satisfy all three" }],
 };
 

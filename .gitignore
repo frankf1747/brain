@@ -4,3 +4,7 @@ dist/
 supabase/.temp/
 supabase/.branches/
 .DS_Store
+# Real-corpus eval items quote the owner's private documents; the repository is public, so they stay on the owner's machine.
+eval/golden-real.jsonl
+eval/drafts-real.jsonl
+eval/review/real/
