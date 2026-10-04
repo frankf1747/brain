@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFile, readdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { parseGolden } from "../../src/eval/golden.js";
-import { splitFrontMatter, normalizeWhitespace } from "../../src/eval/run.js";
+import { splitFrontMatter, normalizeWhitespace, kindFromFilename } from "../../src/eval/run.js";
+import { defaultAuthor } from "../../src/ingest/author.js";
 
 // The committed file holds fixtures items only: real-corpus items quote private documents and stay in eval/golden-real.jsonl.
 const golden = async () => parseGolden(await readFile("eval/golden.jsonl", "utf8"), "fixtures");
@@ -27,12 +28,12 @@ describe("eval/golden.jsonl against eval/corpus", () => {
       }
     }
   });
-  it("has at least three attribution items, each naming a fixture marked author: other, and a negative item", async () => {
+  it("has at least five attribution items, each naming a fixture the owner did not write (front matter or its kind's default), and a negative item", async () => {
     const items = await golden();
     const attribution = items.filter((i) => i.kind === "attribution");
-    expect(attribution.length).toBeGreaterThanOrEqual(3);
+    expect(attribution.length).toBeGreaterThanOrEqual(5);
     for (const a of attribution) {
-      for (const e of a.expected) expect([a.id, (await fixture(e.origin!)).author]).toEqual([a.id, "other"]);
+      for (const e of a.expected) expect([a.id, (await fixture(e.origin!)).author ?? defaultAuthor(kindFromFilename(e.origin!))]).toEqual([a.id, "other"]);
     }
     expect(items.some((i) => i.negative)).toBe(true);
   });
