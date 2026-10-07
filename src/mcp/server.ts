@@ -1,4 +1,5 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { Ctx } from "../ctx.js";
 import { storeDocument } from "../ingest/store.js";
@@ -81,12 +82,16 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     }
     return res;
   };
+  const registered = new Map<string, RegisteredTool>();
   // Same signature as server.registerTool, so every registration below keeps its argument typing.
-  const register = ((name: string, config: unknown, cb: (a: Record<string, unknown>, extra: unknown) => Promise<ToolResult>) =>
-    server.registerTool(name, config as never, (async (a: Record<string, unknown>, extra: unknown) => {
+  const register = ((name: string, config: unknown, cb: (a: Record<string, unknown>, extra: unknown) => Promise<ToolResult>) => {
+    const tool = server.registerTool(name, config as never, (async (a: Record<string, unknown>, extra: unknown) => {
       const started = Date.now();
       return record(name, a ?? {}, started, await cb(a, extra));
-    }) as never)) as typeof server.registerTool;
+    }) as never);
+    registered.set(name, tool);
+    return tool;
+  }) as typeof server.registerTool;
 
   register(
     "brain_orient",
@@ -205,7 +210,7 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
-  if (opts.readOnly) return server;
+  if (opts.readOnly) return listToolsAs2020(server, registered);
 
   register(
     "brain_ingest",
@@ -274,5 +279,34 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
     },
   );
 
+  return listToolsAs2020(server, registered);
+}
+
+/**
+ * The SDK (1.31 and 1.32) converts Zod v4 schemas to JSON Schema draft-07 with no option to change it, and clients whose
+ * validator only accepts 2020-12 reject the outputSchema of brain_search and brain_verify, failing every call. This
+ * serves tools/list itself, with the same fields the SDK sends but each schema converted as 2020-12.
+ */
+function listToolsAs2020(server: McpServer, tools: Map<string, RegisteredTool>): McpServer {
+  const toJson = (schema: unknown, io: "input" | "output") => {
+    // The SDK stores a schema, or a zod/v4-mini object for an empty shape; both carry _zod, which toJSONSchema reads.
+    const zod = schema && typeof schema === "object" && "_zod" in schema ? (schema as z.ZodType) : z.object({});
+    return z.toJSONSchema(zod, { target: "draft-2020-12", io }) as Tool["inputSchema"];
+  };
+  server.server.removeRequestHandler("tools/list");
+  server.server.setRequestHandler(ListToolsRequestSchema, () => ({
+    tools: [...tools.entries()]
+      .filter(([, t]) => t.enabled)
+      .map(([name, t]): Tool => ({
+        name,
+        title: t.title,
+        description: t.description,
+        inputSchema: toJson(t.inputSchema, "input"),
+        ...(t.outputSchema ? { outputSchema: toJson(t.outputSchema, "output") } : {}),
+        annotations: t.annotations,
+        execution: t.execution,
+        _meta: t._meta,
+      })),
+  }));
   return server;
 }

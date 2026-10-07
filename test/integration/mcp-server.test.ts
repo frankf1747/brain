@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { testDb, wipe, fakeCtx } from "./helpers.js";
 import { fakeExtraction } from "./fixtures.js";
 import { SUMMARY_SYSTEM } from "../../src/ingest/stages/summarize.js";
@@ -48,6 +49,20 @@ describe("brain MCP server", () => {
     const ro = await connect(true);
     expect(ro.client.getInstructions() ?? "").not.toContain("brain_ingest");
     await ro.close();
+  });
+
+  it("publishes every tool schema as JSON Schema 2020-12, which clients that validate structured output require", async () => {
+    const s = await connect();
+    const tools = (await s.client.listTools()).tools;
+    for (const t of tools) {
+      expect(t.inputSchema.$schema, t.name).toBe("https://json-schema.org/draft/2020-12/schema");
+      if (t.outputSchema) {
+        expect(t.outputSchema.$schema, t.name).toBe("https://json-schema.org/draft/2020-12/schema");
+        expect(() => new Ajv2020({ strict: false }).compile(t.outputSchema!), t.name).not.toThrow();
+      }
+    }
+    expect(tools.filter((t) => t.outputSchema).map((t) => t.name).sort()).toEqual(["brain_search", "brain_verify"]);
+    await s.close();
   });
 
   it("brain_orient reports today's Voyage tokens against the cap", async () => {
