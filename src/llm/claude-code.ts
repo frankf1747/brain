@@ -62,8 +62,9 @@ const PROMPT = "Apply your instructions to the user message provided with this r
 
 /**
  * Model backend that shells out to the official Claude Code CLI in print mode, so calls are covered by
- * the user's Claude subscription instead of per-token API billing. Tools are disabled and the default
- * coding-agent system prompt is replaced, so this is a plain model call.
+ * the user's Claude subscription instead of per-token API billing. Tools are disabled, none of the user's MCP servers
+ * are started (--strict-mcp-config with no --mcp-config; otherwise every call launches all of them, this server
+ * included), and the default coding-agent system prompt is replaced, so this is a plain model call.
  */
 export class ClaudeCodeLlm implements Llm {
   readonly model: string;
@@ -77,7 +78,7 @@ export class ClaudeCodeLlm implements Llm {
   }
 
   private args(system: string, schema?: z.ZodType<unknown>): string[] {
-    const args = ["-p", PROMPT, "--output-format", "json", "--tools", "", "--no-session-persistence", "--system-prompt", system, "--model", this.model];
+    const args = ["-p", PROMPT, "--output-format", "json", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--system-prompt", system, "--model", this.model];
     if (schema) {
       // The CLI silently ignores a schema that carries a "$schema" key (verified on 2.1.145), so drop it.
       const { $schema: _, ...json } = z.toJSONSchema(schema) as Record<string, unknown>;

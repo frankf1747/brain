@@ -275,18 +275,35 @@ export function renderOrient(o: Orientation): string {
   ].join("\n");
 }
 
+/** Items grouped by key, groups in first-seen order. */
+function groupBy<T>(items: T[], key: (item: T) => string): T[][] {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const k = key(item);
+    groups.set(k, [...(groups.get(k) ?? []), item]);
+  }
+  return [...groups.values()];
+}
+
 export function renderNode(n: NodeReport): string {
   const out = [`${n.type}: ${n.name}${n.verified ? " (verified)" : ""} (node ${n.id})`];
   if (n.aliases.length) out.push(`Aliases: ${n.aliases.join(", ")}`);
   if (Object.keys(n.properties).length) out.push(`Properties: ${JSON.stringify(n.properties)}`);
-  if (n.edges.length) {
+  // The graph keeps one edge, and one fact, per supporting passage; list each relationship and fact once, with its count.
+  const edges = groupBy(n.edges, (e) => `${e.direction} ${e.type} ${e.otherId}`);
+  if (edges.length) {
     out.push("Relationships:");
-    for (const e of n.edges) {
-      out.push(`- ${e.direction === "out" ? "→" : "←"} ${e.type} ${e.otherName} (${e.otherType}, node ${e.otherId})`);
-      if (e.evidence) out.push(`    "${e.evidence.replace(/\s+/g, " ").trim()}"${e.evidenceDocumentTitle ? ` — ${e.evidenceDocumentTitle} (document ${e.evidenceDocumentId})` : ""}`);
+    for (const [e, ...more] of edges) {
+      const support = more.length ? ` · ${more.length + 1} supporting passages` : "";
+      out.push(`- ${e.direction === "out" ? "→" : "←"} ${e.type} ${e.otherName} (${e.otherType}, node ${e.otherId})${support}`);
+      const quoted = [e, ...more].find((x) => x.evidence);
+      if (quoted) out.push(`    "${quoted.evidence!.replace(/\s+/g, " ").trim()}"${quoted.evidenceDocumentTitle ? ` — ${quoted.evidenceDocumentTitle} (document ${quoted.evidenceDocumentId})` : ""}`);
     }
   }
-  if (n.facts.length) out.push("Facts:\n" + n.facts.map((f) => `- ${f.predicate}: ${f.objectText}${f.verified ? "" : " (unverified)"} (fact ${f.id})`).join("\n"));
+  const facts = groupBy(n.facts, (f) => `${f.predicate}\u0000${f.objectText}\u0000${f.verified}`);
+  if (facts.length) {
+    out.push("Facts:\n" + facts.map((g) => `- ${g[0].predicate}: ${g[0].objectText}${g[0].verified ? "" : " (unverified)"} (${g.length > 1 ? "facts" : "fact"} ${g.map((f) => f.id).join(", ")})`).join("\n"));
+  }
   out.push(`Mentioned in ${n.mentionCount} passages across ${n.mentionedIn.length} documents:` + (n.mentionedIn.length ? "\n" + n.mentionedIn.map((d) => `- ${d.title ?? "(untitled)"} [${d.sourceKind}] (document ${d.documentId})`).join("\n") : ""));
   return out.join("\n");
 }
@@ -318,10 +335,17 @@ export function renderStatus(
   inflight: string[],
   failures: { document_id: string; stage: string; error: string }[],
   suppressed: SuppressedDocument[] = [],
+  stalled: { document_id: string; stage: string; idle_minutes: number; resumed: boolean }[] = [],
 ): string {
   const out = [pipeline.map((p) => `${p.stage}: ${p.count}${p.failed ? ` (${p.failed} failed)` : ""}`).join(", ")];
   out.push(inflight.length ? `Processing in this server: ${inflight.join(", ")}` : "Nothing processing in this server.");
   for (const f of failures) out.push(`- ${f.document_id} stuck after ${f.stage}: ${f.error}`);
+  if (stalled.length) {
+    out.push("Stalled (no runner holds them):");
+    for (const j of stalled) {
+      out.push(`- ${j.document_id} at ${j.stage}, no progress for ${j.idle_minutes} min, no error; ${j.resumed ? "resumed in this server" : "brain retry resumes it"}`);
+    }
+  }
   if (suppressed.length) {
     out.push("Facts and relations about the owner suppressed because the owner did not write the document:");
     for (const s of suppressed) out.push(`- ${s.documentId} ${s.title ?? "(untitled)"} [author ${s.author}]: ${s.count}`);

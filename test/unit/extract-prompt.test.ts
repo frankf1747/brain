@@ -30,6 +30,15 @@ describe("extractionSystem", () => {
     expect(s).toContain("facts_about_self must be empty unless the text names the owner");
   });
 
+  it("gives the fact predicates to reuse, says a predicate names the relation and not its object, and asks for values in full", () => {
+    const s = extractionSystem(reg, "owner");
+    expect(s).toMatch(/Fact predicates \(reuse one when it fits[^\n]*\n(- \w+: .+\n)+/);
+    expect(s).toContain("- working_on: ");
+    expect(s).toContain("- enrolled_in: ");
+    expect(s).toContain('never the thing it points at: working_on "Microsoft Capstone", not capstone_project');
+    expect(s).toContain('Write values in full and the same way each time: "Fall 2026", not "F26"');
+  });
+
   it("defaults to the owner rule", () => {
     expect(extractionSystem(reg)).toBe(extractionSystem(reg, "owner"));
   });

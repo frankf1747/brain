@@ -366,6 +366,24 @@ describe("other renderers", () => {
     expect(t).toContain("← applied_to Frank Fu (person, node n0)");
     expect(t).toContain('"I applied"');
   });
+  it("renderNode lists a relationship or fact once however many passages support it, with the count", () => {
+    const edge = (n: number) => ({ direction: "out" as const, type: "related_to", otherId: "n2", otherName: "Microsoft", otherType: "organization", evidence: `quote ${n}`, evidenceDocumentId: "d1", evidenceDocumentTitle: "Capstone" });
+    const t = renderNode({
+      id: "n1", type: "project", name: "Capstone", aliases: [], properties: {}, verified: false, isSelf: false,
+      edges: [edge(1), edge(2), edge(3)],
+      facts: [
+        { id: "f1", predicate: "working_on", objectText: "Capstone", verified: false },
+        { id: "f2", predicate: "working_on", objectText: "Capstone", verified: false },
+      ],
+      mentionCount: 3, mentionedIn: [{ documentId: "d1", title: "Capstone", sourceKind: "note" }],
+    });
+    expect(t.match(/→ related_to Microsoft/g)).toHaveLength(1);
+    expect(t).toContain("→ related_to Microsoft (organization, node n2) · 3 supporting passages");
+    expect(t).toContain('"quote 1"');
+    expect(t).not.toContain('"quote 2"');
+    expect(t.match(/working_on: Capstone/g)).toHaveLength(1);
+    expect(t).toContain("- working_on: Capstone (unverified) (facts f1, f2)");
+  });
   it("renderDocument shows the author and the slice window", () => {
     const t = renderDocument({ id: "d1", title: "T", sourceKind: "news", author: "other", origin: null, occurredAt: null, ingestedAt: new Date(0), summary: null, totalLength: 100, offset: 10, text: "abc" });
     expect(t).toContain("origin: n/a · author: other · about: unknown");

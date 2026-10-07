@@ -4,6 +4,7 @@ import type { Ctx } from "../../ctx.js";
 import type { Db } from "../../db.js";
 import { isRefusal, isSchemaFailure } from "../../llm/errors.js";
 import type { Author } from "../author.js";
+import { config } from "../../config.js";
 
 export const EntitySchema = z.object({
   key: z.string().describe("Short key unique within this output, such as e1, e2."),
@@ -59,6 +60,7 @@ export async function loadRegistries(sql: Db): Promise<Registries> {
 export function extractionSystem(reg: Registries, author: Author = "owner"): string {
   const nodeList = reg.nodeTypes.map((t) => `- ${t.name}: ${t.description}`).join("\n");
   const edgeList = reg.edgeTypes.map((t) => `- ${t.name}: ${t.description}`).join("\n");
+  const predicateList = Object.entries(config.factPredicates).map(([name, means]) => `- ${name}: ${means}`).join("\n");
   const owner = reg.selfName;
   // Who "I" is decides whether a statement is about the owner. Only the owner's own documents map
   // first-person pronouns to the owner; resolve.ts enforces the same rule whatever the model returns.
@@ -87,8 +89,13 @@ ${whoRules}
 - Every entity, relation and fact carries a short verbatim quote copied from the text.
 - Relations: only those the text states or clearly implies. confidence is 0 to 1. Direction matters: from_key and to_key must follow the direction in the edge type's description (for example created goes from the maker to the thing made).
 ${factsRule}
+- A fact's predicate names the relation, never the thing it points at: working_on "Microsoft Capstone", not capstone_project or capstone_partner. Write values in full and the same way each time: "Fall 2026", not "F26".
 - valid_from and valid_to mean the period during which a fact or relation holds. Leave valid_to null unless the text says it stopped being true. Do not put an event's date in valid_to.
-- Dates are ISO 8601 or null. Never invent names, dates or numbers.`;
+- Dates are ISO 8601 or null. Never invent names, dates or numbers.
+
+Fact predicates (reuse one when it fits; coin a new lowercase snake_case one only when none does):
+${predicateList}
+`;
 }
 
 /** The lines above the text in every extraction request, online and batch (backfill.ts builds its requests here too). */

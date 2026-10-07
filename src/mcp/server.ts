@@ -5,7 +5,7 @@ import type { Ctx } from "../ctx.js";
 import { storeDocument } from "../ingest/store.js";
 import { AUTHORS, keptAuthorNote } from "../ingest/author.js";
 import { suppressedDocuments } from "../ingest/set-author.js";
-import { runPipeline, stageCounts } from "../ingest/pipeline.js";
+import { runPipeline, stageCounts, stalledJobs } from "../ingest/pipeline.js";
 import { search } from "../retrieve/search.js";
 import { SearchOutputSchema, toSearchOutput } from "../retrieve/contract.js";
 import { orient } from "../retrieve/orient.js";
@@ -45,7 +45,7 @@ function instructions(readOnly: boolean): string {
     "2. Call brain_search with the user's question in plain words. Do not add names or terms the user did not mention. Narrow with source_kinds or dates when orient shows it helps.",
     "3. For a named person, organization, or project, call brain_get_node. For the full text of a result, call brain_get_document with its document id.",
     "4. Answer from the returned passages and cite them as [P1], [F1]. Make clear which parts of the answer come from the knowledge base and which are your own. If nothing relevant comes back, say so rather than answering from elsewhere, and name any other source you use.",
-    "5. After composing an answer from brain_search results, call brain_verify with the retrieval id and the answer's claims, each with the labels it cites. When presenting the answer, mark every claim whose verdict is not supported as your own addition or as weakly supported.",
+    "5. After composing an answer from brain_search results, call brain_verify with the retrieval id and the answer's claims, each with the labels it cites. When presenting the answer, mark every claim whose verdict is not supported as your own addition or as weakly supported. A verdict of supported only means the cited text contains the claim's words and numbers, not that the claim is true: a claim that swaps the entity in a passage (\"the partner is Walmart\" against a passage ranking Walmart second) or reverses a relation can still be supported, so check such claims against the passage text yourself.",
     "Every brain_search result starts with `retrieval <id> · mode: <mode>`. Mode hybrid is a full search; keyword-only and fused-order mean part of it fell back, so treat its ranking as weaker. Each passage shows its score and score kind (rerank: 0 to 1, higher is stronger; rrf: reranking was skipped; -: found through a named entity or a literal match, unscored), the search branches that found it with their ranks, and who wrote it, so you can tell strong evidence from weak. brain_explain with the retrieval id replays how that search ranked its passages.",
     "When the line after the header reads `(evidence: weak — …)`, the best passage scored below the answer threshold and the knowledge base may not hold the answer: answer only what a passage states outright, and otherwise say the knowledge base does not have it. A strong score is not proof either: a passage can be about the right person or document and still lack the detail asked for.",
   ];
@@ -160,12 +160,16 @@ export function buildServer(ctx: Ctx, opts: ServerOptions): McpServer {
 
   register(
     "brain_status",
-    { title: "Ingestion status", description: "Pipeline stage counts, failures, documents still processing in this server, and documents whose facts about the owner were suppressed because someone else wrote them.", inputSchema: {} },
+    { title: "Ingestion status", description: "Pipeline stage counts, failures, documents still processing in this server, stalled documents (unfinished, no error, no runner; a writable server resumes them), and documents whose facts about the owner were suppressed because someone else wrote them.", inputSchema: {} },
     async () => {
       try {
         const failures = await ctx.sql<{ document_id: string; stage: string; error: string }[]>`
           select document_id, stage, error from brain.ingest_jobs where error is not null order by updated_at desc limit 10`;
-        return text(renderStatus(await stageCounts(ctx), jobs.pending, failures, await suppressedDocuments(ctx.sql)));
+        const stalled = (await stalledJobs(ctx)).filter((j) => !jobs.pending.includes(j.document_id)).map((j) => {
+          if (!opts.readOnly) jobs.start(j.document_id);
+          return { ...j, resumed: !opts.readOnly };
+        });
+        return text(renderStatus(await stageCounts(ctx), jobs.pending, failures, await suppressedDocuments(ctx.sql), stalled));
       } catch (e) { return fail(e); }
     },
   );

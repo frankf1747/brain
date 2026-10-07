@@ -86,8 +86,10 @@ export function locateQuote(chunks: { id: string; content: string }[], quote: st
   return null;
 }
 
+/** Lowercase snake_case, with a known synonym mapped onto its listed predicate (config.predicateAliases). */
 export function normalizePredicate(p: string): string {
-  return p.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const snake = p.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return config.predicateAliases[snake] ?? snake;
 }
 
 function dateOrNull(s: string | null): Date | null {

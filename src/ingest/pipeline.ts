@@ -239,6 +239,22 @@ async function resetSkipped(ctx: Ctx, documentId: string): Promise<boolean> {
   return r.locked;
 }
 
+/**
+ * Unfinished documents with no error that no runner is working on: no session holds their advisory lock (withDocumentLock)
+ * and their stage has not moved for olderThanMinutes. A server that exits mid-pipeline leaves them like this, silently.
+ * The age keeps out documents queued for a slot, which hold no lock yet.
+ */
+export async function stalledJobs(ctx: Ctx, olderThanMinutes = 10, limit = 10): Promise<{ document_id: string; stage: Stage; idle_minutes: number }[]> {
+  return ctx.sql<{ document_id: string; stage: Stage; idle_minutes: number }[]>`
+    select j.document_id, j.stage, floor(extract(epoch from now() - j.updated_at) / 60)::int as idle_minutes
+    from brain.ingest_jobs j
+    where j.stage <> 'done' and j.error is null and j.updated_at < now() - make_interval(mins => ${olderThanMinutes})
+      and not exists (
+        select 1 from pg_locks l
+        where l.locktype = 'advisory' and ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended(j.document_id::text, 0))
+    order by j.updated_at limit ${limit}`;
+}
+
 export async function stageCounts(ctx: Ctx): Promise<{ stage: string; count: number; failed: number }[]> {
   const rows = await ctx.sql<{ stage: string; count: string; failed: string }[]>`
     select stage, count(*)::text as count, count(error)::text as failed from brain.ingest_jobs group by stage`;

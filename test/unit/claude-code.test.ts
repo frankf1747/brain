@@ -70,6 +70,13 @@ describe("ClaudeCodeLlm", () => {
     expect(await new ClaudeCodeLlm({ exec }).text({ system: "s", user: "u" })).toBe("hello");
     expect(calls[0].args).not.toContain("--json-schema");
   });
+
+  it("starts none of the user's MCP servers (each would launch before every call), without --bare, which drops subscription login", async () => {
+    const { exec, calls } = fakeExec({ is_error: false, result: "hello" });
+    await new ClaudeCodeLlm({ exec }).text({ system: "s", user: "u" });
+    expect(calls[0].args).toContain("--strict-mcp-config");
+    expect(calls[0].args).not.toContain("--bare");
+  });
 });
 
 describe("spawnExec", () => {

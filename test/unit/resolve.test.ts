@@ -38,6 +38,12 @@ describe("normalizePredicate", () => {
     expect(normalizePredicate(" Visa Status ")).toBe("visa_status");
     expect(normalizePredicate("graduated-from!")).toBe("graduated_from");
   });
+  it("maps known synonyms onto the listed predicate", () => {
+    expect(normalizePredicate("working_on_project")).toBe("working_on");
+    expect(normalizePredicate("Enrolled in course")).toBe("enrolled_in");
+    expect(normalizePredicate("taking_course")).toBe("enrolled_in");
+    expect(normalizePredicate("studies_at")).toBe("studies_at");
+  });
 });
 
 describe("locateQuote prefix fallback", () => {

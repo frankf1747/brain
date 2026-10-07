@@ -42,6 +42,8 @@ describe("brain MCP server", () => {
     const instructions = s.client.getInstructions() ?? "";
     expect(instructions).toContain('author: "other"');
     expect(instructions).toContain("`(evidence: weak — …)`");
+    expect(instructions).toContain("supported only means the cited text contains the claim's words and numbers");
+    expect(instructions).toContain("a claim that swaps the entity in a passage");
     const tools = (await s.client.listTools()).tools;
     const ingestTool = tools.find((t) => t.name === "brain_ingest")!;
     expect(ingestTool.description).toContain('author: "other"');
@@ -266,6 +268,32 @@ describe("brain MCP server", () => {
     expect(orient.text).toContain("1 documents");
     const status = await s.call("brain_status");
     expect(status.text).toContain("done: 1");
+    await s.close();
+  });
+
+  it("brain_status names documents left mid-pipeline by a process that exited, resumes them, and leaves ones another runner holds", async () => {
+    const s = await connect();
+    const ids: string[] = [];
+    for (const text of ["I applied to Acme Corp in September.", "I live in Los Angeles."]) {
+      const ing = await s.call("brain_ingest", { text, source_kind: "note" });
+      ids.push(/document ([0-9a-f-]{36})/.exec(ing.text)![1]);
+    }
+    await s.jobs.drain();
+    // As if the server running them exited after embedding: no error, no runner, no progress for half an hour.
+    await sql`update brain.ingest_jobs set stage = 'embedded', updated_at = now() - interval '30 minutes' where document_id in ${sql(ids)}`;
+    const held = await sql.reserve();
+    await held`select pg_advisory_lock(hashtextextended(${ids[1]}::text, 0))`;
+    try {
+      const status = await s.call("brain_status");
+      expect(status.text).toMatch(new RegExp(`\\nStalled \\(no runner holds them\\):\\n- ${ids[0]} at embedded, no progress for 30 min, no error; resumed in this server`));
+      expect(status.text).not.toContain(`${ids[1]} at embedded`);
+      await s.jobs.drain();
+      const [job] = await sql<{ stage: string }[]>`select stage from brain.ingest_jobs where document_id = ${ids[0]}`;
+      expect(job.stage).toBe("done");
+    } finally {
+      await held`select pg_advisory_unlock(hashtextextended(${ids[1]}::text, 0))`;
+      held.release();
+    }
     await s.close();
   });
 

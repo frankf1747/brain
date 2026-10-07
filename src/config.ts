@@ -93,6 +93,43 @@ export const config = {
   },
   /** Predicates that hold one current value: a newer statement in an owner document supersedes the older (spec §4.4). */
   singleValuedPredicates: ["lives_in", "visa_status", "targeting_role", "pursuing_degree", "employment_status", "current_employer", "phone", "email"],
+  /**
+   * The fact predicates the extractor is told to reuse, so one relation is not recorded under several names (working_on,
+   * capstone_project, working_on_project). It may coin another when none fits.
+   */
+  factPredicates: {
+    lives_in: "city or region the owner lives in",
+    visa_status: "immigration or work authorization status",
+    employment_status: "employed, student, looking, and so on",
+    current_employer: "organization the owner works for now",
+    targeting_role: "kind of job the owner is looking for",
+    pursuing_degree: "degree in progress, with school",
+    has_degree: "degree completed, with school",
+    studies_at: "school the owner attends",
+    enrolled_in: "course or program the owner is taking, with term",
+    working_on: "project the owner works on",
+    role_in: "the owner's role or responsibility on a project or team",
+    teammate: "person on a team with the owner",
+    has_mentor: "person mentoring or advising the owner",
+    skill: "tool, language or method the owner can use",
+    prefers: "stated preference or ranking",
+    goal: "something the owner aims to do",
+    honor: "award, scholarship or distinction",
+    open_to_relocation: "whether the owner would move for work",
+    email: "email address",
+    phone: "phone number",
+    linkedin: "LinkedIn profile",
+    github: "GitHub profile",
+  } as Record<string, string>,
+  /** Predicate names the extractor has used for a listed predicate, mapped onto it in normalizePredicate. */
+  predicateAliases: {
+    working_on_project: "working_on",
+    works_on: "working_on",
+    enrolled_in_course: "enrolled_in",
+    taking_course: "enrolled_in",
+    takes_course: "enrolled_in",
+    has_skill: "skill",
+  } as Record<string, string>,
 } as const;
 
 /**
